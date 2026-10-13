@@ -46,7 +46,7 @@ def is_local_endpoint(url: str) -> bool:
 class Settings:
     # --- Overpass -------------------------------------------------------
     overpass_urls: tuple[str, ...] = PUBLIC_OVERPASS
-    contact: str = ""                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
+    contact: str = "maxime.trevisani@square-management.com"                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
     server_timeout_s: int = 180             # [timeout:] côté serveur (défaut Overpass = 180)
     maxsize_mb: int = 0                     # 0 = ne pas fixer [maxsize:]
     max_attempts: int = 3                   # essais par endpoint
