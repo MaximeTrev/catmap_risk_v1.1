@@ -16,7 +16,7 @@ DATA_DIR = ROOT / "data"
 
 PUBLIC_OVERPASS = (
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
+    
 )
 
 
