@@ -1,0 +1,442 @@
+osm_key,osm_value,naf_division,naf_section_override,confidence,comment
+amenity,restaurant,56,,high,
+amenity,fast_food,56,,high,
+amenity,cafe,56,,high,
+amenity,bar,56,,high,
+amenity,pub,56,,high,
+amenity,food_court,56,,high,
+amenity,canteen,56,,high,
+amenity,biergarten,56,,high,
+amenity,ice_cream,56,,medium,Glacier : 56.10 ; peut relever de 10.52 (fabrication)
+amenity,nightclub,56,,medium,Discothèque : 56.30 ou 93.29 selon l'activité principale
+amenity,school,85,,high,
+amenity,college,85,,high,
+amenity,university,85,,high,
+amenity,kindergarten,85,,high,
+amenity,driving_school,85,,high,85.53 Enseignement de la conduite
+amenity,language_school,85,,high,
+amenity,music_school,85,,high,
+amenity,driver_training,85,,medium,
+amenity,library,91,,medium,91.01 Bibliothèques
+amenity,toy_library,91,,low,
+amenity,traffic_park,93,,low,Parc de sécurité routière
+amenity,bus_station,49,,high,
+amenity,taxi,49,,medium,49.32 Transports de voyageurs par taxis
+amenity,ferry_terminal,50,,medium,
+amenity,parking,52,,medium,52.21 Services auxiliaires des transports terrestres
+amenity,parking_entrance,52,,low,
+amenity,parking_space,52,,low,
+amenity,bicycle_parking,52,,low,
+amenity,motorcycle_parking,52,,low,
+amenity,weighbridge,52,,low,
+amenity,car_rental,77,,high,77.11
+amenity,bicycle_rental,77,,medium,
+amenity,boat_rental,77,,medium,
+amenity,car_sharing,77,,medium,
+amenity,boat_sharing,77,,low,
+amenity,vehicle_inspection,71,,high,"71.20 Analyses, essais et inspections techniques"
+amenity,fuel,47,,high,47.30 Commerce de détail de carburants
+amenity,charging_station,47,,low,Recharge électrique : 47.30 ou 35.14 selon l'opérateur
+amenity,compressed_air,47,,low,Service annexe de station
+amenity,car_wash,45,,medium,45.20 Entretien et réparation de véhicules
+amenity,bicycle_repair_station,95,,low,
+amenity,bank,64,,high,64.19
+amenity,atm,64,,high,
+amenity,bureau_de_change,64,,high,
+amenity,payment_centre,66,,low,
+amenity,hospital,86,,high,
+amenity,clinic,86,,high,
+amenity,doctors,86,,high,
+amenity,dentist,86,,high,
+amenity,nursing_home,87,,high,
+amenity,social_facility,88,,medium,87 ou 88 selon hébergement
+amenity,baby_hatch,88,,low,
+amenity,pharmacy,47,,high,47.73 Commerce de détail de produits pharmaceutiques
+amenity,veterinary,75,,high,
+amenity,childcare,88,,high,88.91 Accueil de jeunes enfants
+amenity,theatre,90,,high,
+amenity,arts_centre,90,,medium,
+amenity,stripclub,90,,low,
+amenity,cinema,59,,medium,59.14 Projection de films cinématographiques (section J)
+amenity,casino,92,,high,
+amenity,planetarium,91,,medium,
+amenity,community_centre,93,,low,94.99 ou 93.29 selon le gestionnaire
+amenity,social_centre,94,,low,
+amenity,events_venue,82,,low,82.30 Organisation de salons et congrès
+amenity,brothel,96,,low,
+amenity,swingerclub,96,,low,
+amenity,love_hotel,55,,low,
+amenity,police,84,,high,
+amenity,fire_station,84,,high,
+amenity,townhall,84,,high,
+amenity,courthouse,84,,high,
+amenity,prison,84,,high,
+amenity,embassy,84,,high,
+amenity,ranger_station,84,,high,
+amenity,post_office,53,,high,
+amenity,post_depot,53,,medium,
+amenity,parcel_locker,53,,low,
+amenity,recycling,38,,medium,
+amenity,waste_disposal,38,,medium,
+amenity,drinking_water,36,,low,
+amenity,water_point,36,,low,
+amenity,telephone,61,,low,
+amenity,sanitary_dump_station,37,,low,
+amenity,marketplace,47,,medium,47.8 Commerce de détail sur éventaires et marchés
+amenity,vending_machine,47,,medium,47.99 Autres commerces de détail hors magasin
+amenity,photo_booth,74,,low,
+amenity,animal_boarding,96,,medium,96.09
+amenity,animal_shelter,96,,low,
+amenity,animal_breeding,01,,medium,
+amenity,crematorium,96,,high,96.03 Services funéraires
+amenity,mortuary,96,,medium,
+amenity,grave_yard,96,,low,
+amenity,place_of_mourning,96,,low,
+amenity,place_of_worship,94,,high,94.91 Activités des organisations religieuses
+amenity,monastery,94,,medium,
+amenity,public_bath,96,,medium,96.04 Entretien corporel
+amenity,bench,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,bbq,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,shelter,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,toilets,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,dog_toilet,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,dressing_room,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,give_box,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,mailroom,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,public_bookcase,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,fountain,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,waste_basket,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,watering_place,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,baking_oven,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,hunting_stand,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,lounger,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,grit_bin,,,n/a,"Mobilier / équipement, pas un établissement"
+amenity,post_box,,,n/a,"Mobilier / équipement, pas un établissement"
+shop,alcohol,47,,high,
+shop,bakery,47,,high,
+shop,beverages,47,,high,
+shop,brewing_supplies,47,,medium,Commerce de détail par défaut
+shop,butcher,47,,high,
+shop,cheese,47,,high,
+shop,chocolate,47,,medium,Commerce de détail par défaut
+shop,coffee,47,,medium,Commerce de détail par défaut
+shop,confectionery,47,,medium,Commerce de détail par défaut
+shop,convenience,47,,high,
+shop,dairy,47,,high,
+shop,deli,47,,high,
+shop,farm,47,,low,Vente directe à la ferme : 47 ou 01
+shop,food,47,,medium,Commerce de détail par défaut
+shop,frozen_food,47,,medium,Commerce de détail par défaut
+shop,greengrocer,47,,high,
+shop,health_food,47,,medium,Commerce de détail par défaut
+shop,ice_cream,56,,medium,
+shop,nuts,47,,medium,Commerce de détail par défaut
+shop,pasta,47,,medium,Commerce de détail par défaut
+shop,pastry,47,,medium,Commerce de détail par défaut
+shop,seafood,47,,high,
+shop,spices,47,,medium,Commerce de détail par défaut
+shop,tea,47,,medium,Commerce de détail par défaut
+shop,tortilla,47,,medium,Commerce de détail par défaut
+shop,water,47,,medium,Commerce de détail par défaut
+shop,wine,47,,high,
+shop,department_store,47,,high,
+shop,general,47,,high,
+shop,kiosk,47,,high,
+shop,mall,68,,low,Centre commercial : gestion immobilière 68.20 ; commerces à l'intérieur = 47
+shop,supermarket,47,,high,
+shop,wholesale,46,,high,Commerce de gros
+shop,baby_goods,47,,medium,Commerce de détail par défaut
+shop,bag,47,,high,
+shop,boutique,47,,medium,Commerce de détail par défaut
+shop,clothes,47,,high,
+shop,fabric,47,,high,
+shop,fashion,47,,medium,Commerce de détail par défaut
+shop,fashion_accessories,47,,medium,Commerce de détail par défaut
+shop,jewelry,47,,high,
+shop,leather,47,,medium,Commerce de détail par défaut
+shop,sewing,47,,medium,Commerce de détail par défaut
+shop,shoes,47,,high,
+shop,shoe_repair,95,,high,95.23 Réparation de chaussures
+shop,tailor,14,,medium,Couture sur mesure
+shop,watches,47,,high,
+shop,wool,47,,medium,Commerce de détail par défaut
+shop,charity,47,,low,88 selon statut
+shop,second_hand,47,,high,
+shop,variety_store,47,,high,
+shop,beauty,96,,high,96.02 Soins de beauté
+shop,chemist,47,,high,
+shop,cosmetics,47,,high,
+shop,erotic,47,,medium,Commerce de détail par défaut
+shop,hairdresser,96,,high,96.02 Coiffure
+shop,hairdresser_supply,46,,medium,
+shop,hearing_aids,47,,high,
+shop,herbalist,47,,medium,Commerce de détail par défaut
+shop,massage,96,,high,96.04
+shop,medical_supply,47,,high,
+shop,nutrition_supplements,47,,medium,Commerce de détail par défaut
+shop,optician,47,,high,
+shop,perfumery,47,,high,
+shop,tattoo,96,,high,96.09
+shop,agrarian,46,,low,
+shop,appliance,47,,high,
+shop,bathroom_furnishing,47,,medium,Commerce de détail par défaut
+shop,country_store,47,,medium,Commerce de détail par défaut
+shop,doityourself,47,,high,
+shop,electrical,47,,high,
+shop,energy,47,,low,
+shop,fireplace,47,,medium,Commerce de détail par défaut
+shop,florist,47,,high,
+shop,garden_centre,47,,high,
+shop,garden_furniture,47,,medium,Commerce de détail par défaut
+shop,gas,47,,low,
+shop,glaziery,43,,medium,43.34
+shop,groundskeeping,81,,medium,81.30
+shop,hardware,47,,high,
+shop,houseware,47,,medium,Commerce de détail par défaut
+shop,locksmith,95,,low,à valider
+shop,paint,47,,high,
+shop,pottery,47,,medium,Commerce de détail par défaut
+shop,security,80,,medium,80.20
+shop,tool_hire,77,,high,77.32
+shop,trade,46,,low,Magasin pour professionnels
+shop,antiques,47,,medium,Commerce de détail par défaut
+shop,bed,47,,medium,Commerce de détail par défaut
+shop,candles,47,,medium,Commerce de détail par défaut
+shop,carpet,47,,medium,Commerce de détail par défaut
+shop,curtain,47,,medium,Commerce de détail par défaut
+shop,doors,47,,medium,Commerce de détail par défaut
+shop,flooring,47,,medium,Commerce de détail par défaut
+shop,furniture,47,,high,
+shop,household_linen,47,,medium,Commerce de détail par défaut
+shop,interior_decoration,47,,medium,Commerce de détail par défaut
+shop,kitchen,47,,high,
+shop,lighting,47,,medium,Commerce de détail par défaut
+shop,tiles,47,,medium,Commerce de détail par défaut
+shop,window_blind,47,,medium,Commerce de détail par défaut
+shop,computer,47,,high,
+shop,electronics,47,,high,
+shop,hifi,47,,high,
+shop,mobile_phone,47,,high,
+shop,printer_ink,47,,medium,Commerce de détail par défaut
+shop,radiotechnics,47,,medium,Commerce de détail par défaut
+shop,telecommunication,61,,low,Agence d'opérateur : 61.20 ou 47.42
+shop,vacuum_cleaner,47,,medium,Commerce de détail par défaut
+shop,atv,45,,low,
+shop,bicycle,47,,high,
+shop,boat,47,,low,Vente de bateaux : 46.14 / 47.64
+shop,car,45,,high,45.11 Commerce de voitures
+shop,car_parts,45,,high,45.3
+shop,car_repair,45,,high,45.20
+shop,caravan,45,,medium,
+shop,fishing,47,,medium,Commerce de détail par défaut
+shop,fuel,47,,low,Combustibles de chauffage
+shop,golf,47,,medium,Commerce de détail par défaut
+shop,hunting,47,,medium,Commerce de détail par défaut
+shop,military_surplus,47,,medium,Commerce de détail par défaut
+shop,motorcycle,45,,high,45.40
+shop,motorcycle_repair,45,,high,
+shop,outdoor,47,,medium,Commerce de détail par défaut
+shop,scooter,45,,medium,
+shop,scuba_diving,47,,low,Ou 93.29
+shop,ski,47,,medium,Commerce de détail par défaut
+shop,snowmobile,47,,medium,Commerce de détail par défaut
+shop,sports,47,,high,
+shop,surf,47,,medium,Commerce de détail par défaut
+shop,swimming_pool,47,,medium,Commerce de détail par défaut
+shop,trailer,45,,low,
+shop,truck,45,,medium,
+shop,tyres,45,,high,
+shop,art,47,,high,
+shop,camera,47,,high,
+shop,collector,47,,medium,Commerce de détail par défaut
+shop,craft,47,,medium,Commerce de détail par défaut
+shop,frame,47,,medium,Commerce de détail par défaut
+shop,games,47,,medium,Commerce de détail par défaut
+shop,model,47,,medium,Commerce de détail par défaut
+shop,music,47,,high,
+shop,musical_instrument,47,,high,
+shop,photo,47,,medium,Commerce de détail par défaut
+shop,trophy,47,,medium,Commerce de détail par défaut
+shop,video,47,,medium,Commerce de détail par défaut
+shop,video_games,47,,high,
+shop,anime,47,,medium,Commerce de détail par défaut
+shop,books,47,,high,
+shop,gift,47,,high,
+shop,lottery,92,,medium,
+shop,newsagent,47,,high,
+shop,stationery,47,,high,
+shop,ticket,79,,medium,79.90 Réservations
+shop,bookmaker,92,,high,
+shop,cannabis,47,,low,
+shop,copyshop,82,,high,82.19
+shop,dry_cleaning,96,,high,96.01
+shop,e-cigarette,47,,medium,Commerce de détail par défaut
+shop,funeral_directors,96,,high,96.03
+shop,laundry,96,,high,96.01
+shop,money_lender,64,,high,64.92
+shop,outpost,47,,low,
+shop,party,47,,low,
+shop,pawnbroker,64,,high,64.92
+shop,pest_control,81,,high,81.29
+shop,pet,47,,high,
+shop,pet_grooming,96,,high,96.09
+shop,pyrotechnics,47,,medium,Commerce de détail par défaut
+shop,religion,47,,medium,Commerce de détail par défaut
+shop,rental,77,,high,
+shop,storage_rental,52,,high,52.10
+shop,tobacco,47,,high,
+shop,toys,47,,high,
+shop,travel_agency,79,,high,79.11
+shop,vacant,,,n/a,Local vacant : pas un établissement
+shop,weapons,47,,medium,Commerce de détail par défaut
+shop,yes,,,n/a,Valeur non renseignée
+office,accountant,69,,high,
+office,lawyer,69,,high,
+office,notary,69,,high,
+office,tax_advisor,69,,high,
+office,insurance,65,,high,
+office,estate_agent,68,,high,
+office,financial,64,,medium,64 ou 66
+office,financial_advisor,66,,medium,
+office,architect,71,,high,
+office,engineer,71,,high,
+office,surveyor,71,,high,
+office,it,62,,high,
+office,employment_agency,78,,high,
+office,travel_agent,79,,high,
+office,telecommunication,61,,medium,
+office,government,84,,high,
+office,educational_institution,85,,medium,
+office,research,72,,medium,
+office,advertising_agency,73,,high,
+office,logistics,52,,medium,
+office,coworking,68,,low,
+office,association,94,,medium,
+office,ngo,94,,medium,
+office,political_party,94,,medium,
+office,religion,94,,medium,
+office,therapist,86,,medium,
+office,energy_supplier,35,,medium,
+office,water_utility,36,,medium,
+office,consulting,70,,medium,
+office,company,70,,low,Siège / bureau d'entreprise : activité réelle inconnue
+office,diplomatic,84,,medium,
+office,foundation,94,,low,
+office,guide,79,,low,
+office,publisher,58,,medium,
+office,newspaper,58,,medium,
+office,quango,84,,low,
+office,administrative,84,,medium,
+craft,electrician,43,,high,
+craft,plumber,43,,high,
+craft,painter,43,,high,
+craft,roofer,43,,high,
+craft,hvac,43,,high,
+craft,plasterer,43,,high,
+craft,tiler,43,,high,
+craft,glaziery,43,,high,
+craft,carpenter,43,,high,
+craft,builder,43,,high,
+craft,stonemason,43,,high,
+craft,insulation,43,,high,
+craft,floorer,43,,high,
+craft,brewery,11,,high,
+craft,winery,11,,high,
+craft,distillery,11,,high,
+craft,bakery,10,,high,
+craft,confectionery,10,,high,
+craft,caterer,56,,high,
+craft,gardener,81,,high,
+craft,photographer,74,,high,
+craft,tailor,14,,medium,
+craft,shoemaker,15,,medium,
+craft,sculptor,90,,medium,
+craft,handicraft,32,,low,
+craft,jeweller,32,,medium,
+craft,metal_construction,25,,medium,
+craft,sawmill,16,,high,
+craft,cabinet_maker,31,,medium,
+craft,upholsterer,95,,medium,
+craft,electronics_repair,95,,high,
+craft,car_repair,45,,high,
+craft,key_cutter,95,,low,
+craft,print,18,,medium,
+craft,printer,18,,medium,
+craft,cleaning,81,,medium,
+craft,carpet_layer,43,,medium,
+craft,clockmaker,95,,medium,
+craft,dressmaker,14,,medium,
+craft,pottery,23,,medium,
+craft,blacksmith,25,,medium,
+craft,*,,C,low,Artisanat : section C par défaut (à préciser)
+power,plant,35,,high,
+power,generator,35,,medium,
+power,substation,35,,medium,Distribution d'électricité
+power,transformer,35,,low,
+power,*,35,,low,power=* : section D
+healthcare,hospital,86,,high,
+healthcare,clinic,86,,high,
+healthcare,doctor,86,,high,
+healthcare,dentist,86,,high,
+healthcare,laboratory,86,,high,
+healthcare,physiotherapist,86,,high,
+healthcare,pharmacy,47,,high,
+healthcare,nursing_home,87,,high,
+healthcare,*,86,,low,healthcare=* : section Q
+tourism,hotel,55,,high,
+tourism,motel,55,,high,
+tourism,hostel,55,,high,
+tourism,guest_house,55,,high,
+tourism,apartment,55,,high,
+tourism,chalet,55,,high,
+tourism,camp_site,55,,high,
+tourism,caravan_site,55,,high,
+tourism,museum,91,,high,
+tourism,gallery,90,,medium,
+tourism,zoo,91,,medium,91.04
+tourism,theme_park,93,,high,
+tourism,attraction,93,,low,
+tourism,information,79,,low,
+leisure,fitness_centre,93,,high,
+leisure,sports_centre,93,,high,
+leisure,swimming_pool,93,,high,
+leisure,stadium,93,,high,
+leisure,golf_course,93,,high,
+leisure,amusement_arcade,93,,high,
+leisure,bowling_alley,93,,high,
+leisure,ice_rink,93,,high,
+leisure,water_park,93,,high,
+leisure,dance,93,,high,
+leisure,marina,52,,low,
+landuse,industrial,,C,low,Zone industrielle : section C par défaut
+landuse,retail,47,,low,
+landuse,quarry,08,,medium,
+landuse,farmland,01,,medium,
+landuse,farmyard,01,,medium,
+landuse,orchard,01,,medium,
+landuse,vineyard,01,,medium,
+landuse,commercial,,,low,Zone commerciale : non classable précisément
+building,industrial,,C,low,Bâtiment industriel : section C
+building,retail,47,,low,
+building,supermarket,47,,medium,
+building,hospital,86,,medium,
+building,school,85,,medium,
+building,university,85,,medium,
+building,college,85,,medium,
+building,hotel,55,,medium,
+building,warehouse,52,,low,
+building,church,94,,low,Lieu de culte
+building,cathedral,94,,low,Lieu de culte
+building,chapel,94,,low,Lieu de culte
+building,mosque,94,,low,Lieu de culte
+building,temple,94,,low,Lieu de culte
+building,synagogue,94,,low,Lieu de culte
+building,civic,84,,low,
+building,government,84,,low,
+building,public,84,,low,
+industrial,*,,C,low,industrial=* : section C par défaut (à préciser)
+man_made,works,,C,low,Usine : section C par défaut
+man_made,wastewater_plant,37,,medium,
+man_made,water_works,36,,medium,
+man_made,petroleum_well,06,,medium,
+man_made,storage_tank,52,,low,

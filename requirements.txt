@@ -1,0 +1,9 @@
+# Plus de geopandas, pyproj, shapely, overpy, unidecode ni selenium : le code utilise NumPy/pandas.
+streamlit>=1.40
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+plotly>=5.18
+folium>=0.15
+streamlit-folium>=0.20
+openpyxl>=3.1

@@ -1,0 +1,31 @@
+# Instance Overpass LOCALE (image communautaire wiktorn/overpass-api).
+# À VALIDER dans votre environnement : ce fichier n'a pas pu être exécuté pendant le développement.
+#
+#   docker compose -f docker-compose.overpass.yml up -d
+#   (l'import initial peut durer de quelques minutes -extrait pays- à plusieurs heures -planète-)
+#   export OVERPASS_URLS=http://localhost:12345/api/interpreter
+#   export CATMAP_CACHE_NAMESPACE=monaco-2026-10   # trace l'instantané utilisé
+#
+# Par défaut : petit extrait de test (Monaco). Remplacez par l'extrait voulu (Geofabrik), par exemple
+#   OVERPASS_PLANET_URL: https://download.geofabrik.de/europe/france-latest.osm.bz2
+#   OVERPASS_DIFF_URL:   https://download.geofabrik.de/europe/france-updates/
+services:
+  overpass:
+    image: wiktorn/overpass-api:latest
+    container_name: catmap-overpass
+    ports:
+      - "12345:80"
+    volumes:
+      - overpass_db:/db
+    environment:
+      OVERPASS_MODE: init
+      OVERPASS_META: "no"
+      OVERPASS_PLANET_URL: https://download.geofabrik.de/europe/monaco-latest.osm.bz2
+      OVERPASS_DIFF_URL: https://download.geofabrik.de/europe/monaco-updates/
+      OVERPASS_UPDATE_SLEEP: "3600"        # supprimer OVERPASS_DIFF_URL pour un instantané figé
+      OVERPASS_RULES_LOAD: "10"            # génère les « areas » (nécessaire au filtre par pays)
+      OVERPASS_ALLOW_DUPLICATE_QUERIES: "yes"
+      OVERPASS_USE_AREAS: "true"
+    restart: unless-stopped
+volumes:
+  overpass_db:

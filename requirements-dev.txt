@@ -1,0 +1,2 @@
+-r requirements.txt
+pytest>=8        # facultatif : les tests utilisent unittest (python -m unittest) et sont aussi compatibles pytest

@@ -1,0 +1,147 @@
+"""Test de fumée de app.py avec un faux module Streamlit (exécuté seulement si Streamlit n'est pas installé).
+
+Il exécute réellement les 3 pages, une recherche (Overpass simulé), les téléchargements et le
+croisement vigilance, pour détecter fautes de frappe, colonnes manquantes et exceptions.
+Avec Streamlit installé, utiliser plutôt ``streamlit.testing.v1.AppTest`` (voir README).
+"""
+import importlib
+import importlib.util
+import sys
+import types
+import unittest
+from unittest import mock
+
+from tests.helpers import node, payload, square, way
+
+HAS_STREAMLIT = importlib.util.find_spec("streamlit") is not None
+
+
+class SS(dict):
+    __getattr__ = dict.get
+    def __setattr__(self, k, v): self[k] = v
+
+
+class Container:
+    """Comme st.columns / st.tabs / st.sidebar : les méthodes déléguent à ``st`` ; utilisable avec ``with``."""
+    def __init__(self, st): self._st = st
+    def __getattr__(self, name): return getattr(self._st, name)
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def make_fakes(script):
+    st = types.ModuleType("streamlit")
+    st.session_state = SS()
+    st.secrets = mock.MagicMock(); st.secrets.items.side_effect = RuntimeError("no secrets")
+    st.calls = []
+    M = mock.MagicMock
+
+    def rec(name, ret=None):
+        def f(*a, **k):
+            st.calls.append((name, a, k)); return ret
+        return f
+
+    def deco(*a, **k):
+        def wrap(fn):
+            fn.clear = lambda: None
+            return fn
+        return wrap(a[0]) if a and callable(a[0]) else wrap
+
+    st.cache_resource, st.cache_data = deco, deco
+    st.radio = lambda label, options=None, **k: script.get(k.get("key") or label, options[0])
+    st.text_input = lambda label, **k: script.get(k.get("key"), "")
+    st.text_area = lambda label, **k: script.get(k.get("key"), "")
+    st.file_uploader = lambda *a, **k: script.get(k.get("key"))
+    st.checkbox = lambda label, value=False, **k: value
+    st.multiselect = lambda label, options=None, default=None, **k: script.get(k.get("key"), default or [])
+    st.slider = lambda label, mn, mx, value, *a, **k: value
+    st.selectbox = lambda label, options, **k: options[0]
+    st.button = lambda label, **k: script.get("button:" + label, False) and not k.get("disabled")
+    st.download_button = lambda *a, **k: (st.calls.append(("download", a[0], a[1].__len__() if hasattr(a[1], "__len__") else 0)), False)[1]
+    st.columns = lambda n, **k: [Container(st) for _ in range(n if isinstance(n, int) else len(n))]
+    st.tabs = lambda labels: [Container(st) for _ in labels]
+    st.empty = lambda: M()
+    st.expander = lambda *a, **k: Container(st)
+    st.sidebar = Container(st)
+    for n in ("title", "subheader", "caption", "markdown", "info", "warning", "error", "success", "divider",
+              "dataframe", "plotly_chart", "set_page_config", "image", "metric"):
+        setattr(st, n, rec(n))
+    st.column_config = M()
+    plotly = types.ModuleType("plotly"); px = types.ModuleType("plotly.express"); px.pie = M(); plotly.express = px
+    folium = M(); sf = types.ModuleType("streamlit_folium"); sf.st_folium = rec("st_folium")
+    return {"streamlit": st, "plotly": plotly, "plotly.express": px, "folium": folium, "folium.plugins": folium.plugins,
+            "streamlit_folium": sf}, st
+
+
+@unittest.skipIf(HAS_STREAMLIT, "Streamlit installé : utiliser AppTest")
+class TestAppSmoke(unittest.TestCase):
+    def load(self, script):
+        mods, st = make_fakes(script)
+        # on n'installe/retire QUE les faux modules (patch.dict purgerait aussi numpy/pandas)
+        for k, v in mods.items():
+            sys.modules[k] = v
+            self.addCleanup(sys.modules.pop, k, None)
+        sys.modules.pop("app", None)
+        app = importlib.import_module("app")
+        self.addCleanup(lambda: sys.modules.pop("app", None))
+        return app, st
+
+    def fake_fetch(self):
+        from catmap.overpass import FetchResult
+        els = [way(1, "IKEA Lyon", square(4.85, 45.75, 0.002), shop="furniture"),
+               node(2, "IKEA Berlin", 13.4, 52.5, shop="furniture"), node(3, "Café IKEA", 2.35, 48.85, amenity="cafe")]
+        return mock.patch("catmap.overpass.OverpassClient.fetch",
+                          return_value=FetchResult(payload(els), "http://fake", "2026-09-30T20:00:00Z", False, 1, 0.1))
+
+    def test_geolocalisation_flow_and_other_pages(self):
+        script = {"Mode de saisie": "Un nom d'entreprise", "in_name": "IKEA SA", "button:Lancer la recherche": True}
+        app, st = self.load(script)
+        with self.fake_fetch(), mock.patch.dict("os.environ", {"CATMAP_CACHE": "0"}):
+            app.main()
+        res = st.session_state["result"]
+        self.assertEqual(len(res.sites), 3)
+        names = [c[0] for c in st.calls]
+        self.assertIn("dataframe", names); self.assertIn("st_folium", names); self.assertIn("download", names)
+        self.assertFalse([c for c in st.calls if c[0] == "error"])
+
+        # Page vigilance croisée avec les sites (clé API factice, réseau simulé)
+        from catmap import vigilance as vg
+        from tests.test_vigilance import GEO, PAYLOAD
+        script["Navigation"] = "Cartographies avancées"
+        st.calls.clear()
+        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+                mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
+                mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertTrue([c for c in st.calls if c[0] == "metric"])
+
+        script["Navigation"] = "Temps réel"
+        st.calls.clear()
+        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+                mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
+                mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_empty_search_does_not_crash(self):
+        from catmap.overpass import FetchResult
+        app, st = self.load({"Mode de saisie": "Un nom d'entreprise", "in_name": "Rien", "button:Lancer la recherche": True})
+        with mock.patch("catmap.overpass.OverpassClient.fetch", return_value=FetchResult(payload([]), "x", "", False, 1, 0.0)):
+            app.main()
+        self.assertEqual(len(st.session_state["result"].sites), 0)
+        self.assertTrue([c for c in st.calls if c[0] == "info"])
+        self.assertFalse([c for c in st.calls if c[0] == "error"])
+
+    def test_no_credentials_page_is_informative(self):
+        app, st = self.load({"Navigation": "Temps réel"})
+        with mock.patch.dict("os.environ", {}, clear=False):
+            for k in ("METEOFRANCE_API_KEY", "METEOFRANCE_CLIENT_ID", "METEOFRANCE_CLIENT_SECRET"):
+                import os; os.environ.pop(k, None)
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        self.assertTrue([c for c in st.calls if c[0] == "info"])
+
+
+if __name__ == "__main__":
+    unittest.main()

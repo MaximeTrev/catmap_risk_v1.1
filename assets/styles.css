@@ -1,0 +1,27 @@
+/* CatMap Risk : identité conservée (or #bd8e43, gris #404140) ; texte sombre pour le contraste (AA). */
+:root { --cm-gold:#bd8e43; --cm-gold-dark:#8a6528; --cm-grey:#404140; --cm-bg:#f3f3f3; --cm-ink:#232323; }
+
+.stApp { background-color: var(--cm-bg); }
+header[data-testid="stHeader"] { background-color: var(--cm-grey); }
+
+.stMainBlockContainer { color: var(--cm-ink); font-family: "Segoe UI", system-ui, sans-serif; }
+.stMainBlockContainer h1, .stMainBlockContainer h2, .stMainBlockContainer h3 { color: var(--cm-grey); }
+.stMainBlockContainer h1 { border-bottom: 3px solid var(--cm-gold); padding-bottom: .3rem; }
+
+section[data-testid="stSidebar"] { background-color: var(--cm-gold) !important; border-top-right-radius: 24px; border-bottom-right-radius: 24px; }
+section[data-testid="stSidebar"] * { color: #1b1b1b; }
+
+/* Indicateurs */
+div[data-testid="stMetric"] { background: #fff; border-left: 4px solid var(--cm-gold); border-radius: 8px; padding: .6rem .9rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+div[data-testid="stMetricLabel"] p { color: var(--cm-grey); font-size: .85rem; }
+
+/* Boutons primaires */
+button[kind="primary"] { background-color: var(--cm-grey); border: 2px solid var(--cm-gold); color: #fff; }
+button[kind="primary"]:hover { background-color: var(--cm-gold-dark); border-color: var(--cm-gold-dark); color: #fff; }
+
+/* Bandeaux de statut */
+.cm-badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:.78rem; font-weight:600; color:#fff; }
+.cm-ok { background:#2e7d32; } .cm-warn { background:#b26a00; } .cm-err { background:#b3261e; }
+
+/* Carte */
+iframe[title="streamlit_folium.st_folium"] { border: 3px solid var(--cm-gold); border-radius: 10px; }
