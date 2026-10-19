@@ -163,7 +163,10 @@ def _site_map(df: pd.DataFrame):
             f"background:{colors[k]};margin-right:4px'></span>{html.escape(k)}</span>" for k in shown)
             + (" …" if len(keys) > len(shown) else ""), unsafe_allow_html=True)
     key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}"
-    st_folium(m, height=620, returned_objects=[], key=key)
+    try:
+        st_folium(m, height=620, returned_objects=[], key=key, use_container_width=True)
+    except TypeError:  # anciennes versions de streamlit-folium
+        st_folium(m, height=620, width=1400, returned_objects=[], key=key)
     st.caption(f"{len(d)} site(s) affiché(s) : ceux du tableau ci-dessus (filtres Entreprises / Pays appliqués). "
                "Cliquez sur un point pour le détail ; le sélecteur en haut à droite change le fond de carte.")
 
