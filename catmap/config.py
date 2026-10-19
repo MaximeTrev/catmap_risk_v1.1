@@ -47,9 +47,12 @@ class Settings:
     # --- Overpass -------------------------------------------------------
     overpass_urls: tuple[str, ...] = PUBLIC_OVERPASS
     contact: str = "maxime.trevisani@square-management.com"                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
-    server_timeout_s: int = 180             # [timeout:] côté serveur (défaut Overpass = 180)
+    server_timeout_s: int = 280             # [timeout:] côté serveur, recherche regex (comme la v1)
+    fast_timeout_s: int = 60                # [timeout:] en mode exact (rapide)
+    total_budget_s: float = 600.0           # temps maxi par entreprise, tous serveurs confondus
+    ping_timeout_s: float = 15.0            # test de connexion
     maxsize_mb: int = 0                     # 0 = ne pas fixer [maxsize:]
-    max_attempts: int = 3                   # essais par endpoint
+    max_attempts: int = 2                   # essais par endpoint
     backoff_base_s: float = 5.0             # attente de base (exponentielle + jitter)
     backoff_max_s: float = 90.0
     min_interval_s: float = 1.0             # délai mini entre deux requêtes (0 en local)
@@ -71,11 +74,11 @@ class Settings:
 
     @property
     def client_timeout_s(self) -> float:
-        return self.server_timeout_s + 30
+        return self.server_timeout_s + 20
 
     @property
     def user_agent(self) -> str:
-        return f"CatMap/3.0 (+{self.contact})" if self.contact else "CatMap/3.0"
+        return f"CatMap/3.1 (contact: {self.contact})" if self.contact else "CatMap/3.1"
 
     @property
     def uses_public_overpass(self) -> bool:
@@ -109,9 +112,11 @@ def load_settings(env: Optional[Mapping[str, str]] = None, secrets: Optional[Map
     return Settings(
         overpass_urls=urls,
         contact=get("CATMAP_CONTACT"),
-        server_timeout_s=_to_int(get("OVERPASS_TIMEOUT_S"), 180),
+        server_timeout_s=_to_int(get("OVERPASS_TIMEOUT_S"), 280),
+        fast_timeout_s=_to_int(get("OVERPASS_FAST_TIMEOUT_S"), 60),
+        total_budget_s=_to_float(get("OVERPASS_TOTAL_BUDGET_S"), 600.0),
         maxsize_mb=_to_int(get("OVERPASS_MAXSIZE_MB"), 0),
-        max_attempts=max(1, _to_int(get("OVERPASS_MAX_ATTEMPTS"), 3)),
+        max_attempts=max(1, _to_int(get("OVERPASS_MAX_ATTEMPTS"), 2)),
         backoff_base_s=_to_float(get("OVERPASS_BACKOFF_S"), 0.5 if local else 5.0),
         backoff_max_s=_to_float(get("OVERPASS_BACKOFF_MAX_S"), 30.0 if local else 90.0),
         min_interval_s=_to_float(get("OVERPASS_MIN_INTERVAL_S"), 0.0 if local else 1.0),
