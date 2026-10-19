@@ -194,6 +194,9 @@ def _options_ui() -> SearchOptions:
             min_score = st.slider("Score minimal conservé", 0.0, 1.0, 0.0, 0.05,
                                   help="1,0 = identifiant Wikidata ; 0,9 = nom identique ; 0,75 = commence par ; 0,6 = contenu.")
             dedup = st.slider("Fusion des doublons node/way (mètres)", 0, 100, 25)
+            fast = st.checkbox("Mode rapide (noms exacts uniquement)", False,
+                                help="Interroge des graphies exactes (indexées) au lieu d'une regex : beaucoup plus rapide, "
+                                     "mais ne trouve pas « IKEA Paris Nord » si le nom n'est pas exactement « IKEA ».")
     if s.uses_public_overpass:
         st.caption("Serveurs Overpass **publics** : usage raisonnable demandé. "
                    + ("" if s.contact else "Renseignez `CATMAP_CONTACT` (e-mail ou URL) pour vous identifier. ")
@@ -202,7 +205,8 @@ def _options_ui() -> SearchOptions:
         st.caption(f"Instance Overpass **locale** : {s.overpass_urls[0]}")
     return SearchOptions(include_operator=op, include_relations=rel, require_business_tag=biz,
                          countries=tuple(p.rsplit("(", 1)[1].rstrip(")") for p in picked),
-                         strict_word_match=strict, min_score=min_score, dedup_radius_m=float(dedup))
+                         strict_word_match=strict, min_score=min_score, dedup_radius_m=float(dedup),
+                         search_mode="exact" if fast else "regex")
 
 
 def _run_search(queries: list[NameQuery], options: SearchOptions):
@@ -212,7 +216,10 @@ def _run_search(queries: list[NameQuery], options: SearchOptions):
     def cb(done: int, total: int, name: str):
         bar.progress(done / total, text=f"{done}/{total} — {name}")
 
-    res = geolocate(queries, options, get_client(), get_settings(), get_countries(), get_naf(), progress=cb)
+    status = st.empty()
+    res = geolocate(queries, options, get_client(), get_settings(), get_countries(), get_naf(), progress=cb,
+                    on_event=(lambda m: status.caption(m)) if get_settings().max_workers == 1 else None)
+    status.empty()
     box.empty()
     st.session_state["result"] = res
     st.session_state["result_options"] = options
@@ -312,6 +319,15 @@ def page_geolocalisation():
     for w in warns[:5]:
         st.warning(w)
     options = _options_ui()
+    with st.expander("Tester la connexion Overpass"):
+    if st.button("Lancer le test"):
+        with st.spinner("Test des serveurs…"):
+            rows = get_client().ping()
+        for r in rows:
+            (st.success if r["ok"] else st.error)(f"{r['endpoint']} — {r['latence_s']} s — {r['message']}")
+        if not any(r["ok"] for r in rows):
+            st.info("Aucun serveur joignable depuis cet hébergement. Voir le README : instance Overpass "
+                    "payante/auto-hébergée accessible depuis internet, variable `OVERPASS_URLS`.")
     if st.button("Lancer la recherche", type="primary", disabled=not queries):
         _run_search(queries, options)
     res = st.session_state.get("result")
