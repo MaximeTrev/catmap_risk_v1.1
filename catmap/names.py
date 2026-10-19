@@ -222,3 +222,57 @@ def valid_wikidata(value: Optional[str]) -> Optional[str]:
         return None
     v = str(value).strip().upper()
     return v if _QID.match(v) else None
+
+# --------------------------------------------------------------------------
+# Recherche exacte (rapide) : variantes de graphie pour l'index d'Overpass
+# --------------------------------------------------------------------------
+# Overpass n'indexe que les égalités exactes ``["name"="IKEA"]``. Une regex insensible à la
+# casse ``["name"~"ikea",i]`` oblige le serveur à parcourir tous les éléments nommés du
+# périmètre (très lent sur la planète : timeouts et 504 sur les serveurs publics). On interroge
+# donc quelques graphies courantes en égalité exacte ; la tolérance fine (casse, accents,
+# séparateurs, mot entier) est ensuite appliquée en Python par ``NameMatcher``.
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def ql_escape(value: str) -> str:
+    """Échappe une valeur littérale pour Overpass QL (entre guillemets) : une saisie utilisateur
+    ne peut pas fermer la chaîne ni injecter d'instruction."""
+    v = _CTRL.sub(" ", str(value))
+    return v.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def exact_variants(name: str, max_variants: int = 24) -> list[str]:
+    """Graphies à interroger en égalité exacte, par ordre de priorité.
+
+    Saisie telle quelle, MAJUSCULES, minuscules, « Majuscule À Chaque Mot », « Majuscule initiale »,
+    puis version sans accents, tirets à la place des espaces et apostrophe typographique.
+    """
+    base = " ".join(str(name).split())
+    if not normalize_name(base):
+        raise ValueError("Nom d'entreprise vide après normalisation")
+    bases = [base]
+    plain = _strip_latin_accents(base.translate(_SPECIAL))
+    if plain != base:
+        bases.append(plain)
+
+    forms: list[str] = []
+
+    def add(x: str) -> None:
+        if x and x not in forms:
+            forms.append(x)
+
+    for b in bases:
+        add(b)
+        add(b.upper())
+        add(b.lower())
+        add(" ".join(w[:1].upper() + w[1:].lower() for w in b.split(" ")))
+        add(b[:1].upper() + b[1:].lower())
+    if " " in base:
+        for f in list(forms):
+            add(f.replace(" ", "-"))
+    for f in list(forms):
+        if "'" in f:
+            add(f.replace("'", "’"))
+        elif "’" in f:
+            add(f.replace("’", "'"))
+    return forms[:max_variants]
