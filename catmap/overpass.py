@@ -222,7 +222,28 @@ class OverpassClient:
         log.info("Nouvelle tentative dans %.1f s", wait)
         self._sleep(wait)
 
-     def _emit(self, on_event, msg: str) -> None:
+
+
+    def fetch(self, query: str, use_cache: bool = True,
+              on_event: Optional[Callable[[str], None]] = None) -> FetchResult:
+        t0 = time.monotonic()
+        key = self._cache_key(query)
+        if use_cache and self.settings.cache_enabled:
+            hit = self._cache_read(key)
+            if hit:
+                data = hit["data"]
+                return FetchResult(
+                    data=data, endpoint=str(hit.get("endpoint", "cache")),
+                    snapshot=_snapshot(data), from_cache=True, attempts=0,
+                    elapsed_s=time.monotonic() - t0,
+                )
+
+        budget = self.settings.total_budget_s
+        attempts = 0
+        partial: Optional[OverpassPartialResult] = None
+        errors: list[str] = []
+
+    def _emit(self, on_event, msg: str) -> None:
         log.info("%s", msg)
         if on_event:
             try:
