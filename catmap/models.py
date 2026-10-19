@@ -33,12 +33,13 @@ class SearchOptions:
     strict_word_match: bool = True      # mot entier obligatoire (recommandé)
     min_score: float = 0.0              # score minimal conservé (0 = tout garder)
     dedup_radius_m: float = 25.0        # fusion node/way d'un même site ; 0 = désactivé
+    search_mode: str = "regex"          # "regex" (défaut, comme la v1) | "exact" (rapide, rappel plus faible)
 
     def cache_signature(self) -> dict:
         return {
             "op": self.include_operator, "rel": self.include_relations,
             "biz": self.require_business_tag, "c": list(self.countries),
-            "bbox": list(self.bbox) if self.bbox else None,
+            "bbox": list(self.bbox) if self.bbox else None, "mode": self.search_mode,
         }
 
 
