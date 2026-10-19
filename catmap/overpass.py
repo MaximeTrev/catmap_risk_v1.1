@@ -28,7 +28,7 @@ import requests
 
 from .config import Settings
 from .models import NameQuery, SearchOptions
-from .names import server_regex
+from .names import exact_variants, ql_escape, server_regex
 
 log = logging.getLogger("catmap.overpass")
 
@@ -47,15 +47,17 @@ _ISO2 = re.compile(r"^[A-Z]{2}$")
 def build_query(q: NameQuery, options: SearchOptions, settings: Settings) -> str:
     """Construit la requête Overpass QL.
 
-    Choix :
-    - regex serveur = sous-chaîne tolérante (voir ``names.server_regex``) ; la précision « mot
-      entier » est appliquée côté Python ;
-    - recherche sur ``name`` ET ``brand`` (rappel), ``operator`` en option (bruit) ;
-    - exclusion des rues, lieux-dits, jonctions et limites administratives ;
-    - filtre « établissement » (présence d'un tag shop/amenity/office/…) activable ;
-    - ``out body geom`` : géométrie complète des ways et relations, sans la récursion ``>``.
+    Mode « regex » (défaut, même logique que la v1 qui fonctionnait) : ``name`` en regex insensible
+    à la casse (trouve « IKEA Paris Nord »), ``brand`` et ``brand:wikidata`` en égalité exacte
+    (indexée, bon marché). Mode « exact » (rapide) : tout en égalité exacte, rappel plus faible.
+
+    Les filtres serveur sont volontairement minimaux (comme la v1 : ni highway, ni place, ni
+    junction) : « établissement » et « boundary » sont contrôlés côté Python (``parsing``),
+    une regex sur les clés étant très coûteuse pour Overpass.
     """
-    lines = [f"[out:json][timeout:{int(settings.server_timeout_s)}]"
+    fast = options.search_mode == "exact"
+    timeout = settings.fast_timeout_s if fast else settings.server_timeout_s
+    lines = [f"[out:json][timeout:{int(timeout)}]"
              + (f"[maxsize:{int(settings.maxsize_mb) * 1024 * 1024}]" if settings.maxsize_mb > 0 else "")
              + ";"]
 
@@ -74,18 +76,20 @@ def build_query(q: NameQuery, options: SearchOptions, settings: Settings) -> str
             raise ValueError(f"bbox invalide : {options.bbox}")
         scope = f"({s},{w},{n},{e})"
 
-    filters = '[!"highway"][!"place"][!"junction"][!"boundary"]'
-    if options.require_business_tag:
-        filters += '[~"^(' + "|".join(BUSINESS_KEYS) + ')$"~"."]'
-
+    filters = '[!"highway"][!"place"][!"junction"]'
     elements = ["node", "way"] + (["rel[type=multipolygon]"] if options.include_relations else [])
+    exact = [ql_escape(v) for v in exact_variants(q.search_name)]
     rx = server_regex(q.search_name)
-    fields = ["name", "brand"] + (["operator"] if options.include_operator else [])
+
+    def conds(field: str, regex: bool) -> list[str]:
+        if regex and not fast:
+            return [f'["{field}"~"{rx}",i]']
+        return [f'["{field}"="{v}"]' for v in exact]
 
     stmts: list[str] = []
     for el in elements:
-        for f in fields:
-            stmts.append(f'  {el}["{f}"~"{rx}",i]{filters}{scope};')
+        for c in conds("name", True) + conds("brand", False) + (conds("operator", True) if options.include_operator else []):
+            stmts.append(f"  {el}{c}{filters}{scope};")
         if q.wikidata:
             stmts.append(f'  {el}["brand:wikidata"="{q.wikidata}"]{filters}{scope};')
 
@@ -133,8 +137,10 @@ class FetchResult:
 
 
 _FAILURE_REMARK = re.compile(r"runtime error|timed out|out of memory|too many|rate_limited", re.I)
-_RETRY_STATUS = {429, 500, 502, 503, 504}
-
+# Réessayer a un sens pour une surcharge passagère ; un 504 / timeout sur une requête lourde
+# échouerait de nouveau : on passe directement au serveur suivant.
+_RETRY_STATUS = {429, 502, 503}
+_SKIP_STATUS = {500, 504}
 
 # --------------------------------------------------------------------------
 # Client
@@ -216,7 +222,16 @@ class OverpassClient:
         log.info("Nouvelle tentative dans %.1f s", wait)
         self._sleep(wait)
 
-    def fetch(self, query: str, use_cache: bool = True) -> FetchResult:
+     def _emit(self, on_event, msg: str) -> None:
+        log.info("%s", msg)
+        if on_event:
+            try:
+                on_event(msg)
+            except Exception:  # un affichage ne doit jamais casser la recherche
+                pass
+
+    def fetch(self, query: str, use_cache: bool = True,
+              on_event: Optional[Callable[[str], None]] = None) -> FetchResult:
         t0 = time.monotonic()
         key = self._cache_key(query)
         if use_cache and self.settings.cache_enabled:
@@ -229,28 +244,42 @@ class OverpassClient:
                     elapsed_s=time.monotonic() - t0,
                 )
 
+        budget = self.settings.total_budget_s
         attempts = 0
         partial: Optional[OverpassPartialResult] = None
-        last_error = "aucun endpoint configuré"
+        errors: list[str] = []
+
+        def remaining() -> float:
+            return budget - (time.monotonic() - t0) if budget > 0 else float("inf")
+
+        def fail(endpoint: str, msg: str) -> None:
+            errors.append(f"{endpoint} : {msg}")
+            log.warning("%s : %s", endpoint, msg)
+
         for endpoint in self.settings.overpass_urls:
             for attempt in range(1, self.settings.max_attempts + 1):
+                if remaining() <= 0:
+                    errors.append(f"budget de temps épuisé ({budget:.0f} s)")
+                    break
                 attempts += 1
                 self._throttle()
+                self._emit(on_event, f"Interrogation de {endpoint} (essai {attempt}/{self.settings.max_attempts})…")
+                timeout = max(5.0, min(_client_timeout(query, self.settings), remaining()))
                 try:
                     resp = self.session.post(
-                        endpoint, data={"data": query}, headers=self._headers(),
-                        timeout=self.settings.client_timeout_s,
+                        endpoint, data={"data": query}, headers=self._headers(), timeout=timeout,
                     )
-                except (requests.Timeout, requests.ConnectionError) as e:
-                    last_error = f"{endpoint} : {type(e).__name__}"
-                    log.warning("%s", last_error)
-                    if attempt < self.settings.max_attempts:
+                except requests.Timeout as e:
+                    fail(endpoint, f"délai dépassé après {timeout:.0f} s ({type(e).__name__}) ; requête trop lourde ou serveur saturé")
+                    break  # inutile de rejouer la même requête sur ce serveur
+                except requests.ConnectionError as e:
+                    fail(endpoint, f"connexion impossible : {str(e)[:300]}")
+                    if attempt < self.settings.max_attempts and remaining() > 0:
                         self._backoff(attempt)
                         continue
                     break
                 except requests.RequestException as e:
-                    last_error = f"{endpoint} : {e}"
-                    log.warning("%s", last_error)
+                    fail(endpoint, f"{type(e).__name__} : {str(e)[:300]}")
                     break
 
                 status = resp.status_code
@@ -258,15 +287,13 @@ class OverpassClient:
                     try:
                         data = resp.json()
                     except ValueError:
-                        last_error = f"{endpoint} : réponse non JSON"
-                        log.warning("%s", last_error)
+                        fail(endpoint, "réponse non JSON")
                         break
                     remark = str(data.get("remark") or "")
                     if remark and _FAILURE_REMARK.search(remark):
-                        last_error = f"{endpoint} : {remark}"
-                        log.warning("Résultat partiel : %s", last_error)
+                        fail(endpoint, remark)
                         partial = OverpassPartialResult(remark, data, endpoint)
-                        break  # on retentera sur un autre serveur, pas sur celui-ci
+                        break
                     if self.settings.cache_enabled:
                         self._cache_write(key, query, endpoint, data)
                     return FetchResult(
@@ -275,21 +302,44 @@ class OverpassClient:
                     )
                 if status == 400:
                     raise OverpassQueryError(f"{endpoint} a refusé la requête : {resp.text[:500]}")
-                if status in _RETRY_STATUS:
-                    last_error = f"{endpoint} : HTTP {status}"
-                    log.warning("%s", last_error)
-                    if attempt < self.settings.max_attempts:
-                        self._backoff(attempt, resp.headers.get("Retry-After"))
-                        continue
-                    break
-                last_error = f"{endpoint} : HTTP {status}"
-                log.warning("%s", last_error)
+                fail(endpoint, f"HTTP {status}")
+                if status in _RETRY_STATUS and attempt < self.settings.max_attempts and remaining() > 0:
+                    self._backoff(attempt, resp.headers.get("Retry-After"))
+                    continue
                 break
 
         if partial is not None:
             raise partial
-        raise OverpassUnavailable(last_error)
+        raise OverpassUnavailable(" | ".join(errors) if errors else "aucun endpoint configuré")
 
+    def ping(self) -> list[dict]:
+        """Diagnostic : requête minimale sur chaque endpoint (latence, statut, message d'erreur)."""
+        out = []
+        q = "[out:json][timeout:10];node(1);out;"
+        for ep in self.settings.overpass_urls:
+            t = time.monotonic()
+            row = {"endpoint": ep, "ok": False, "latence_s": None, "message": ""}
+            try:
+                r = self.session.post(ep, data={"data": q}, headers=self._headers(),
+                                      timeout=self.settings.ping_timeout_s)
+                row["latence_s"] = round(time.monotonic() - t, 2)
+                if r.status_code == 200:
+                    row["ok"] = True
+                    row["message"] = ("OK " + _snapshot(r.json())).strip()
+                else:
+                    row["message"] = f"HTTP {r.status_code}"
+            except requests.RequestException as e:
+                row["latence_s"] = round(time.monotonic() - t, 2)
+                row["message"] = f"{type(e).__name__} : {str(e)[:300]}"
+            except ValueError:
+                row["ok"], row["message"] = False, "réponse non JSON"
+            out.append(row)
+        return out
+
+def _client_timeout(query: str, settings: Settings) -> float:
+    """Délai client = [timeout:] annoncé dans la requête + marge (la requête fixe sa propre limite)."""
+    m = re.match(r"\[out:json\]\[timeout:(\d+)\]", query)
+    return (float(m.group(1)) + 20.0) if m else settings.client_timeout_s
 
 def _snapshot(data: dict) -> str:
     """Date de la base OSM interrogée (traçabilité / reproductibilité)."""
