@@ -35,7 +35,12 @@ section[data-testid="stSidebar"] * { color: #1b1b1b; }
 
 /* Indicateurs */
 div[data-testid="stMetric"] { background: #fff; border-left: 4px solid var(--cm-gold); border-radius: 8px; padding: .6rem .9rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-div[data-testid="stMetricLabel"] p { color: var(--cm-grey); font-size: .85rem; }
+div[data-testid="stMetricLabel"], div[data-testid="stMetricLabel"] * { color: var(--cm-grey) !important; font-size: .85rem; }
+div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] * { color: #000000 !important; }
+div[data-testid="stMetricDelta"], div[data-testid="stMetricDelta"] * { color: var(--cm-ink) !important; }
+
+/* Code en ligne (ex. `CATMAP_CONTACT`) : fond gris, texte blanc */
+.stMainBlockContainer :not(pre) > code { background-color: var(--cm-grey) !important; color: #ffffff !important; border-radius: 4px; padding: 1px 6px; }
 
 /* Boutons primaires */
 button[kind="primary"] { background-color: var(--cm-grey); border: 2px solid var(--cm-gold); color: #fff; }
