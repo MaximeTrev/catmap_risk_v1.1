@@ -108,30 +108,64 @@ def _popup_html(row: pd.Series) -> str:
             f"<a href='{esc(row['osm_url'])}' target='_blank'>Voir sur OpenStreetMap</a></div>")
 
 
-def _site_map(df: pd.DataFrame, color_col: str = "nom_demande"):
+_COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
+
+
+def _site_map(df: pd.DataFrame):
+    """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
     import folium
-    from folium.plugins import MarkerCluster
+    from folium.plugins import Fullscreen, MarkerCluster
     from streamlit_folium import st_folium
 
     d = df.dropna(subset=["lat", "long"])
+    if d.empty:
+        st.info("Aucun site à afficher.")
+        return
+    c1, c2 = st.columns([2, 1])
+    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key="map_color")
+    cluster_on = c2.checkbox("Regrouper les points proches", True, key="map_cluster")
+    color_col = _COLOR_CHOICES[choice]
+
     if len(d) > MAX_MARKERS:
         st.warning(f"Carte limitée à {MAX_MARKERS} sites sur {len(d)} (les mieux appariés). "
                    "Filtrez par entreprise ou par pays pour tout voir.")
         d = d.sort_values("match_score", ascending=False).head(MAX_MARKERS)
-    if d.empty:
-        st.info("Aucun site à afficher.")
-        return
-    m = folium.Map(location=[float(d["lat"].mean()), float(d["long"].mean())], zoom_start=5, control_scale=True)
+
+    m = folium.Map(location=[float(d["lat"].mean()), float(d["long"].mean())], zoom_start=5,
+                   control_scale=True, tiles=None)
+    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+    folium.TileLayer("CartoDB positron", name="Fond clair").add_to(m)
+    folium.TileLayer("CartoDB dark_matter", name="Fond sombre").add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    Fullscreen().add_to(m)
     m.fit_bounds([[float(d["lat"].min()), float(d["long"].min())], [float(d["lat"].max()), float(d["long"].max())]])
-    cluster = MarkerCluster().add_to(m)
-    colors = {k: PALETTE[i % len(PALETTE)] for i, k in enumerate(sorted(d[color_col].dropna().unique()))}
+
+    if color_col:
+        keys = sorted(d[color_col].fillna("n/d").astype(str).unique())
+        colors = {k: PALETTE[i % len(PALETTE)] for i, k in enumerate(keys)}
+    else:
+        keys, colors = [], {}
+    layer = MarkerCluster(name="Sites").add_to(m) if cluster_on else folium.FeatureGroup(name="Sites").add_to(m)
     for _, r in d.iterrows():
+        col = colors.get(str(r[color_col]) if pd.notna(r[color_col]) else "n/d", "#1f77b4") if color_col else "#bd8e43"
         folium.CircleMarker(
-            [float(r["lat"]), float(r["long"])], radius=6, color=colors.get(r[color_col], "#1f77b4"),
-            fill=True, fill_opacity=0.7, popup=folium.Popup(_popup_html(r), max_width=320),
-            tooltip=html.escape(str(r["name"])),
-        ).add_to(cluster)
-    st_folium(m, height=620, returned_objects=[], key=f"map_{color_col}_{len(d)}")
+            [float(r["lat"]), float(r["long"])], radius=6, color=col, fill=True, fill_opacity=0.75,
+            popup=folium.Popup(_popup_html(r), max_width=320), tooltip=html.escape(str(r["name"])),
+        ).add_to(layer)
+    folium.LayerControl(collapsed=True).add_to(m)
+
+    if keys:
+        shown = keys[:12]
+        st.markdown(" &nbsp; ".join(
+            f"<span style='color:#000'><span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
+            f"background:{colors[k]};margin-right:4px'></span>{html.escape(k)}</span>" for k in shown)
+            + (" …" if len(keys) > len(shown) else ""), unsafe_allow_html=True)
+    key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}"
+    st_folium(m, height=620, returned_objects=[], key=key)
+    st.caption(f"{len(d)} site(s) affiché(s) : ceux du tableau ci-dessus (filtres Entreprises / Pays appliqués). "
+               "Cliquez sur un point pour le détail ; le sélecteur en haut à droite change le fond de carte.")
 
 
 def _pie(df: pd.DataFrame, col: str, title: str):
@@ -152,6 +186,9 @@ def _collect_queries(mode: str) -> tuple[list[NameQuery], list[str]]:
     if mode == "Un nom d'entreprise":
         name = st.text_input("Nom de l'entreprise", placeholder="Ex. IKEA", key="in_name")
         qid = st.text_input("Identifiant Wikidata (facultatif, recherche très précise)", placeholder="Ex. Q54078", key="in_qid")
+        if qid.strip():
+            st.info(f"Identifiant Wikidata renseigné ({qid.strip().upper()}) : il prime sur le nom et peut ramener une autre "
+                    "entreprise que celle saisie. Videz ce champ pour chercher uniquement par nom.")
         return ([NameQuery.make(name, qid)] if name.strip() else []), []
     if mode == "Liste (une entreprise par ligne)":
         txt = st.text_area("Une entreprise par ligne ; identifiant Wikidata facultatif après « ; »",
@@ -195,8 +232,8 @@ def _options_ui() -> SearchOptions:
                                   help="1,0 = identifiant Wikidata ; 0,9 = nom identique ; 0,75 = commence par ; 0,6 = contenu.")
             dedup = st.slider("Fusion des doublons node/way (mètres)", 0, 100, 25)
             fast = st.checkbox("Mode rapide (noms exacts uniquement)", False,
-                                help="Interroge des graphies exactes (indexées) au lieu d'une regex : beaucoup plus rapide, "
-                                     "mais ne trouve pas « IKEA Paris Nord » si le nom n'est pas exactement « IKEA ».")
+                               help="Interroge des graphies exactes (indexées) au lieu d'une regex : beaucoup plus rapide, "
+                                    "mais ne trouve pas « IKEA Paris Nord » si le nom n'est pas exactement « IKEA ».")
     if s.uses_public_overpass:
         st.caption("Serveurs Overpass **publics** : usage raisonnable demandé. "
                    + ("" if s.contact else "Renseignez `CATMAP_CONTACT` (e-mail ou URL) pour vous identifier. ")
@@ -223,6 +260,7 @@ def _run_search(queries: list[NameQuery], options: SearchOptions):
     box.empty()
     st.session_state["result"] = res
     st.session_state["result_options"] = options
+    st.session_state["result_queries"] = [(q.raw.casefold(), q.wikidata) for q in queries]
 
 
 def _status_messages(report: pd.DataFrame):
@@ -263,7 +301,7 @@ def _render_result(res):
     if pick_p:
         view = view[view["pays"].isin(pick_p)]
 
-    t1, t2, t3, t4, t5 = st.tabs(["Tableau", "Carte", "Répartitions", "Rapport par entreprise", "Qualité"])
+    t1, t3, t4, t5 = st.tabs(["Tableau et carte", "Répartitions", "Rapport par entreprise", "Qualité"])
     with t1:
         cols = [c for c in DISPLAY_COLUMNS if c in view.columns]
         _stretch(st.dataframe, view[cols], hide_index=True,
@@ -272,7 +310,7 @@ def _render_result(res):
         d1.download_button("Télécharger (CSV)", _csv_bytes(view), "catmap_sites.csv", "text/csv")
         d2.download_button("Télécharger (Excel)", _xlsx_bytes({"sites": view, "rapport": report}), "catmap_sites.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    with t2:
+        st.subheader("Carte interactive")
         _site_map(view)
     with t3:
         a, b = st.columns(2)
@@ -312,6 +350,30 @@ def _render_quality_tab(view: pd.DataFrame):
         st.caption(f"{snapped} site(s) rattaché(s) au pays le plus proche (point côtier ou frontalier).")
 
 
+def _clear_all():
+    """Vide le cache disque Overpass, les résultats affichés, les filtres et la saisie (appelé par le bouton)."""
+    n = 0
+    cache_dir = Path(get_settings().cache_dir)
+    if cache_dir.is_dir():
+        for f in list(cache_dir.glob("*.json")) + list(cache_dir.glob("*.tmp")):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    for k in ("result", "result_options", "result_queries", "f_company", "f_country", "pie_company", "pie_country",
+              "map_color", "map_cluster"):
+        st.session_state.pop(k, None)
+    for k in ("in_name", "in_qid", "in_text"):
+        if k in st.session_state:
+            st.session_state[k] = ""
+    try:
+        st.cache_data.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    st.session_state["_cleared"] = n
+
+
 def page_geolocalisation():
     st.title("Géolocalisation d'entreprises")
     mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"], horizontal=True)
@@ -328,11 +390,25 @@ def page_geolocalisation():
             if not any(r["ok"] for r in rows):
                 st.info("Aucun serveur joignable depuis cet hébergement. Voir le README : instance Overpass "
                         "payante/auto-hébergée accessible depuis internet, variable `OVERPASS_URLS`.")
-    if st.button("Lancer la recherche", type="primary", disabled=not queries):
+    b1, b2 = st.columns([1, 1])
+    run = b1.button("Lancer la recherche", type="primary", disabled=not queries)
+    b2.button("Vider le cache et les résultats", on_click=_clear_all,
+              help="Supprime les réponses Overpass mémorisées, les résultats affichés et la saisie. "
+                   "La prochaine recherche interrogera de nouveau Overpass.")
+    if "_cleared" in st.session_state:
+        st.success(f"Cache vidé ({st.session_state.pop('_cleared')} fichier(s) supprimé(s)). Saisie et résultats réinitialisés.")
+    if run:
         _run_search(queries, options)
     res = st.session_state.get("result")
     if res is not None:
         st.divider()
+        shown = sorted(res.report["nom_demande"].astype(str).unique()) if "nom_demande" in res.report else []
+        if shown:
+            st.markdown("**Résultats pour :** " + ", ".join(shown[:10]) + (" …" if len(shown) > 10 else ""))
+        current = [(q.raw.casefold(), q.wikidata) for q in queries]
+        if current and current != st.session_state.get("result_queries"):
+            st.warning("Ces résultats correspondent à la recherche précédente, pas à la saisie actuelle. "
+                       "Cliquez sur « Lancer la recherche » pour les mettre à jour.")
         _render_result(res)
 
 
