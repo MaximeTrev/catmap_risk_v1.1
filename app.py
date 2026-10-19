@@ -320,14 +320,14 @@ def page_geolocalisation():
         st.warning(w)
     options = _options_ui()
     with st.expander("Tester la connexion Overpass"):
-    if st.button("Lancer le test"):
-        with st.spinner("Test des serveurs…"):
-            rows = get_client().ping()
-        for r in rows:
-            (st.success if r["ok"] else st.error)(f"{r['endpoint']} — {r['latence_s']} s — {r['message']}")
-        if not any(r["ok"] for r in rows):
-            st.info("Aucun serveur joignable depuis cet hébergement. Voir le README : instance Overpass "
-                    "payante/auto-hébergée accessible depuis internet, variable `OVERPASS_URLS`.")
+        if st.button("Lancer le test"):
+            with st.spinner("Test des serveurs…"):
+                rows = get_client().ping()
+            for r in rows:
+                (st.success if r["ok"] else st.error)(f"{r['endpoint']} — {r['latence_s']} s — {r['message']}")
+            if not any(r["ok"] for r in rows):
+                st.info("Aucun serveur joignable depuis cet hébergement. Voir le README : instance Overpass "
+                        "payante/auto-hébergée accessible depuis internet, variable `OVERPASS_URLS`.")
     if st.button("Lancer la recherche", type="primary", disabled=not queries):
         _run_search(queries, options)
     res = st.session_state.get("result")
