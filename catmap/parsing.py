@@ -30,12 +30,17 @@ EXTRA_TAGS = {
 }
 _KIND_RANK = {"polygon": 0, "multipolygon": 0, "line": 1, "point": 2}
 
+BUSINESS_KEYS = (
+    "shop", "amenity", "office", "craft", "industrial", "man_made", "power",
+    "healthcare", "tourism", "leisure", "landuse", "building",
+)
 
 @dataclass
 class ParseStats:
     n_elements: int = 0
     n_rejected_name: int = 0
     n_rejected_score: int = 0
+    n_rejected_tags: int = 0
     n_no_geometry: int = 0
     n_incomplete_relations: int = 0
     n_merged: int = 0
@@ -118,6 +123,9 @@ def parse_elements(data: dict, query: NameQuery, options: SearchOptions,
             name = ""
         display = name or (tags.get("brand") or "").strip()
         if not display:
+            continue
+        if "boundary" in tags or (options.require_business_tag and not any(k in tags for k in BUSINESS_KEYS)):
+            st.n_rejected_tags += 1
             continue
 
         info = matcher.match_tags(tags, include_operator=options.include_operator)
