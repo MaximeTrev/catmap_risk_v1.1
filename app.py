@@ -171,14 +171,18 @@ def _site_map(df: pd.DataFrame):
                "Cliquez sur un point pour le détail ; le sélecteur en haut à droite change le fond de carte.")
 
 
-def _pie(df: pd.DataFrame, col: str, title: str):
+def _pie(df: pd.DataFrame, col: str, title: str, empty_label: str):
+    """Camembert : 10 modalités maximum, le reste regroupé dans « Autres » ; valeurs manquantes comptées à part."""
     import plotly.express as px
-    t = top_with_other(df[col], top_n=10)
+    t = top_with_other(df[col].fillna(empty_label), top_n=10)
     if t.empty:
-        st.info(f"Aucune donnée « {title.lower()} » renseignée pour cette sélection.")
+        st.info(f"Aucune donnée pour « {title.lower()} » sur cette sélection.")
         return
     fig = px.pie(t, names="modalite", values="n", hole=0.3, title=title)
-    fig.update_traces(textinfo="percent", texttemplate="%{percent:.0%}")
+    fig.update_traces(textinfo="percent", texttemplate="%{percent:.0%}", sort=False,
+                      hovertemplate="%{label}<br>%{value} site(s) (%{percent})<extra></extra>")
+    fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font_color="#000000",
+                      title_font_color="#000000", legend_font_color="#000000", margin=dict(t=60, b=20, l=10, r=10))
     _stretch(st.plotly_chart, fig)
 
 
@@ -304,7 +308,7 @@ def _render_result(res):
     if pick_p:
         view = view[view["pays"].isin(pick_p)]
 
-    t1, t3, t4, t5 = st.tabs(["Tableau et carte", "Répartitions", "Rapport par entreprise", "Qualité"])
+    t1, t4, t5 = st.tabs(["Tableau, graphiques et carte", "Rapport par entreprise", "Qualité"])
     with t1:
         cols = [c for c in DISPLAY_COLUMNS if c in view.columns]
         _stretch(st.dataframe, view[cols], hide_index=True,
@@ -313,17 +317,25 @@ def _render_result(res):
         d1.download_button("Télécharger (CSV)", _csv_bytes(view), "catmap_sites.csv", "text/csv")
         d2.download_button("Télécharger (Excel)", _xlsx_bytes({"sites": view, "rapport": report}), "catmap_sites.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.subheader("Répartitions")
+        g_naf, g_pays = st.columns(2)
+        with g_naf:
+            fc1, fc2 = st.columns(2)
+            naf_company = fc1.selectbox("Entreprise (secteur NAF)", ["Toutes"] + companies, key="pie_naf_company")
+            naf_country = fc2.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
+                                        key="pie_naf_country")
+            dn = view
+            if naf_company != "Toutes":
+                dn = dn[dn["nom_demande"] == naf_company]
+            if naf_country != "Tous":
+                dn = dn[dn["pays"] == naf_country]
+            _pie(dn, "naf_section", "Répartition par secteur NAF", "Non classé")
+        with g_pays:
+            pays_company = st.selectbox("Entreprise (pays)", ["Toutes"] + companies, key="pie_pays_company")
+            dp = view if pays_company == "Toutes" else view[view["nom_demande"] == pays_company]
+            _pie(dp, "pays", "Répartition par pays", "Pays non renseigné")
         st.subheader("Carte interactive")
         _site_map(view)
-    with t3:
-        a, b = st.columns(2)
-        with a:
-            one = st.selectbox("Entreprise (répartition par pays)", ["Toutes"] + companies, key="pie_company")
-            _pie(view if one == "Toutes" else view[view["nom_demande"] == one], "pays", "Répartition par pays")
-        with b:
-            cs = ["Tous"] + sorted(view["pays"].dropna().unique())
-            one_c = st.selectbox("Pays (répartition par secteur NAF)", cs, key="pie_country")
-            _pie(view if one_c == "Tous" else view[view["pays"] == one_c], "naf_section", "Répartition par section NAF")
     with t4:
         _render_report_tab(res)
     with t5:
@@ -364,7 +376,7 @@ def _clear_all():
                 n += 1
             except OSError:
                 pass
-    for k in ("result", "result_options", "result_queries", "f_company", "f_country", "pie_company", "pie_country",
+    for k in ("result", "result_options", "result_queries", "f_company", "f_country", "pie_naf_company", "pie_naf_country", "pie_pays_company",
               "map_color", "map_cluster"):
         st.session_state.pop(k, None)
     for k in ("in_name", "in_qid", "in_text"):
