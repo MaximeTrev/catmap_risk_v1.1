@@ -52,7 +52,7 @@ class GeolocationResult:
 
 
 def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
-               options: SearchOptions) -> tuple[list[dict], QueryReport]:
+               options: SearchOptions, on_event: Optional[Callable[[str], None]] = None) -> tuple[list[dict], QueryReport]:
     """Recherche d'UNE entreprise ; ne lève jamais (le statut porte l'erreur)."""
     t0 = time.monotonic()
     rep = QueryReport(nom_demande=q.raw, nom_recherche=q.search_name, wikidata=q.wikidata)
@@ -60,7 +60,7 @@ def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
     try:
         query = build_query(q, options, settings)
         try:
-            fr = client.fetch(query)
+            fr = client.fetch(query, on_event=on_event)
             data, rep.endpoint, rep.snapshot, rep.depuis_cache = fr.data, fr.endpoint, fr.snapshot, fr.from_cache
         except OverpassPartialResult as p:
             data, rep.endpoint = p.data, p.endpoint
@@ -70,7 +70,7 @@ def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
         parsed = parse_elements(data, q, options, max_sites=settings.max_sites_per_company)
         records = parsed.records
         s = parsed.stats
-        rep.n_elements_osm, rep.n_rejetes_nom = s.n_elements, s.n_rejected_name + s.n_rejected_score
+        rep.n_elements_osm, rep.n_rejetes_nom = s.n_elements, s.n_rejected_name + s.n_rejected_score + s.n_rejected_tags
         rep.n_sans_geometrie, rep.n_doublons_fusionnes, rep.n_sites = s.n_no_geometry, s.n_merged, len(records)
         notes = []
         if s.truncated:
@@ -103,6 +103,7 @@ def geolocate(
     naf: Optional[NafClassifier] = None,
     progress: Optional[Callable[[int, int, str], None]] = None,
     snap_km: float = 50.0,
+    on_event: Optional[Callable[[str], None]] = None,
 ) -> GeolocationResult:
     uniq: dict[tuple, NameQuery] = {}
     for q in queries:
@@ -114,7 +115,7 @@ def geolocate(
     workers = max(1, min(settings.max_workers, total or 1))
     if workers == 1:
         for i, q in enumerate(todo):
-            results[i] = search_one(client, settings, q, options)
+            results[i] = search_one(client, settings, q, options, on_event=on_event)
             if progress:
                 progress(i + 1, total, q.raw)
     else:
