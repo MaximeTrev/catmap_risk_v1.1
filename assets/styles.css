@@ -53,4 +53,11 @@ button[kind="primary"]:hover { background-color: var(--cm-gold-dark); border-col
 .cm-ok { background:#2e7d32; } .cm-warn { background:#b26a00; } .cm-err { background:#b3261e; }
 
 /* Carte */
-iframe[title="streamlit_folium.st_folium"] { border: 3px solid var(--cm-gold); border-radius: 10px; }
+iframe[title="streamlit_folium.st_folium"] { border: 3px solid var(--cm-gold); border-radius: 10px; width: 100% !important; min-width: 100%; }
+div[data-testid="stCustomComponentV1"], div.stCustomComponentV1 { width: 100% !important; }
+
+/* Infobulles « ? » : collées juste après le texte du libellé */
+.stMainBlockContainer div[data-testid="stWidgetLabel"] { display: flex; justify-content: flex-start !important; align-items: center; gap: .35rem; width: 100%; }
+.stMainBlockContainer div[data-testid="stCheckbox"] label { justify-content: flex-start !important; gap: .35rem; }
+.stMainBlockContainer div[data-testid="stCheckbox"] { width: fit-content; }
+.stMainBlockContainer [data-testid="stTooltipIcon"], .stMainBlockContainer [data-testid="stTooltipHoverTarget"] { margin-left: 0 !important; flex: 0 0 auto; }
