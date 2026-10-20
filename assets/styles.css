@@ -75,3 +75,8 @@ div[data-testid="stCustomComponentV1"], div.stCustomComponentV1 { width: 100% !i
 
 /* Les boutons ne portent jamais le pictogramme : on le neutralise si Streamlit imbrique l'infobulle dans le bouton */
 div[data-testid="stButton"] *, div[data-testid="stDownloadButton"] * { background-image: none !important; }
+
+/* Onglets (Tableau, graphiques et carte / Rapport par entreprise / Qualité) : texte gris */
+.stMainBlockContainer button[data-baseweb="tab"], .stMainBlockContainer button[data-baseweb="tab"] * { color: var(--cm-grey) !important; }
+.stMainBlockContainer button[data-baseweb="tab"][aria-selected="true"], .stMainBlockContainer button[data-baseweb="tab"][aria-selected="true"] * { font-weight: 700; }
+.stMainBlockContainer div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important; }
