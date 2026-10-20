@@ -75,7 +75,7 @@ def build_query(q: NameQuery, options: SearchOptions, settings: Settings) -> str
     filters = '[!"highway"][!"place"][!"junction"]'
     elements = ["node", "way"] + (["rel[type=multipolygon]"] if options.include_relations else [])
     exact = [ql_escape(v) for v in exact_variants(q.search_name)]
-    rx = server_regex(q.search_name)
+    rx = server_regex(q.search_name, whole_word=options.strict_word_match)
 
     def conds(field: str) -> list[str]:
         """Conditions sur un tag : regex insensible à la casse (défaut) ou égalités exactes (mode rapide)."""
