@@ -241,16 +241,65 @@ def _options_ui() -> SearchOptions:
                      "**Décochée** : on garde tout ce que renvoie la regex. Plus de résultats, mais plus de bruit ; "
                      "les lieux non conformes reçoivent un score faible (0,30).\n\n"
                      "**Effet sur la requête** : aucun, le tri se fait après coup.")
-            biz = st.checkbox("Établissements uniquement", True, help="Exige un tag shop, amenity, office, craft… (écarte arrêts, monuments, etc.).")
-            rel = st.checkbox("Inclure les grands sites (relations)", True)
-            op = st.checkbox("Chercher aussi dans « operator »", False, help="Plus de résultats, plus de bruit.")
+            biz = st.checkbox(
+                "Établissements uniquement", False,
+                help="**Principe** : OpenStreetMap contient aussi des objets qui portent un nom sans être un établissement "
+                     "(parking, arrêt, monument, parcelle…). Cette case filtre sur la nature de l'objet.\n\n"
+                     "**Cochée** : on ne garde que les objets ayant au moins un tag *shop, amenity, office, craft, industrial, "
+                     "man_made, power, healthcare, tourism, leisure, landuse* ou *building*. Moins de bruit, mais on peut perdre "
+                     "un site mal renseigné dans OSM.\n\n"
+                     "**Décochée** : tout objet portant le nom est gardé (plus de résultats, plus de bruit). "
+                     "Les limites administratives (tag boundary) sont toujours écartées.\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après la réponse d'Overpass.")
+            rel = st.checkbox(
+                "Inclure les grands sites (relations)", False,
+                help="**Principe** : un grand site (campus, usine, centre commercial avec cour intérieure) est parfois décrit "
+                     "dans OpenStreetMap par une *relation* multipolygone plutôt que par un point ou un contour simple.\n\n"
+                     "**Cochée** : la requête interroge aussi les relations. On trouve ces grands sites et leur surface, "
+                     "au prix d'une requête plus lourde.\n\n"
+                     "**Décochée** : seuls les points (nodes) et les contours simples (ways) sont interrogés. "
+                     "Plus rapide, mais les sites décrits par une relation sont manqués.\n\n"
+                     "**Effet sur la requête** : oui, la ligne `rel[type=multipolygon]…` est ajoutée ou retirée.")
+            op = st.checkbox(
+                "Chercher aussi dans « operator »", False,
+                help="**Principe** : le tag *operator* désigne l'exploitant d'un lieu, souvent une société différente de "
+                     "l'enseigne (ex. un franchisé).\n\n"
+                     "**Cochée** : la requête cherche aussi le nom dans operator. Plus de résultats, plus de bruit ; "
+                     "le score de ces correspondances est diminué de 0,20.\n\n"
+                     "**Décochée** : seuls name et/ou brand (selon vos cases) sont interrogés.\n\n"
+                     "**Effet sur la requête** : oui, une condition `operator` est ajoutée.")
         with c2:
             idx = get_countries()
             labels = sorted(f"{a['name_fr']} ({a['iso2']})" for a in idx.attrs if a.get("iso2") and a.get("name_fr"))
-            picked = st.multiselect("Limiter à des pays (recommandé pour un grand périmètre)", labels)
-            min_score = st.slider("Score minimal conservé", 0.0, 1.0, 0.0, 0.05,
-                                  help="1,0 = identifiant Wikidata ; 0,9 = nom identique ; 0,75 = commence par ; 0,6 = contenu.")
-            dedup = st.slider("Fusion des doublons node/way (mètres)", 0, 100, 25)
+            picked = st.multiselect(
+                "Limiter à des pays (recommandé pour un grand périmètre)", labels,
+                help="**Principe** : restreint la recherche aux pays choisis.\n\n"
+                     "**Vide** : le monde entier est interrogé (plus lent, plus de résultats).\n\n"
+                     "**Rempli** : la requête est limitée à ces pays (`area[\"ISO3166-1\"=…]`), donc plus rapide "
+                     "et plus ciblée.\n\n**Effet sur la requête** : oui.")
+            min_score = st.slider(
+                "Score minimal conservé", 0.0, 1.0, 0.0, 0.05,
+                help="**Principe** : chaque lieu trouvé reçoit un score de 0 à 1 mesurant la qualité de la correspondance "
+                     "entre le nom saisi et le nom OpenStreetMap (calculé après la réponse d'Overpass, sur les mots entiers, "
+                     "sans tenir compte de la casse, des accents ni des séparateurs).\n\n"
+                     "**Calcul** :\n\n"
+                     "- **1,00** : identifiant Wikidata identique ;\n"
+                     "- **0,90** : nom identique (« IKEA » pour « IKEA ») ;\n"
+                     "- **0,75** : le nom saisi est le début du nom OSM (« IKEA Lyon ») ;\n"
+                     "- **0,60** : le nom saisi est contenu en mots entiers (« Magasin IKEA ») ;\n"
+                     "- **moins 0,20** si la correspondance vient du tag operator ;\n"
+                     "- **0,30** si « Nom en mot entier » est décoché et que le nom n'apparaît pas en mot entier.\n\n"
+                     "**Ce curseur** : tout lieu dont le score est inférieur au seuil est écarté. "
+                     "0 = on garde tout ; 0,75 = on garde les noms identiques ou commençant par le nom saisi.\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après coup.")
+            dedup = st.slider(
+                "Fusion des doublons node/way (mètres)", 0, 100, 25,
+                help="**Principe** : un même site peut exister plusieurs fois dans OpenStreetMap (un point posé dans le bâtiment "
+                     "et le contour du bâtiment).\n\n"
+                     "**Valeur > 0** : un point situé dans un contour du même nom, ou à moins de cette distance, "
+                     "est fusionné avec lui ; on garde le contour et on reprend les tags du point.\n\n"
+                     "**0** : aucune fusion, tous les objets sont gardés.\n\n"
+                     "**Effet sur la requête** : aucun, la fusion se fait après coup.")
             fast = st.checkbox(
                 "Mode rapide (noms exacts uniquement)", False,
                 help="**Principe** : par défaut, Overpass compare le nom à une regex insensible à la casse. "
