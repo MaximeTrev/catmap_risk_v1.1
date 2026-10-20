@@ -482,8 +482,6 @@ def page_geolocalisation():
     b1, b2 = st.columns([1, 1])
     run = b1.button("Lancer la recherche", type="primary", disabled=not queries)
     b2.button("Vider le cache et les résultats", on_click=_clear_all)
-    b2.caption("Supprime les réponses Overpass mémorisées, les résultats affichés et la saisie. "
-               "La prochaine recherche interrogera de nouveau Overpass.")
     if "_cleared" in st.session_state:
         st.success(f"Cache vidé ({st.session_state.pop('_cleared')} fichier(s) supprimé(s)). Saisie et résultats réinitialisés.")
     if run:
