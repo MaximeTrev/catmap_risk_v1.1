@@ -101,11 +101,16 @@ def _xlsx_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
 def _popup_html(row: pd.Series) -> str:
     def esc(v):
         return "" if pd.isna(v) else html.escape(str(v))
+    lat, lon = float(row["lat"]), float(row["long"])
+    gmaps = f"https://www.google.com/maps/search/?api=1&query={lat:.6f},{lon:.6f}"
+    streetview = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat:.6f},{lon:.6f}"
     surf = "" if pd.isna(row.get("surface_m2")) else f"<br>Surface : {row['surface_m2']:,.0f} m²".replace(",", " ")
     return (f"<div style='font:12px sans-serif;min-width:180px'><b>{esc(row['name'])}</b><br>"
             f"{esc(row['nom_demande'])}<br>{esc(row.get('pays'))}<br>{esc(row.get('naf_section'))}{surf}<br>"
             f"Score : {esc(row.get('match_score'))}<br>"
-            f"<a href='{esc(row['osm_url'])}' target='_blank'>Voir sur OpenStreetMap</a></div>")
+            f"<a href='{esc(row['osm_url'])}' target='_blank' rel='noopener'>Voir sur OpenStreetMap</a><br>"
+            f"<a href='{gmaps}' target='_blank' rel='noopener'>Voir sur Google Maps</a><br>"
+            f"<a href='{streetview}' target='_blank' rel='noopener'>Voir sur Street View</a></div>")
 
 
 _COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
@@ -482,6 +487,8 @@ def page_geolocalisation():
     b1, b2 = st.columns([1, 1])
     run = b1.button("Lancer la recherche", type="primary", disabled=not queries)
     b2.button("Vider le cache et les résultats", on_click=_clear_all)
+    b2.caption("Supprime les réponses Overpass mémorisées, les résultats affichés et la saisie. "
+               "La prochaine recherche interrogera de nouveau Overpass.")
     if "_cleared" in st.session_state:
         st.success(f"Cache vidé ({st.session_state.pop('_cleared')} fichier(s) supprimé(s)). Saisie et résultats réinitialisés.")
     if run:
