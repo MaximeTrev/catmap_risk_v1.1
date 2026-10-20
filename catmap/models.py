@@ -25,6 +25,8 @@ class NameQuery:
 @dataclass(frozen=True)
 class SearchOptions:
     """Paramètres de la recherche : ils déterminent le compromis rappel / précision."""
+    search_name: bool = True            # chercher dans le tag name
+    search_brand: bool = False          # chercher dans le tag brand
     include_operator: bool = False      # chercher aussi dans le tag operator (plus de bruit)
     include_relations: bool = True      # relations type=multipolygon (grands sites)
     require_business_tag: bool = True   # exige shop/amenity/office/craft/… (exclut le bruit)
@@ -37,7 +39,7 @@ class SearchOptions:
 
     def cache_signature(self) -> dict:
         return {
-            "op": self.include_operator, "rel": self.include_relations,
+            "name": self.search_name, "brand": self.search_brand, "op": self.include_operator, "rel": self.include_relations,
             "biz": self.require_business_tag, "c": list(self.countries),
             "bbox": list(self.bbox) if self.bbox else None, "mode": self.search_mode,
         }
