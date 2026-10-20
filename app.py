@@ -232,10 +232,15 @@ def _options_ui() -> SearchOptions:
             by_brand = st.checkbox("Chercher dans « brand » (marque)", False,
                                    help="Interroge aussi le tag brand par regex. Plus de résultats (enseignes dont le nom du lieu diffère "
                                         "de la marque), mais requête plus lente et plus de bruit.")
-            strict = st.checkbox("Nom en mot entier (recommandé)", True,
-                                 help="Après la réponse d'Overpass, garde seulement les lieux où le nom saisi apparaît comme mot entier "
-                                      "(« IKEA », « IKEA Paris Nord ») et écarte « xxIKEAxx » ou « Pikea ». "
-                                      "Décoché : tout ce que renvoie la regex est gardé, avec un score faible (0,30).")
+            strict = st.checkbox(
+                "Nom en mot entier (recommandé)", True,
+                help="**Principe** : la regex envoyée à Overpass trouve toute chaîne qui *contient* le nom saisi, "
+                     "y compris « Pikea » ou « xxIKEAxx ». Cette case décide de ce qu'on garde dans la réponse.\n\n"
+                     "**Cochée** : on ne garde que les lieux où le nom apparaît comme mot entier "
+                     "(« IKEA », « IKEA Paris Nord »). Les faux positifs sont écartés.\n\n"
+                     "**Décochée** : on garde tout ce que renvoie la regex. Plus de résultats, mais plus de bruit ; "
+                     "les lieux non conformes reçoivent un score faible (0,30).\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après coup.")
             biz = st.checkbox("Établissements uniquement", True, help="Exige un tag shop, amenity, office, craft… (écarte arrêts, monuments, etc.).")
             rel = st.checkbox("Inclure les grands sites (relations)", True)
             op = st.checkbox("Chercher aussi dans « operator »", False, help="Plus de résultats, plus de bruit.")
@@ -246,9 +251,19 @@ def _options_ui() -> SearchOptions:
             min_score = st.slider("Score minimal conservé", 0.0, 1.0, 0.0, 0.05,
                                   help="1,0 = identifiant Wikidata ; 0,9 = nom identique ; 0,75 = commence par ; 0,6 = contenu.")
             dedup = st.slider("Fusion des doublons node/way (mètres)", 0, 100, 25)
-            fast = st.checkbox("Mode rapide (noms exacts uniquement)", False,
-                               help="Interroge des graphies exactes (indexées) au lieu d'une regex : beaucoup plus rapide, "
-                                    "mais ne trouve pas « IKEA Paris Nord » si le nom n'est pas exactement « IKEA ».")
+            fast = st.checkbox(
+                "Mode rapide (noms exacts uniquement)", False,
+                help="**Principe** : par défaut, Overpass compare le nom à une regex insensible à la casse. "
+                     "Cela parcourt tous les lieux nommés du périmètre : c'est complet mais lent (plusieurs minutes "
+                     "sur le monde entier). Le mode rapide remplace la regex par des égalités exactes sur quelques "
+                     "graphies (IKEA, ikea, Ikea, sans accents, avec tirets…), que le serveur retrouve instantanément "
+                     "grâce à son index.\n\n"
+                     "**Coché** : réponse en quelques secondes, mais seuls les lieux dont le champ vaut exactement "
+                     "l'une de ces graphies sont trouvés. « IKEA » est trouvé, « IKEA Paris Nord » ne l'est pas.\n\n"
+                     "**Décoché** : regex complète, qui trouve aussi « IKEA Paris Nord », « Magasin IKEA », etc. "
+                     "Plus de résultats, mais plus lent.\n\n"
+                     "**Effet sur la requête** : oui. La regex est remplacée par une liste d'égalités exactes "
+                     "(les champs name / brand cochés restent respectés). Timeout serveur de 60 s au lieu de 280 s.")
     if not (by_name or by_brand):
         st.warning("Cochez « name » et/ou « brand » : sans champ de recherche, seule la recherche par identifiant Wikidata fonctionne.")
     if s.uses_public_overpass:
