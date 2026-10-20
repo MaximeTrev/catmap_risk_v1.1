@@ -62,10 +62,11 @@ div[data-testid="stCustomComponentV1"], div.stCustomComponentV1 { width: 100% !i
 .stMainBlockContainer div[data-testid="stCheckbox"] { width: fit-content; }
 .stMainBlockContainer [data-testid="stTooltipIcon"], .stMainBlockContainer [data-testid="stTooltipHoverTarget"] { margin-left: 0 !important; flex: 0 0 auto; }
 
-/* Icône « ? » des infobulles : noire, en gras, toujours visible */
-[data-testid="stTooltipIcon"], [data-testid="stTooltipHoverTarget"] { color: #000000 !important; opacity: 1 !important; font-weight: 800 !important; }
-[data-testid="stTooltipIcon"] *, [data-testid="stTooltipHoverTarget"] * { color: #000000 !important; fill: currentColor !important; stroke: currentColor !important; stroke-width: .8px; opacity: 1 !important; }
-[data-testid="stTooltipIcon"] svg, [data-testid="stTooltipHoverTarget"] svg { width: 1.15rem !important; height: 1.15rem !important; }
+/* Icône des infobulles : pictogramme « bulle avec point d'interrogation » (remplace l'icône native) */
+[data-testid="stTooltipIcon"] svg, [data-testid="stTooltipHoverTarget"] svg { display: none !important; }
+[data-testid="stTooltipIcon"], [data-testid="stTooltipHoverTarget"] {
+  display: inline-block !important; width: 1.4rem !important; height: 1.4rem !important; min-width: 1.4rem; opacity: 1 !important;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 3h14a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-5.5L12 21.5 10.5 18H5a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z' fill='white' stroke='%23000' stroke-width='1.8' stroke-linejoin='round'/%3E%3Cpath d='M9.6 8.4a2.5 2.5 0 1 1 3.6 2.2c-.8.45-1.2.9-1.2 1.8' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round'/%3E%3Ccircle cx='12' cy='14.6' r='1.1' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat !important; cursor: help; }
 
 /* Contenu de la bulle : texte noir sur fond blanc, lisible quel que soit le thème */
 [data-testid="stTooltipContent"] { background-color: #ffffff !important; border: 2px solid var(--cm-gold) !important; border-radius: 8px !important; }
