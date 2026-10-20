@@ -32,10 +32,7 @@ from .names import exact_variants, ql_escape, server_regex
 
 log = logging.getLogger("catmap.overpass")
 
-BUSINESS_KEYS = (
-    "shop", "amenity", "office", "craft", "industrial", "man_made", "power",
-    "healthcare", "tourism", "leisure", "landuse", "building",
-)
+from .parsing import BUSINESS_KEYS  # noqa: E402,F401  (contrôle « établissement » côté Python)
 
 
 # --------------------------------------------------------------------------
@@ -47,9 +44,8 @@ _ISO2 = re.compile(r"^[A-Z]{2}$")
 def build_query(q: NameQuery, options: SearchOptions, settings: Settings) -> str:
     """Construit la requête Overpass QL.
 
-    Mode « regex » (défaut, même logique que la v1 qui fonctionnait) : ``name`` en regex insensible
-    à la casse (trouve « IKEA Paris Nord »), ``brand`` et ``brand:wikidata`` en égalité exacte
-    (indexée, bon marché). Mode « exact » (rapide) : tout en égalité exacte, rappel plus faible.
+    Mode « regex » (défaut, même logique que la v1 qui fonctionnait) : ``name`` (et ``brand`` si coché) en regex
+    insensible à la casse (trouve « IKEA Paris Nord »), ``brand:wikidata`` en égalité exacte. Mode « exact » (rapide) : tout en égalité exacte, rappel plus faible.
 
     Les filtres serveur sont volontairement minimaux (comme la v1 : ni highway, ni place, ni
     junction) : « établissement » et « boundary » sont contrôlés côté Python (``parsing``),
@@ -81,15 +77,22 @@ def build_query(q: NameQuery, options: SearchOptions, settings: Settings) -> str
     exact = [ql_escape(v) for v in exact_variants(q.search_name)]
     rx = server_regex(q.search_name)
 
-    def conds(field: str, regex: bool) -> list[str]:
-        if regex and not fast:
-            return [f'["{field}"~"{rx}",i]']
-        return [f'["{field}"="{v}"]' for v in exact]
+    def conds(field: str) -> list[str]:
+        """Conditions sur un tag : regex insensible à la casse (défaut) ou égalités exactes (mode rapide)."""
+        if fast:
+            return [f'["{field}"="{v}"]' for v in exact]
+        return [f'["{field}"~"{rx}",i]']
+
+    fields = (["name"] if options.search_name else []) + (["brand"] if options.search_brand else []) \
+        + (["operator"] if options.include_operator else [])
+    if not fields and not q.wikidata:
+        raise ValueError("Cochez au moins un champ de recherche (name ou brand) ou renseignez un identifiant Wikidata.")
 
     stmts: list[str] = []
     for el in elements:
-        for c in conds("name", True) + conds("brand", False) + (conds("operator", True) if options.include_operator else []):
-            stmts.append(f"  {el}{c}{filters}{scope};")
+        for f in fields:
+            for c in conds(f):
+                stmts.append(f"  {el}{c}{filters}{scope};")
         if q.wikidata:
             stmts.append(f'  {el}["brand:wikidata"="{q.wikidata}"]{filters}{scope};')
 
@@ -141,6 +144,7 @@ _FAILURE_REMARK = re.compile(r"runtime error|timed out|out of memory|too many|ra
 # échouerait de nouveau : on passe directement au serveur suivant.
 _RETRY_STATUS = {429, 502, 503}
 _SKIP_STATUS = {500, 504}
+
 
 # --------------------------------------------------------------------------
 # Client
@@ -221,27 +225,6 @@ class OverpassClient:
         wait = min(wait, self.settings.backoff_max_s)
         log.info("Nouvelle tentative dans %.1f s", wait)
         self._sleep(wait)
-
-
-
-    def fetch(self, query: str, use_cache: bool = True,
-              on_event: Optional[Callable[[str], None]] = None) -> FetchResult:
-        t0 = time.monotonic()
-        key = self._cache_key(query)
-        if use_cache and self.settings.cache_enabled:
-            hit = self._cache_read(key)
-            if hit:
-                data = hit["data"]
-                return FetchResult(
-                    data=data, endpoint=str(hit.get("endpoint", "cache")),
-                    snapshot=_snapshot(data), from_cache=True, attempts=0,
-                    elapsed_s=time.monotonic() - t0,
-                )
-
-        budget = self.settings.total_budget_s
-        attempts = 0
-        partial: Optional[OverpassPartialResult] = None
-        errors: list[str] = []
 
     def _emit(self, on_event, msg: str) -> None:
         log.info("%s", msg)
@@ -357,10 +340,12 @@ class OverpassClient:
             out.append(row)
         return out
 
+
 def _client_timeout(query: str, settings: Settings) -> float:
     """Délai client = [timeout:] annoncé dans la requête + marge (la requête fixe sa propre limite)."""
     m = re.match(r"\[out:json\]\[timeout:(\d+)\]", query)
     return (float(m.group(1)) + 20.0) if m else settings.client_timeout_s
+
 
 def _snapshot(data: dict) -> str:
     """Date de la base OSM interrogée (traçabilité / reproductibilité)."""
