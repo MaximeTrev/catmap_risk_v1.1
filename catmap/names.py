@@ -135,7 +135,12 @@ def _char_pattern(ch: str) -> str:
     return f"({ch}|{up})" if up != ch and len(up) == 1 else ch
 
 
-def server_regex(search_name: str) -> str:
+# Séparateurs ASCII reconnus côté serveur pour « mot entier » (sans antislash : aucune ambiguïté de moteur
+# de regex). Le tiret est en dernière position pour être littéral.
+_SEP_CLASS = "[ _.,;:/()&+'|!*#-]"
+
+
+def server_regex(search_name: str, whole_word: bool = False) -> str:
     """Regex de recherche pour l'opérateur ``~`` d'Overpass.
 
     Uniquement : lettres/chiffres, alternations ``(a|b)`` et ``.{0,2}`` entre les mots
@@ -146,7 +151,12 @@ def server_regex(search_name: str) -> str:
     if not norm:
         raise ValueError("Nom d'entreprise vide après normalisation")
     words = [w for w in norm.split(" ") if w]
-    return ".{0,2}".join("".join(_char_pattern(c) for c in w) for w in words)
+    core = ".{0,2}".join("".join(_char_pattern(c) for c in w) for w in words)
+    if whole_word:
+        # début/fin de chaîne ou séparateur de part et d'autre : « IKEA » et « IKEA Paris » passent,
+        # « Pikea » et « xxIKEAxx » sont écartés dès le serveur (moins de données à transférer).
+        return f"(^|{_SEP_CLASS}){core}($|{_SEP_CLASS})"
+    return core
 
 
 # --------------------------------------------------------------------------
@@ -222,6 +232,7 @@ def valid_wikidata(value: Optional[str]) -> Optional[str]:
         return None
     v = str(value).strip().upper()
     return v if _QID.match(v) else None
+
 
 # --------------------------------------------------------------------------
 # Recherche exacte (rapide) : variantes de graphie pour l'index d'Overpass
