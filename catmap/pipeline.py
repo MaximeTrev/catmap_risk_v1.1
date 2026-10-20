@@ -59,6 +59,8 @@ def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
     records: list[dict] = []
     try:
         query = build_query(q, options, settings)
+        # Journal console (« Manage app » de Streamlit Cloud) : jamais affiché dans l'interface.
+        print(f"[CatMap] Requête Overpass pour « {q.raw} » :\n{query}", flush=True)
         try:
             fr = client.fetch(query, on_event=on_event)
             data, rep.endpoint, rep.snapshot, rep.depuis_cache = fr.data, fr.endpoint, fr.snapshot, fr.from_cache
@@ -91,6 +93,8 @@ def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
         log.exception("Erreur inattendue pour %s", q.raw)
         rep.statut, rep.message = "erreur", f"{type(e).__name__}: {e}"
     rep.duree_s = round(time.monotonic() - t0, 2)
+    print(f"[CatMap] « {q.raw} » : {rep.duree_s:.1f} s — statut : {rep.statut}, {rep.n_sites} site(s)"
+          + (" (cache)" if rep.depuis_cache else "") + (f" — {rep.endpoint}" if rep.endpoint else ""), flush=True)
     return records, rep
 
 
@@ -105,6 +109,7 @@ def geolocate(
     snap_km: float = 50.0,
     on_event: Optional[Callable[[str], None]] = None,
 ) -> GeolocationResult:
+    t_all = time.monotonic()
     uniq: dict[tuple, NameQuery] = {}
     for q in queries:
         uniq.setdefault((q.raw.casefold(), q.wikidata), q)
@@ -160,4 +165,6 @@ def geolocate(
         "options": options.cache_signature(),
         "endpoints": sorted({e for e in report_df.get("endpoint", []) if e}),
     }
+    if total > 1:
+        print(f"[CatMap] Temps total : {time.monotonic() - t_all:.1f} s pour {total} entreprises", flush=True)
     return GeolocationResult(sites=sites, report=report_df, meta=meta)
