@@ -60,7 +60,7 @@ def search_one(client: OverpassClient, settings: Settings, q: NameQuery,
     try:
         query = build_query(q, options, settings)
         # Journal console (« Manage app » de Streamlit Cloud) : jamais affiché dans l'interface.
-        print(f"[CatMap] Requête Overpass pour « {q.raw} » :\n{query}", flush=True)
+        print(f"\n\n\t\t\t______________________________[CatMap] Requête Overpass pour « {q.raw} » :\n{query}", flush=True)
         try:
             fr = client.fetch(query, on_event=on_event)
             data, rep.endpoint, rep.snapshot, rep.depuis_cache = fr.data, fr.endpoint, fr.snapshot, fr.from_cache
