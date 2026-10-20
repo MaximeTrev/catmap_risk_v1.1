@@ -61,3 +61,13 @@ div[data-testid="stCustomComponentV1"], div.stCustomComponentV1 { width: 100% !i
 .stMainBlockContainer div[data-testid="stCheckbox"] label { justify-content: flex-start !important; gap: .35rem; }
 .stMainBlockContainer div[data-testid="stCheckbox"] { width: fit-content; }
 .stMainBlockContainer [data-testid="stTooltipIcon"], .stMainBlockContainer [data-testid="stTooltipHoverTarget"] { margin-left: 0 !important; flex: 0 0 auto; }
+
+/* Icône « ? » des infobulles : noire, en gras, toujours visible */
+[data-testid="stTooltipIcon"], [data-testid="stTooltipHoverTarget"] { color: #000000 !important; opacity: 1 !important; font-weight: 800 !important; }
+[data-testid="stTooltipIcon"] *, [data-testid="stTooltipHoverTarget"] * { color: #000000 !important; fill: currentColor !important; stroke: currentColor !important; stroke-width: .8px; opacity: 1 !important; }
+[data-testid="stTooltipIcon"] svg, [data-testid="stTooltipHoverTarget"] svg { width: 1.15rem !important; height: 1.15rem !important; }
+
+/* Contenu de la bulle : texte noir sur fond blanc, lisible quel que soit le thème */
+[data-testid="stTooltipContent"] { background-color: #ffffff !important; border: 2px solid var(--cm-gold) !important; border-radius: 8px !important; }
+[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] * { color: #000000 !important; }
+[data-testid="stTooltipContent"] strong, [data-testid="stTooltipContent"] b { font-weight: 800 !important; }
