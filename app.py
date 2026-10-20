@@ -227,7 +227,15 @@ def _options_ui() -> SearchOptions:
     with st.expander("Options de recherche (compromis rappel / précision)"):
         c1, c2 = st.columns(2)
         with c1:
-            strict = st.checkbox("Nom en mot entier (recommandé)", True, help="Écarte « xxIKEAxx » ; désactiver augmente le bruit.")
+            by_name = st.checkbox("Chercher dans « name » (nom du lieu)", True,
+                                  help="Interroge le tag name d'OpenStreetMap par regex insensible à la casse.")
+            by_brand = st.checkbox("Chercher dans « brand » (marque)", False,
+                                   help="Interroge aussi le tag brand par regex. Plus de résultats (enseignes dont le nom du lieu diffère "
+                                        "de la marque), mais requête plus lente et plus de bruit.")
+            strict = st.checkbox("Nom en mot entier (recommandé)", True,
+                                 help="Après la réponse d'Overpass, garde seulement les lieux où le nom saisi apparaît comme mot entier "
+                                      "(« IKEA », « IKEA Paris Nord ») et écarte « xxIKEAxx » ou « Pikea ». "
+                                      "Décoché : tout ce que renvoie la regex est gardé, avec un score faible (0,30).")
             biz = st.checkbox("Établissements uniquement", True, help="Exige un tag shop, amenity, office, craft… (écarte arrêts, monuments, etc.).")
             rel = st.checkbox("Inclure les grands sites (relations)", True)
             op = st.checkbox("Chercher aussi dans « operator »", False, help="Plus de résultats, plus de bruit.")
@@ -241,13 +249,15 @@ def _options_ui() -> SearchOptions:
             fast = st.checkbox("Mode rapide (noms exacts uniquement)", False,
                                help="Interroge des graphies exactes (indexées) au lieu d'une regex : beaucoup plus rapide, "
                                     "mais ne trouve pas « IKEA Paris Nord » si le nom n'est pas exactement « IKEA ».")
+    if not (by_name or by_brand):
+        st.warning("Cochez « name » et/ou « brand » : sans champ de recherche, seule la recherche par identifiant Wikidata fonctionne.")
     if s.uses_public_overpass:
         st.caption("Serveurs Overpass **publics** : usage raisonnable demandé. "
                    + ("" if s.contact else "Renseignez `CATMAP_CONTACT` (e-mail ou URL) pour vous identifier. ")
                    + "Pour de gros volumes, voir « Overpass local » dans le README.")
     else:
         st.caption(f"Instance Overpass **locale** : {s.overpass_urls[0]}")
-    return SearchOptions(include_operator=op, include_relations=rel, require_business_tag=biz,
+    return SearchOptions(search_name=by_name, search_brand=by_brand, include_operator=op, include_relations=rel, require_business_tag=biz,
                          countries=tuple(p.rsplit("(", 1)[1].rstrip(")") for p in picked),
                          strict_word_match=strict, min_score=min_score, dedup_radius_m=float(dedup),
                          search_mode="exact" if fast else "regex")
