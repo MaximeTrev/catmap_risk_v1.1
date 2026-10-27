@@ -21,6 +21,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from catmap.area import AreaOptions, AreaQuery, locate_area
+from catmap.circle_picker import circle_picker
 from catmap.analysis import completeness, summary_by_company, top_with_other
 from catmap.countries import get_country_index
 from catmap.inputs import InputError, parse_names_text, read_company_list
@@ -116,7 +118,7 @@ def _popup_html(row: pd.Series) -> str:
 _COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
 
 
-def _site_map(df: pd.DataFrame):
+def _site_map(df: pd.DataFrame, area: dict | None = None):
     """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
     import folium
     from folium.plugins import Fullscreen, MarkerCluster
@@ -127,7 +129,8 @@ def _site_map(df: pd.DataFrame):
         st.info("Aucun site à afficher.")
         return
     c1, c2 = st.columns([2, 1])
-    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key="map_color")
+    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key="map_color",
+                          index=list(_COLOR_CHOICES).index("Secteur NAF") if area else 0)
     cluster_on = c2.checkbox("Regrouper les points proches", True, key="map_cluster")
     color_col = _COLOR_CHOICES[choice]
 
@@ -159,6 +162,9 @@ def _site_map(df: pd.DataFrame):
             [float(r["lat"]), float(r["long"])], radius=6, color=col, fill=True, fill_opacity=0.75,
             popup=folium.Popup(_popup_html(r), max_width=320), tooltip=html.escape(str(r["name"])),
         ).add_to(layer)
+    if area:
+        folium.Circle([area["lat"], area["lon"]], radius=area["radius_m"], color="#bd8e43", weight=3, fill=True,
+                      fill_opacity=0.06, tooltip=f"Périmètre : {area['radius_m']:.0f} m").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
     if keys:
@@ -167,7 +173,7 @@ def _site_map(df: pd.DataFrame):
             f"<span style='color:#000'><span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
             f"background:{colors[k]};margin-right:4px'></span>{html.escape(k)}</span>" for k in shown)
             + (" …" if len(keys) > len(shown) else ""), unsafe_allow_html=True)
-    key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}"
+    key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}_{bool(area)}"
     try:
         st_folium(m, height=620, returned_objects=[], key=key, use_container_width=True)
     except TypeError:  # anciennes versions de streamlit-folium
@@ -364,25 +370,37 @@ def _render_result(res):
     n_req = len(report)
     n_found = int((report["statut"].isin(["ok", "partiel"]) & (report["n_sites"] > 0)).sum())
     comp = completeness(sites)
+    area = res.meta.get("area")
     c = st.columns(5)
     c[0].metric("Sites", f"{len(sites):,}".replace(",", " "))
-    c[1].metric("Entreprises trouvées", f"{n_found} / {n_req}")
+    if area:
+        c[1].metric("Rayon du périmètre", f"{area['radius_m']:,.0f} m".replace(",", " "))
+    else:
+        c[1].metric("Entreprises trouvées", f"{n_found} / {n_req}")
     c[2].metric("Pays renseigné", f"{comp['pays']:.0f} %")
     c[3].metric("Secteur NAF renseigné", f"{comp['naf_section']:.0f} %")
     c[4].metric("Base OSM", (res.meta["snapshots"][0][:10] if res.meta["snapshots"] else "n/d"),
                 help="Date de la base Overpass interrogée (traçabilité).")
     _status_messages(report)
     if sites.empty:
-        st.info("Aucun site à afficher. Essayez de désactiver « Nom en mot entier » ou « Établissements uniquement », "
-                "ou de renseigner un identifiant Wikidata.")
+        if area:
+            st.info("Aucun site à afficher sur ce périmètre. Essayez d'élargir le rayon, de décocher « Uniquement les lieux "
+                    "nommés » ou d'inclure les relations.")
+        else:
+            st.info("Aucun site à afficher. Essayez de désactiver « Nom en mot entier » ou « Établissements uniquement », "
+                    "ou de renseigner un identifiant Wikidata.")
         _render_report_tab(res)
         return
 
-    f1, f2 = st.columns(2)
     companies = sorted(sites["nom_demande"].unique())
-    pick_c = f1.multiselect("Entreprises", companies, default=companies, key="f_company")
     countries = sorted(sites["pays"].dropna().unique())
-    pick_p = f2.multiselect("Pays", countries, key="f_country", help="Vide = tous (y compris sans pays)")
+    if area:   # un seul « périmètre » : le filtre par entreprise n'a pas de sens
+        pick_c = companies
+        pick_p = st.multiselect("Pays", countries, key="f_country", help="Vide = tous (y compris sans pays)")
+    else:
+        f1, f2 = st.columns(2)
+        pick_c = f1.multiselect("Entreprises", companies, default=companies, key="f_company")
+        pick_p = f2.multiselect("Pays", countries, key="f_country", help="Vide = tous (y compris sans pays)")
     view = sites[sites["nom_demande"].isin(pick_c)]
     if pick_p:
         view = view[view["pays"].isin(pick_p)]
@@ -390,6 +408,10 @@ def _render_result(res):
     t1, t4, t5 = st.tabs(["Tableau, graphiques et carte", "Rapport par entreprise", "Qualité"])
     with t1:
         cols = [c for c in DISPLAY_COLUMNS if c in view.columns]
+        if area:   # « name » en premier, puis la distance au centre après la position
+            cols = ["name"] + [c for c in cols if c not in ("name", "nom_demande")]
+            if "distance_centre_m" in view.columns:
+                cols.insert(cols.index("long") + 1 if "long" in cols else len(cols), "distance_centre_m")
         _stretch(st.dataframe, view[cols], hide_index=True,
                  column_config={"osm_url": st.column_config.LinkColumn("OSM", display_text="ouvrir")})
         d1, d2 = st.columns(2)
@@ -399,10 +421,15 @@ def _render_result(res):
         st.subheader("Répartitions")
         g_naf, g_pays = st.columns(2)
         with g_naf:
-            fc1, fc2 = st.columns(2)
-            naf_company = fc1.selectbox("Entreprise (secteur NAF)", ["Toutes"] + companies, key="pie_naf_company")
-            naf_country = fc2.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
-                                        key="pie_naf_country")
+            if area:
+                naf_company = "Toutes"
+                naf_country = st.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
+                                           key="pie_naf_country")
+            else:
+                fc1, fc2 = st.columns(2)
+                naf_company = fc1.selectbox("Entreprise (secteur NAF)", ["Toutes"] + companies, key="pie_naf_company")
+                naf_country = fc2.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
+                                            key="pie_naf_country")
             dn = view
             if naf_company != "Toutes":
                 dn = dn[dn["nom_demande"] == naf_company]
@@ -410,15 +437,15 @@ def _render_result(res):
                 dn = dn[dn["pays"] == naf_country]
             _pie(dn, "naf_section", "Répartition par secteur NAF", "Non classé")
         with g_pays:
-            pays_company = st.selectbox("Entreprise (pays)", ["Toutes"] + companies, key="pie_pays_company")
+            pays_company = "Toutes" if area else st.selectbox("Entreprise (pays)", ["Toutes"] + companies, key="pie_pays_company")
             dp = view if pays_company == "Toutes" else view[view["nom_demande"] == pays_company]
             _pie(dp, "pays", "Répartition par pays", "Pays non renseigné")
         st.subheader("Carte interactive")
-        _site_map(view)
+        _site_map(view, area)
     with t4:
         _render_report_tab(res)
     with t5:
-        _render_quality_tab(view)
+        _render_quality_tab(view, area)
 
 
 def _render_report_tab(res):
@@ -429,10 +456,11 @@ def _render_report_tab(res):
     st.caption(f"Serveur(s) : {', '.join(res.meta['endpoints']) or 'cache'} — options : {res.meta['options']}")
 
 
-def _render_quality_tab(view: pd.DataFrame):
-    st.markdown("**Fiabilité de l'appariement du nom** (plus le score est élevé, plus le site est sûr)")
-    bins = pd.cut(view["match_score"], [0, .5, .7, .8, .95, 1.0], labels=["≤0,5", "0,5-0,7", "0,7-0,8", "0,8-0,95", "1,0"])
-    _stretch(st.dataframe, bins.value_counts().sort_index().rename("sites").reset_index().rename(columns={"match_score": "score"}), hide_index=True)
+def _render_quality_tab(view: pd.DataFrame, area: dict | None = None):
+    if not area:   # pas de score d'appariement du nom pour une recherche par périmètre
+        st.markdown("**Fiabilité de l'appariement du nom** (plus le score est élevé, plus le site est sûr)")
+        bins = pd.cut(view["match_score"], [0, .5, .7, .8, .95, 1.0], labels=["≤0,5", "0,5-0,7", "0,7-0,8", "0,8-0,95", "1,0"])
+        _stretch(st.dataframe, bins.value_counts().sort_index().rename("sites").reset_index().rename(columns={"match_score": "score"}), hide_index=True)
     st.markdown("**Fiabilité de la classification NAF**")
     _stretch(st.dataframe, view["naf_confidence"].fillna("non classé").value_counts().rename("sites").reset_index(), hide_index=True)
     un = get_naf().unmapped(view)
@@ -456,7 +484,7 @@ def _clear_all():
             except OSError:
                 pass
     for k in ("result", "result_options", "result_queries", "f_company", "f_country", "pie_naf_company", "pie_naf_country", "pie_pays_company",
-              "map_color", "map_cluster"):
+              "map_color", "map_cluster", "area_pick_n"):
         st.session_state.pop(k, None)
     for k in ("in_name", "in_qid", "in_text"):
         if k in st.session_state:
@@ -468,9 +496,86 @@ def _clear_all():
     st.session_state["_cleared"] = n
 
 
+def _area_new():
+    """Bouton « Nouvelle prise » : nouvelle instance de la carte (cercle effacé) et résultats du périmètre retirés."""
+    st.session_state["area_pick_n"] = st.session_state.get("area_pick_n", 0) + 1
+    res = st.session_state.get("result")
+    if res is not None and res.meta.get("area"):
+        st.session_state.pop("result", None)
+
+
+def _page_area():
+    s = get_settings()
+    with st.expander("Options du périmètre"):
+        rel = st.checkbox(
+            "Inclure les grands sites (relations)", False, key="area_rel",
+            help="**Principe** : un grand site (campus, usine, centre commercial) est parfois décrit par une *relation* "
+                 "multipolygone plutôt que par un point ou un contour simple.\n\n"
+                 "**Cochée** : les relations sont interrogées aussi (requête plus lourde).\n\n"
+                 "**Décochée** : seuls les points (nodes) et les contours (ways) sont interrogés.")
+        named = st.checkbox(
+            "Uniquement les lieux nommés (name ou brand)", True, key="area_named",
+            help="**Principe** : les objets *shop*, *amenity* ou *brand* incluent aussi du mobilier sans nom (bancs, "
+                 "poubelles, parkings à vélos…).\n\n"
+                 "**Cochée** : on garde les objets qui portent un name ou un brand.\n\n"
+                 "**Décochée** : tout est gardé (beaucoup plus de bruit).")
+        dedup = st.slider(
+            "Fusion des doublons node/way (mètres)", 0, 100, 25, key="area_dedup",
+            help="Un même site peut exister en point et en contour dans OpenStreetMap. Valeur > 0 : on fusionne ceux de même "
+                 "nom situés à moins de cette distance (ou un point dans un contour). 0 : aucune fusion.")
+    st.caption(f"Rayon maximal : **{s.area_max_radius_m:,} m**".replace(",", " ") + f" (au-delà, la recherche serait trop lourde) ; "
+               f"au plus {s.area_max_sites:,} sites sont conservés (les plus proches du centre).".replace(",", " "))
+    n = st.session_state.get("area_pick_n", 0)
+    picked = circle_picker(center=(46.6, 2.5), zoom=6, max_radius_m=s.area_max_radius_m, key=f"area_picker_{n}")
+    area = None
+    if picked:
+        try:
+            area = AreaQuery.from_value(picked)
+            area.validate(s.area_max_radius_m)
+        except ValueError as e:
+            st.error(str(e))
+            area = None
+    if area:
+        st.markdown(f"**Périmètre validé** : centre ({area.lat:.5f}, {area.lon:.5f}), rayon **{area.radius_m:,.0f} m**".replace(",", " "))
+        b1, b2 = st.columns(2)
+        b1.button("Nouvelle prise", key="area_new", on_click=_area_new)
+        go = b2.button("Recherche", type="primary", key="area_go")
+        if go:
+            _run_area(area, AreaOptions(include_relations=rel, named_only=named, dedup_radius_m=float(dedup)))
+    res = st.session_state.get("result")
+    if res is not None and res.meta.get("area"):
+        st.divider()
+        _render_result(res)
+
+
+def _run_area(area: AreaQuery, options: AreaOptions):
+    status = st.empty()
+    with st.spinner("Interrogation d'Overpass sur le périmètre…"):
+        res = locate_area(get_client(), get_settings(), area, options, get_countries(), get_naf(),
+                          on_event=lambda m: status.caption(m))
+    status.empty()
+    st.session_state["result"] = res
+    st.session_state["result_options"] = options
+
+
 def page_geolocalisation():
     st.title("Géolocalisation d'entreprises")
-    mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"], horizontal=True)
+    c_mode, c_area = st.columns([3, 2])
+    with c_area:
+        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+        area_mode = st.checkbox(
+            "Entreprises sur un périmètre géographique", False, key="area_mode",
+            help="**Principe** : au lieu de chercher une entreprise par son nom, on délimite un cercle sur la carte et on "
+                 "récupère tous les établissements situés dedans.\n\n"
+                 "**Coché** : cliquez pour fixer le centre, déplacez la souris pour régler le rayon, cliquez de nouveau pour "
+                 "valider, puis lancez la recherche. Les objets portant un tag *shop*, *amenity* ou *brand* sont retenus.\n\n"
+                 "**Décoché** : recherche par nom d'entreprise (saisie, liste ou fichier).")
+    with c_mode:
+        mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"],
+                        horizontal=True, disabled=area_mode)
+    if area_mode:
+        _page_area()
+        return
     queries, warns = _collect_queries(mode)
     for w in warns[:5]:
         st.warning(w)
@@ -494,7 +599,7 @@ def page_geolocalisation():
     if run:
         _run_search(queries, options)
     res = st.session_state.get("result")
-    if res is not None:
+    if res is not None and not res.meta.get("area"):
         st.divider()
         shown = sorted(res.report["nom_demande"].astype(str).unique()) if "nom_demande" in res.report else []
         if shown:
