@@ -46,13 +46,16 @@ def is_local_endpoint(url: str) -> bool:
 class Settings:
     # --- Overpass -------------------------------------------------------
     overpass_urls: tuple[str, ...] = PUBLIC_OVERPASS
-    contact: str = "maxime.trevisani@square-management.com"                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
+    contact: str = ""                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
     server_timeout_s: int = 280             # [timeout:] côté serveur, recherche regex (comme la v1)
     fast_timeout_s: int = 60                # [timeout:] en mode exact (rapide)
     total_budget_s: float = 600.0           # temps maxi par entreprise, tous serveurs confondus
     ping_timeout_s: float = 15.0            # test de connexion
+    area_timeout_s: int = 90                # [timeout:] d'une recherche par périmètre
+    area_max_radius_m: int = 2000           # rayon maximal d'un périmètre (évite les réponses trop lourdes)
+    area_max_sites: int = 5000              # sites conservés au maximum (les plus proches du centre)
     maxsize_mb: int = 0                     # 0 = ne pas fixer [maxsize:]
-    max_attempts: int = 2                   # essais par endpoint
+    max_attempts: int = 2                   # essais par endpoint (erreurs réseau / 429 / 502 / 503 seulement)
     backoff_base_s: float = 5.0             # attente de base (exponentielle + jitter)
     backoff_max_s: float = 90.0
     min_interval_s: float = 1.0             # délai mini entre deux requêtes (0 en local)
@@ -78,7 +81,7 @@ class Settings:
 
     @property
     def user_agent(self) -> str:
-        return f"CatMap/3.1 (contact: {self.contact})" if self.contact else "CatMap/3.1"
+        return f"CatMap/3.2 (contact: {self.contact})" if self.contact else "CatMap/3.2"
 
     @property
     def uses_public_overpass(self) -> bool:
@@ -115,6 +118,9 @@ def load_settings(env: Optional[Mapping[str, str]] = None, secrets: Optional[Map
         server_timeout_s=_to_int(get("OVERPASS_TIMEOUT_S"), 280),
         fast_timeout_s=_to_int(get("OVERPASS_FAST_TIMEOUT_S"), 60),
         total_budget_s=_to_float(get("OVERPASS_TOTAL_BUDGET_S"), 600.0),
+        area_timeout_s=_to_int(get("OVERPASS_AREA_TIMEOUT_S"), 90),
+        area_max_radius_m=max(50, _to_int(get("CATMAP_AREA_MAX_RADIUS_M"), 2000)),
+        area_max_sites=max(1, _to_int(get("CATMAP_AREA_MAX_SITES"), 5000)),
         maxsize_mb=_to_int(get("OVERPASS_MAXSIZE_MB"), 0),
         max_attempts=max(1, _to_int(get("OVERPASS_MAX_ATTEMPTS"), 2)),
         backoff_base_s=_to_float(get("OVERPASS_BACKOFF_S"), 0.5 if local else 5.0),
