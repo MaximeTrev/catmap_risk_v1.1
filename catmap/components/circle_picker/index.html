@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #f3f3f3; font: 14px "Segoe UI", system-ui, sans-serif; color: #000; }
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 8px 10px; background: #ffffff;
+         border: 2px solid #bd8e43; border-bottom: none; border-radius: 10px 10px 0 0; box-sizing: border-box; min-height: 62px; }
+  #radius { font-size: 18px; font-weight: 700; min-width: 250px; white-space: nowrap; }
+  #radius.capped #rv { color: #b3261e; }
+  #rv { color: #000; }
+  #limit { font-size: 12px; font-weight: 400; color: #404140; }
+  /* hauteur fixe : la barre ne change jamais de taille, donc la carte ne se décale pas sous la souris */
+  #hint { flex: 1 1 260px; font-size: 13px; color: #000; height: 2.7em; line-height: 1.35em; overflow: hidden; }
+  #hint.warn { color: #b3261e; font-weight: 600; }
+  #search { display: flex; gap: 6px; }
+  #q { width: 190px; padding: 5px 8px; border: 1px solid #404140; border-radius: 6px; background: #fff; color: #000; }
+  #go { padding: 5px 10px; border: 1px solid #bd8e43; border-radius: 6px; background: #404140; color: #fff; cursor: pointer; }
+  #map { width: 100%; border: 2px solid #bd8e43; border-radius: 0 0 10px 10px; box-sizing: border-box; }
+  #map.crosshair, #map.crosshair .leaflet-interactive { cursor: crosshair !important; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div id="radius">Rayon : <span id="rv">-</span> <span id="limit"></span></div>
+  <div id="hint">Cliquez sur la carte pour fixer le centre.</div>
+  <form id="search" autocomplete="off"><input id="q" type="text" placeholder="Aller à une ville, une adresse…"><button id="go" type="submit">Aller</button></form>
+</div>
+<div id="map" class="crosshair"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function () {
+  "use strict";
+  // ---- protocole minimal des composants Streamlit (sans build) ----------------
+  function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
+  var Streamlit = {
+    ready: function () { send("streamlit:componentReady", { apiVersion: 1 }); },
+    setHeight: function (h) { send("streamlit:setFrameHeight", { height: h }); },
+    setValue: function (v) { send("streamlit:setComponentValue", { value: v, dataType: "json" }); }
+  };
+
+  var MIN_RADIUS = 10;                         // mètres
+  var cfg = { maxRadius: 2000 };
+  var map = null, state = "idle";              // idle -> drawing -> done
+  var centerLL = null, circle = null, centerDot = null, radius = 0;
+  var el = {
+    map: document.getElementById("map"), rv: document.getElementById("rv"), radius: document.getElementById("radius"),
+    limit: document.getElementById("limit"), hint: document.getElementById("hint"),
+    form: document.getElementById("search"), q: document.getElementById("q")
+  };
+
+  function fmt(m) { return Math.round(m).toLocaleString("fr-FR") + " m"; }
+  function setHint(text, warn) { el.hint.textContent = text; el.hint.className = warn ? "warn" : ""; }
+  function showRadius(r, capped) {
+    el.rv.textContent = fmt(r) + (r >= 1000 ? " (" + (r / 1000).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " km)" : "");
+    el.radius.className = capped ? "capped" : "";
+  }
+  function showLimit() { el.limit.textContent = "· maximum autorisé : " + fmt(cfg.maxRadius); }
+
+  function clearDrawing() {
+    if (circle) { map.removeLayer(circle); circle = null; }
+    if (centerDot) { map.removeLayer(centerDot); centerDot = null; }
+    centerLL = null; radius = 0; state = "idle";
+    el.rv.textContent = "-"; el.radius.className = "";
+    el.map.classList.add("crosshair");
+    setHint("Cliquez sur la carte pour fixer le centre.");
+  }
+
+  function start(ll) {
+    centerLL = ll; state = "drawing"; radius = 0;
+    centerDot = L.circleMarker(ll, { radius: 5, color: "#404140", weight: 2, fillColor: "#bd8e43", fillOpacity: 1 }).addTo(map);
+    circle = L.circle(ll, { radius: 1, color: "#bd8e43", weight: 3, fillColor: "#bd8e43", fillOpacity: 0.15 }).addTo(map);
+    showRadius(0, false);
+    setHint("Déplacez la souris pour agrandir le cercle, puis cliquez pour valider le rayon (Échap : annuler).");
+  }
+
+  function update(ll) {
+    var d = map.distance(centerLL, ll);
+    var capped = d > cfg.maxRadius;
+    radius = Math.min(d, cfg.maxRadius);
+    circle.setRadius(Math.max(radius, 1));
+    showRadius(radius, capped);
+    if (capped) { setHint("Rayon maximal atteint : " + fmt(cfg.maxRadius) + ". Cliquez pour valider.", true); }
+    else { setHint("Déplacez la souris pour agrandir le cercle, puis cliquez pour valider le rayon (Échap : annuler)."); }
+  }
+
+  function finish(ll) {
+    update(ll);
+    if (radius < MIN_RADIUS) { setHint("Rayon trop petit (minimum " + MIN_RADIUS + " m) : éloignez la souris du centre.", true); return; }
+    state = "done";
+    el.map.classList.remove("crosshair");
+    var r = Math.round(radius * 10) / 10;
+    showRadius(r, false);
+    setHint("Rayon validé. Utilisez les boutons sous la carte : « Recherche » ou « Nouvelle prise ».");
+    Streamlit.setValue({ lat: Math.round(centerLL.lat * 1e6) / 1e6, lon: Math.round(centerLL.lng * 1e6) / 1e6, radius_m: r });
+  }
+
+  function init(args) {
+    var height = args.height || 620;
+    el.map.style.height = Math.max(240, height - el.map.previousElementSibling.offsetHeight - 6) + "px";
+    cfg.maxRadius = args.max_radius_m || cfg.maxRadius;
+    showLimit();
+    map = L.map("map", { center: args.center || [46.6, 2.5], zoom: args.zoom || 6, doubleClickZoom: false });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "&copy; <a href='https://www.openstreetmap.org/copyright' target='_blank' rel='noopener'>OpenStreetMap</a>"
+    }).addTo(map);
+    map.on("click", function (e) {
+      if (state === "idle") start(e.latlng);
+      else if (state === "drawing") finish(e.latlng);
+    });
+    map.on("mousemove", function (e) { if (state === "drawing") update(e.latlng); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && state === "drawing") clearDrawing(); });
+
+    el.form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var q = el.q.value.trim();
+      if (!q) return;
+      setHint("Recherche du lieu…");
+      fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=fr&q=" + encodeURIComponent(q))
+        .then(function (r) { return r.json(); })
+        .then(function (rows) {
+          if (!rows.length) { setHint("Lieu introuvable : « " + q + " ».", true); return; }
+          var b = rows[0].boundingbox;
+          if (b && b.length === 4) map.fitBounds([[+b[0], +b[2]], [+b[1], +b[3]]], { maxZoom: 17 });
+          else map.setView([+rows[0].lat, +rows[0].lon], 15);
+          setHint(state === "idle" ? "Cliquez sur la carte pour fixer le centre." : "Poursuivez le tracé du cercle.");
+        })
+        .catch(function () { setHint("Recherche de lieu indisponible. Déplacez la carte manuellement.", true); });
+    });
+    Streamlit.setHeight(height);
+  }
+
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") return;
+    var args = d.args || {};
+    if (!map) { init(args); }
+    else if (args.max_radius_m) { cfg.maxRadius = args.max_radius_m; showLimit(); }
+  });
+  Streamlit.ready();
+})();
+</script>
+</body>
+</html>
