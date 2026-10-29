@@ -32,6 +32,7 @@ from catmap.overpass import OverpassClient
 from catmap.pipeline import geolocate
 from catmap.config import load_settings
 from catmap import cyclone_map as cm
+from catmap import cyclone_risk as cr
 from catmap import cyclones as cy
 from catmap import vigilance as vg
 
@@ -651,7 +652,7 @@ def _load_cyclones(with_rain: bool = True):
                      "Pressure": cy.pressure_text(c.mslp_hpa), "Movement": cy.movement_text(c.direction_deg, c.speed_kt),
                      "Bulletin (UTC)": s.advisory_time.strftime("%d/%m %H:%M") if s.advisory_time else "",
                      "_wind": c.wind_kt or 0, "_cat": c.category})
-    return cm.build_payload(storms, radii, rain_available=rain), rows
+    return cm.build_payload(storms, radii, rain_available=rain), rows, storms
 
 
 def _cyclone_section():
@@ -666,7 +667,7 @@ def _cyclone_section():
                                      "Désactivez pour accélérer l'affichage.")
     try:
         with st.spinner("Chargement des cyclones actifs…"):
-            payload, rows = _load_cyclones(with_rain)
+            payload, rows, storms = _load_cyclones(with_rain)
     except cy.CycloneError as e:
         st.error(f"Données cyclones indisponibles : {e}")
         return
@@ -690,6 +691,44 @@ def _cyclone_section():
             "- **Précipitations attendues** : modèle global Open-Meteo, valeur ponctuelle au centre (sous-estime les maxima des bandes pluvieuses). "
             "**Précipitations observées** : NASA GIBS / IMERG (raster, mise à jour environ toutes les 30 min).\n"
             "- Les données sont informatives et ne remplacent pas les bulletins officiels des centres de prévision.")
+    _cyclone_risk_section(storms)
+
+
+def _cyclone_risk_section(storms):
+    st.subheader("Croiser vos points avec les cyclones")
+    up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                          type=["csv", "txt"], key="cy_csv")
+    if up is None:
+        st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
+        return
+    try:
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue())
+    except InputError as e:
+        st.error(str(e))
+        return
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    radius = st.slider("Distance maximale à la trajectoire (km)", 10, 500, 150, step=10, key="cy_radius",
+                       help="Un point est « sur la trajectoire » s'il est à moins de cette distance de la ligne de trajectoire prévue "
+                            "(position actuelle comprise). Ce n'est pas le rayon réel des vents, qui varie selon le cyclone.")
+    if not storms:
+        st.info("Aucun cyclone actif : tous les points auraient un impact de 0.")
+    if st.button("Analyser le risque", key="cy_analyse"):
+        with st.spinner("Croisement en cours…"):
+            st.session_state["cy_risk"] = cr.assess_points(df, lat_c, lon_c, storms, radius_km=float(radius))
+            st.session_state["cy_risk_sig"] = (up.name, len(df))
+    res = st.session_state.get("cy_risk")
+    if res is None or st.session_state.get("cy_risk_sig") != (up.name, len(df)):
+        return
+    hit = res[res["impact"] > 0]
+    m = st.columns(3)
+    m[0].metric("Points analysés", len(res))
+    m[1].metric("Points sur la trajectoire", len(hit))
+    m[2].metric("Impact le plus proche", f"{int(hit['impact'].min())} h" if len(hit) else "—")
+    _stretch(st.dataframe, res, hide_index=True)
+    st.caption("impact : 0 = hors trajectoire, sinon échéance (12, 24… h) à laquelle le cyclone atteint le point. "
+               "max_sustained_winds et max_wind_gusts en km/h, total_precipitation en mm (cumul prévu au point jusqu'à 12 h après l'impact). "
+               "None = hors trajectoire ou donnée indisponible.")
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(res), "catmap_risque_cyclones.csv", "text/csv")
 
 
 def page_temps_reel():
