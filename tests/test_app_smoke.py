@@ -150,6 +150,30 @@ class TestAppSmoke(unittest.TestCase):
         self.assertTrue([c for c in st.calls if c[0] == "dataframe"])
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
 
+    def test_cyclone_risk_upload_and_analysis(self):
+        from catmap import cyclone_risk as cr
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long\nA;16,0;-75,0\nB;48,85;2,35\n".encode()
+
+        app, st = self.load({"Navigation": "Temps réel", "cy_csv": Up(), "button:Analyser le risque": True})
+        with self.fake_cyclones(), mock.patch.object(cr, "site_precipitation", side_effect=lambda pts, **k: [7.0] * len(pts)):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        res = st.session_state["cy_risk"]
+        self.assertEqual(list(res["impact"]), [12, 0])
+        self.assertEqual(res.iloc[0]["total_precipitation"], 7.0)
+        self.assertTrue([c for c in st.calls if c[0] == "download"])
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_cyclone_risk_button_hidden_without_upload(self):
+        app, st = self.load({"Navigation": "Temps réel", "button:Analyser le risque": True})
+        with self.fake_cyclones():
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        self.assertNotIn("cy_risk", st.session_state)
+
     def test_cyclone_service_down_shows_error_not_crash(self):
         from catmap import cyclones as cy
         app, st = self.load({"Navigation": "Temps réel"})
