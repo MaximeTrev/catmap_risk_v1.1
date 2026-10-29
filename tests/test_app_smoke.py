@@ -72,6 +72,7 @@ def make_fakes(script):
     comp = types.ModuleType("streamlit.components"); comp_v1 = types.ModuleType("streamlit.components.v1")
     comp_v1.html = rec("components_html"); comp.v1 = comp_v1; st.components = comp
     st.spinner = lambda *a, **k: Container(st)
+    st.container = lambda *a, **k: Container(st)
     return {"streamlit.components": comp, "streamlit.components.v1": comp_v1, "streamlit": st, "plotly": plotly, "plotly.express": px, "folium": folium, "folium.plugins": folium.plugins,
             "streamlit_folium": sf}, st
 
@@ -166,6 +167,21 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(res.iloc[0]["total_precipitation"], 7.0)
         self.assertTrue([c for c in st.calls if c[0] == "download"])
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        page = [c for c in st.calls if c[0] == "components_html"][-1][1][0]
+        self.assertIn('"points_analysed": true', page)       # les points du CSV sont sur la carte, colorés par impact
+        self.assertIn("impact 12 h", page)
+
+    def test_points_shown_on_map_before_analysis(self):
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return b"nom;lat;long\nA;16,0;-75,0\n"
+        app, st = self.load({"Navigation": "Temps réel", "cy_csv": Up()})
+        with self.fake_cyclones():
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        page = [c for c in st.calls if c[0] == "components_html"][-1][1][0]
+        self.assertIn('"points_analysed": false', page)
+        self.assertIn('"tip": "A"', page)
 
     def test_cyclone_risk_button_hidden_without_upload(self):
         app, st = self.load({"Navigation": "Temps réel", "button:Analyser le risque": True})
