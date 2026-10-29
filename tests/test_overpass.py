@@ -17,19 +17,20 @@ class TestBuildQuery(unittest.TestCase):
 
     def test_default_query_shape(self):
         q = build_query(NameQuery.make("IKEA"), SearchOptions(), self.s)
-        self.assertTrue(q.startswith("[out:json][timeout:180];"))
-        self.assertIn('[!"highway"][!"place"][!"junction"][!"boundary"]', q)
+        self.assertTrue(q.startswith("[out:json][timeout:280];"))
+        self.assertIn('[!"highway"][!"place"][!"junction"]', q)
         self.assertIn("rel[type=multipolygon]", q)
-        self.assertIn('["brand"~', q)
-        self.assertNotIn('["operator"~', q)
+        self.assertIn('["name"~"', q)                # comme la v1 : regex insensible à la casse sur name
+        self.assertNotIn('"brand"', q)               # brand non interrogé par défaut (case décochée)
+        self.assertNotIn('[~"^(shop', q)             # pas de regex sur les clés (coûteuse) : filtré en Python
+        self.assertNotIn('["operator"=', q)
         self.assertTrue(q.rstrip().endswith("out body geom;"))
-        self.assertNotIn("\\", q)                      # aucun échappement fragile (A5)
 
     def test_options(self):
         q = build_query(NameQuery.make("Total", "q154037"),
                         SearchOptions(include_operator=True, include_relations=False, countries=("fr", "BE"),
                                       require_business_tag=False), self.s)
-        self.assertIn('["operator"~', q)
+        self.assertIn('["operator"~"', q)
         self.assertIn('"brand:wikidata"="Q154037"', q)
         self.assertNotIn("rel[", q)
         self.assertIn('area["ISO3166-1"="BE"][admin_level=2];area["ISO3166-1"="FR"][admin_level=2];', q)
@@ -43,6 +44,20 @@ class TestBuildQuery(unittest.TestCase):
             build_query(NameQuery.make("X1"), SearchOptions(countries=("FRA",)), self.s)
         with self.assertRaises(ValueError):
             build_query(NameQuery.make("X1"), SearchOptions(bbox=(50, 0, 40, 1)), self.s)
+
+    def test_exact_mode(self):
+        q = build_query(NameQuery.make("IKEA"), SearchOptions(search_mode="exact"), self.s)
+        self.assertNotIn("~", q.replace('[~', ''))   # aucune regex
+        self.assertIn('["name"="IKEA"]', q)
+        self.assertTrue(q.startswith("[out:json][timeout:60];"))
+
+    def test_injection_escaped(self):
+        q = build_query(NameQuery.make('A"]; out; //'), SearchOptions(), self.s)
+        self.assertNotIn('"]; out;', q)              # la regex ne laisse passer ni guillemet ni point-virgule bruts
+        self.assertNotIn("//", q)
+
+    def test_mode_in_cache_signature(self):
+        self.assertNotEqual(SearchOptions().cache_signature(), SearchOptions(search_mode="exact").cache_signature())
 
     def test_maxsize(self):
         s = self.s.with_overrides(maxsize_mb=256)
@@ -104,9 +119,49 @@ class TestClient(unittest.TestCase):
         with self.assertRaises(OverpassUnavailable):
             c.fetch("Q")
 
-    def test_timeout_retried(self):
+    def test_timeout_goes_to_next_server_without_retry(self):
         c, sess = self.client([requests.Timeout("t"), FakeResponse(200, payload([]))])
-        self.assertEqual(c.fetch("Q").attempts, 2)
+        r = c.fetch("Q")
+        self.assertEqual([x["url"] for x in sess.calls], ["http://a/api", "http://b/api"])
+        self.assertEqual(r.endpoint, "http://b/api")
+
+    def test_504_not_retried_on_same_server(self):
+        c, sess = self.client([FakeResponse(504), FakeResponse(200, payload([]))])
+        c.fetch("Q")
+        self.assertEqual([x["url"] for x in sess.calls], ["http://a/api", "http://b/api"])
+
+    def test_503_retried(self):
+        c, sess = self.client([FakeResponse(503), FakeResponse(200, payload([]))])
+        c.fetch("Q")
+        self.assertEqual([x["url"] for x in sess.calls], ["http://a/api", "http://a/api"])
+
+    def test_error_message_lists_every_endpoint(self):
+        c, _ = self.client([requests.ConnectionError("dns failure"), FakeResponse(504)])
+        with self.assertRaises(OverpassUnavailable) as cm:
+            c.fetch("Q")
+        msg = str(cm.exception)
+        self.assertIn("dns failure", msg)
+        self.assertIn("http://b/api : HTTP 504", msg)
+
+    def test_budget_stops_early(self):
+        c, sess = self.client([requests.ConnectionError("x")], total_budget_s=-1.0)
+        # budget négatif = illimité (0 ou moins) : tous les essais sont faits
+        with self.assertRaises(OverpassUnavailable):
+            c.fetch("Q")
+        self.assertEqual(len(sess.calls), 4)
+
+    def test_events_emitted(self):
+        c, _ = self.client([FakeResponse(200, payload([]))])
+        events = []
+        c.fetch("Q", on_event=events.append)
+        self.assertTrue(events and "http://a/api" in events[0])
+
+    def test_ping(self):
+        c, _ = self.client([FakeResponse(200, payload([])), requests.ConnectionError("nope")])
+        rows = c.ping()
+        self.assertTrue(rows[0]["ok"])
+        self.assertFalse(rows[1]["ok"])
+        self.assertIn("nope", rows[1]["message"])
 
     def test_non_json_goes_to_next_server(self):
         c, _ = self.client([FakeResponse(200, None, text="<html>"), FakeResponse(200, payload([]))])
