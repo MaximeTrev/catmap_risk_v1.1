@@ -69,7 +69,10 @@ def make_fakes(script):
     st.column_config = M()
     plotly = types.ModuleType("plotly"); px = types.ModuleType("plotly.express"); px.pie = M(); plotly.express = px
     folium = M(); sf = types.ModuleType("streamlit_folium"); sf.st_folium = rec("st_folium")
-    return {"streamlit": st, "plotly": plotly, "plotly.express": px, "folium": folium, "folium.plugins": folium.plugins,
+    comp = types.ModuleType("streamlit.components"); comp_v1 = types.ModuleType("streamlit.components.v1")
+    comp_v1.html = rec("components_html"); comp.v1 = comp_v1; st.components = comp
+    st.spinner = lambda *a, **k: Container(st)
+    return {"streamlit.components": comp, "streamlit.components.v1": comp_v1, "streamlit": st, "plotly": plotly, "plotly.express": px, "folium": folium, "folium.plugins": folium.plugins,
             "streamlit_folium": sf}, st
 
 
@@ -85,6 +88,15 @@ class TestAppSmoke(unittest.TestCase):
         app = importlib.import_module("app")
         self.addCleanup(lambda: sys.modules.pop("app", None))
         return app, st
+
+    def fake_cyclones(self):
+        from catmap import cyclones as cy
+        from tests.test_cyclones import FORECAST, NOW, OBSERVED
+        storms = cy.build_storms(cy.parse_forecast(FORECAST), cy.parse_observed(OBSERVED), now=NOW)
+        stack = mock.patch.multiple(cy, fetch_storms=mock.Mock(return_value=storms),
+                                    fetch_wind_radii=mock.Mock(return_value={}),
+                                    attach_precipitation=mock.Mock(return_value=True))
+        return stack
 
     def fake_fetch(self):
         from catmap.overpass import FetchResult
@@ -118,11 +130,36 @@ class TestAppSmoke(unittest.TestCase):
 
         script["Navigation"] = "Temps réel"
         st.calls.clear()
-        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
                 mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
                 mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
             app.main()
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_cyclone_section_renders_map_and_table(self):
+        app, st = self.load({"Navigation": "Temps réel"})
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {}, clear=False):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        html_calls = [c for c in st.calls if c[0] == "components_html"]
+        self.assertEqual(len(html_calls), 1)
+        page = html_calls[0][1][0]
+        self.assertIn("Melissa", page)
+        self.assertIn("Maximum Sustained Winds", page)
+        self.assertIn("L.control.layers", page)
+        self.assertTrue([c for c in st.calls if c[0] == "dataframe"])
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_cyclone_service_down_shows_error_not_crash(self):
+        from catmap import cyclones as cy
+        app, st = self.load({"Navigation": "Temps réel"})
+        with mock.patch.object(cy, "fetch_storms", side_effect=cy.CycloneError("hors ligne")):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        errs = [c for c in st.calls if c[0] == "error"]
+        self.assertEqual(len(errs), 1)
+        self.assertIn("hors ligne", errs[0][1][0])
+        self.assertTrue([c for c in st.calls if c[0] == "info"])      # l'onglet vigilance reste utilisable
 
     def test_empty_search_does_not_crash(self):
         from catmap.overpass import FetchResult
@@ -135,7 +172,7 @@ class TestAppSmoke(unittest.TestCase):
 
     def test_no_credentials_page_is_informative(self):
         app, st = self.load({"Navigation": "Temps réel"})
-        with mock.patch.dict("os.environ", {}, clear=False):
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {}, clear=False):
             for k in ("METEOFRANCE_API_KEY", "METEOFRANCE_CLIENT_ID", "METEOFRANCE_CLIENT_SECRET"):
                 import os; os.environ.pop(k, None)
             app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
