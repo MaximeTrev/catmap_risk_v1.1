@@ -89,7 +89,75 @@ def _marker_html(name: str, key: str, size: int) -> tuple[str, int, int, int, in
     return body, w, h, w // 2, label_h + svg_h // 2
 
 
-def build_payload(storms: list[Storm], radii: Optional[dict] = None, *, rain_available: bool = False) -> dict:
+IMPACT_COLORS = ((24, "#d7191c"), (48, "#fd8d3c"), (72, "#fecc5c"), (10**6, "#ffffb2"))
+NO_IMPACT_COLOR = "#2e9e5b"
+NEUTRAL_COLOR = "#1f6fb5"
+NAME_COLUMNS = ("name", "nom_demande", "nom", "entreprise", "company", "site", "label")
+
+
+def impact_color(impact) -> str:
+    try:
+        i = int(impact)
+    except (TypeError, ValueError):
+        return NEUTRAL_COLOR
+    if i <= 0:
+        return NO_IMPACT_COLOR
+    return next(c for lim, c in IMPACT_COLORS if i <= lim)
+
+
+def _fmt(v) -> str:
+    if v is None or (isinstance(v, float) and v != v):
+        return "None"
+    return str(v)
+
+
+def build_points(df, lat_col: str, lon_col: str, storms: list[Storm], *, analysed: bool = False,
+                 cap: int = 5000) -> tuple[list[dict], bool]:
+    """Points du CSV pour la carte. Avant analyse : bleus ; après : vert (hors trajectoire) ou rouge→jaune selon l'échéance.
+    Retourne (points, tronqué). Au-delà de ``cap`` points, les points impactés sont gardés en priorité."""
+    import pandas as pd
+    lat = pd.to_numeric(df[lat_col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    lon = pd.to_numeric(df[lon_col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    ok = lat.between(-90, 90) & lon.between(-360, 360)
+    idx = list(df.index[ok])
+    if analysed and "impact" in df.columns:
+        idx.sort(key=lambda i: 0 if (df.at[i, "impact"] or 0) > 0 else 1)
+    truncated = len(idx) > cap
+    idx = idx[:cap]
+    track_lons = [p.lon for s in storms for p in s.forecast]
+    east = any(x > 180 for x in track_lons)
+    west = any(x < -180 for x in track_lons)
+    name_col = next((c for c in df.columns if c.lower() in NAME_COLUMNS), None)
+    if name_col is None:
+        name_col = next((c for c in df.columns if c not in (lat_col, lon_col)), None)
+    out = []
+    for i in idx:
+        x, y = float(lon[i]), float(lat[i])
+        if east and x < -100:
+            x += 360
+        elif west and x > 100:
+            x -= 360
+        label = _fmt(df.at[i, name_col]) if name_col else f"Point {i + 1}"
+        rows = [_row("Latitude / longitude", f"{y:.4f} / {float(lon[i]):.4f}")]
+        color = NEUTRAL_COLOR
+        if analysed and "impact" in df.columns:
+            imp = int(df.at[i, "impact"] or 0)
+            color = impact_color(imp)
+            rows += [_row("Impact", f"{imp} h" if imp else "0 (hors trajectoire)"),
+                     _row("Cyclone", _fmt(df.at[i, "cyclone"]) if "cyclone" in df.columns else "None"),
+                     _row("max_sustained_winds", _fmt(df.at[i, "max_sustained_winds"] if "max_sustained_winds" in df.columns else None) + (" km/h" if imp else "")),
+                     _row("max_wind_gusts", _fmt(df.at[i, "max_wind_gusts"] if "max_wind_gusts" in df.columns else None) + (" km/h" if imp else "")),
+                     _row("total_precipitation", _fmt(df.at[i, "total_precipitation"] if "total_precipitation" in df.columns else None) + (" mm" if imp else ""))]
+            tip = f"{label} — impact {imp} h" if imp else f"{label} — hors trajectoire"
+        else:
+            tip = label
+        out.append({"lat": y, "lon": x, "color": color, "tip": tip,
+                    "popup": f"<div class='cy-pop'><div class='pn'>{html.escape(label)}</div><table>{''.join(rows)}</table></div>"})
+    return out, truncated
+
+
+def build_payload(storms: list[Storm], radii: Optional[dict] = None, *, rain_available: bool = False,
+                  points: Optional[list[dict]] = None, points_analysed: bool = False) -> dict:
     out_storms, segments, fpoints, past, rain = [], [], [], [], []
     for st in storms:
         if st.current is None:
@@ -117,7 +185,9 @@ def build_payload(storms: list[Storm], radii: Optional[dict] = None, *, rain_ava
                              "tip": f"{st.name} — +{p.tau} h : {p.precip_mm:.0f} mm / 24 h (au centre)"})
     return {"storms": out_storms, "segments": segments, "forecast_points": fpoints, "past": past,
             "rain": rain, "radii": radii or {}, "rain_tiles": IMERG_TILES, "rain_available": rain_available,
-            "colors": {str(k): v for k, v in CAT_COLORS.items()}}
+            "colors": {str(k): v for k, v in CAT_COLORS.items()},
+            "points": points or [], "points_analysed": points_analysed,
+            "impact_colors": {"none": NO_IMPACT_COLOR, "le24": "#d7191c", "le48": "#fd8d3c", "le72": "#fecc5c", "later": "#ffffb2"}}
 
 
 _CSS = """
@@ -193,6 +263,10 @@ D.rain.forEach(r => L.circleMarker([r.lat, r.lon], {radius: 7 + Math.min(18, Mat
   fillColor: rainColor(r.mm), fillOpacity: .6}).bindTooltip(r.tip, {sticky: true}).addTo(gRain));
 L.tileLayer(D.rain_tiles, {opacity: .7, maxNativeZoom: 6, maxZoom: 18, attribution: 'NASA GIBS / IMERG'}).addTo(gImerg);
 
+const gPts = L.layerGroup();
+(D.points || []).forEach(p => L.circleMarker([p.lat, p.lon], {radius: 6, color: '#222', weight: 1.2, fillColor: p.color, fillOpacity: .95})
+  .bindPopup(p.popup, {maxWidth: 340}).bindTooltip(p.tip, {sticky: true}).addTo(gPts));
+
 const overlays = {
   'Cyclones actifs (position, nom)': gStorms,
   'Trajectoire prévue et vents': gTrack,
@@ -201,8 +275,10 @@ const overlays = {
   'Précipitations attendues (24 h, modèle)': gRain,
   'Précipitations observées (NASA IMERG)': gImerg
 };
+if (D.points.length) overlays['Vos points (CSV)'] = gPts;
 gStorms.addTo(map); gTrack.addTo(map); gPast.addTo(map); gRadii.addTo(map);
 if (D.rain.length) gRain.addTo(map);
+if (D.points.length) gPts.addTo(map);
 L.control.layers(base, overlays, {collapsed: false, position: 'topright'}).addTo(map);
 
 const legend = L.control({position: 'bottomleft'});
@@ -211,11 +287,17 @@ legend.onAdd = function () {
   const names = {0: 'Tempête tropicale', 1: 'Catégorie 1', 2: 'Catégorie 2', 3: 'Catégorie 3', 4: 'Catégorie 4', 5: 'Catégorie 5'};
   d.innerHTML = '<b>Vent prévu le long de la trajectoire</b>' +
     Object.keys(names).map(k => '<div><i style="background:' + D.colors[k] + '"></i>' + names[k] + '</div>').join('');
+  if (D.points.length) {
+    const c = D.impact_colors, dot = col => '<i style="background:' + col + ';width:12px;height:12px;border-radius:50%"></i>';
+    d.innerHTML += D.points_analysed
+      ? '<b style="margin-top:6px">Vos points</b><div>' + dot(c.none) + 'Hors trajectoire</div><div>' + dot(c.le24) + 'Impact ≤ 24 h</div><div>' + dot(c.le48) + 'Impact ≤ 48 h</div><div>' + dot(c.le72) + 'Impact ≤ 72 h</div><div>' + dot(c.later) + 'Impact &gt; 72 h</div>'
+      : '<b style="margin-top:6px">Vos points</b><div>' + dot('#1f6fb5') + 'Non analysés</div>';
+  }
   return d;
 };
 legend.addTo(map);
 
-const all = [].concat(D.storms.map(s => [s.lat, s.lon]), D.segments.flatMap(s => s.coords));
+const all = [].concat(D.storms.map(s => [s.lat, s.lon]), D.segments.flatMap(s => s.coords), D.points.map(p => [p.lat, p.lon]));
 if (all.length) { map.fitBounds(L.latLngBounds(all).pad(0.2), {maxZoom: 6}); }
 else {
   const e = document.createElement('div'); e.className = 'cy-empty';
