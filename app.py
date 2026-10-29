@@ -662,9 +662,9 @@ def _cyclone_section():
         if st.button("Actualiser les cyclones", key="cy_refresh"):
             _load_cyclones.clear()
     with c2:
-        with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain",
-                                help="Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
-                                     "Désactivez pour accélérer l'affichage.")
+        with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain")
+        st.caption("Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
+                   "Décochez pour accélérer l'affichage.")
     try:
         with st.spinner("Chargement des cyclones actifs…"):
             payload, rows, storms = _load_cyclones(with_rain)
@@ -717,9 +717,9 @@ def _cyclone_risk_section(storms):
         st.error(str(e))
         return None
     st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
-    radius = st.slider("Distance maximale à la trajectoire (km)", 10, 500, 150, step=10, key="cy_radius",
-                       help="Un point est « sur la trajectoire » s'il est à moins de cette distance de la ligne de trajectoire prévue "
-                            "(position actuelle comprise). Ce n'est pas le rayon réel des vents, qui varie selon le cyclone.")
+    radius = st.slider("Distance maximale à la trajectoire (km)", 10, 500, 150, step=10, key="cy_radius")
+    st.caption("Un point est « sur la trajectoire » s'il est à moins de cette distance de la ligne de trajectoire prévue "
+               "(position actuelle comprise). Ce n'est pas le rayon réel des vents, qui varie selon le cyclone.")
     if not storms:
         st.info("Aucun cyclone actif : tous les points auraient un impact de 0.")
     if st.button("Analyser le risque", key="cy_analyse"):
