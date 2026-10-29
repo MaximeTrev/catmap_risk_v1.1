@@ -31,6 +31,8 @@ from catmap.naf import NafClassifier
 from catmap.overpass import OverpassClient
 from catmap.pipeline import geolocate
 from catmap.config import load_settings
+from catmap import cyclone_map as cm
+from catmap import cyclones as cy
 from catmap import vigilance as vg
 
 ROOT = Path(__file__).resolve().parent
@@ -635,8 +637,72 @@ def _load_vigilance():
         return None
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_cyclones(with_rain: bool = True):
+    """Cyclones actifs + trajectoire + (facultatif) précipitations. Mis en cache 10 minutes."""
+    storms = cy.fetch_storms()
+    radii = cy.fetch_wind_radii()
+    rain = cy.attach_precipitation(storms) if with_rain else False
+    rows = []
+    for s in storms:
+        c = s.current
+        rows.append({"Nom": s.name, "Bassin": s.basin, "Nature": cy.stage_label(c.wind_kt, s.basin),
+                     "Maximum Sustained Winds": cy.wind_text(c.wind_kt), "Max Wind Gusts": cy.wind_text(c.gust_kt),
+                     "Pressure": cy.pressure_text(c.mslp_hpa), "Movement": cy.movement_text(c.direction_deg, c.speed_kt),
+                     "Bulletin (UTC)": s.advisory_time.strftime("%d/%m %H:%M") if s.advisory_time else "",
+                     "_wind": c.wind_kt or 0, "_cat": c.category})
+    return cm.build_payload(storms, radii, rain_available=rain), rows
+
+
+def _cyclone_section():
+    import streamlit.components.v1 as components
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button("Actualiser les cyclones", key="cy_refresh"):
+            _load_cyclones.clear()
+    with c2:
+        with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain",
+                                help="Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
+                                     "Désactivez pour accélérer l'affichage.")
+    try:
+        with st.spinner("Chargement des cyclones actifs…"):
+            payload, rows = _load_cyclones(with_rain)
+    except cy.CycloneError as e:
+        st.error(f"Données cyclones indisponibles : {e}")
+        return
+    n = len(rows)
+    strong = sum(1 for r in rows if r["_cat"] >= 1)
+    m = st.columns(3)
+    m[0].metric("Systèmes tropicaux actifs", n)
+    m[1].metric("Ouragans / typhons / cyclones (cat. 1 à 5)", strong)
+    m[2].metric("Vent soutenu max", f"{max((r['_wind'] for r in rows), default=0):.0f} kt" if rows else "—")
+    components.html(cm.render_map_html(payload), height=720, scrolling=False)
+    st.caption("Cliquez sur une icône pour afficher ses caractéristiques. Les couches (trajectoire, vents, précipitations, fonds de carte) "
+               "se sélectionnent directement sur la carte, en haut à droite.")
+    if rows:
+        _stretch(st.dataframe, pd.DataFrame(rows).drop(columns=["_wind", "_cat"]), hide_index=True)
+    with st.expander("Sources et limites"):
+        st.markdown(
+            "- **Positions, vents, rafales, pression, déplacement, trajectoire** : NHC (Atlantique, Pacifique Est/Centre) et JTWC "
+            "(Pacifique Ouest, océan Indien, hémisphère Sud) via le service public Esri « Active Hurricanes ». Prévision officielle (trajectoire la plus probable).\n"
+            "- **Catégorie** : calculée à partir du vent soutenu maximal (échelle de Saffir-Simpson, nœuds) pour tous les bassins ; "
+            "les dépressions et tempêtes tropicales utilisent l'icône sans numéro.\n"
+            "- **Précipitations attendues** : modèle global Open-Meteo, valeur ponctuelle au centre (sous-estime les maxima des bandes pluvieuses). "
+            "**Précipitations observées** : NASA GIBS / IMERG (raster, mise à jour environ toutes les 30 min).\n"
+            "- Les données sont informatives et ne remplacent pas les bulletins officiels des centres de prévision.")
+
+
 def page_temps_reel():
-    st.title("Vigilance Météo-France")
+    st.title("Temps réel")
+    t_cy, t_vg = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France"])
+    with t_cy:
+        _cyclone_section()
+    with t_vg:
+        _vigilance_section()
+
+
+def _vigilance_section():
+    st.subheader("Vigilance Météo-France")
     df = _load_vigilance()
     if df is None:
         return
