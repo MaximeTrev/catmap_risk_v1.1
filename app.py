@@ -677,7 +677,7 @@ def _cyclone_section():
     m[0].metric("Systèmes tropicaux actifs", n)
     m[1].metric("Ouragans / typhons / cyclones (cat. 1 à 5)", strong)
     m[2].metric("Vent soutenu max", f"{max((r['_wind'] for r in rows), default=0):.0f} kt" if rows else "—")
-    components.html(cm.render_map_html(payload), height=720, scrolling=False)
+    map_box = st.container()
     st.caption("Cliquez sur une icône pour afficher ses caractéristiques. Les couches (trajectoire, vents, précipitations, fonds de carte) "
                "se sélectionnent directement sur la carte, en haut à droite.")
     if rows:
@@ -691,7 +691,17 @@ def _cyclone_section():
             "- **Précipitations attendues** : modèle global Open-Meteo, valeur ponctuelle au centre (sous-estime les maxima des bandes pluvieuses). "
             "**Précipitations observées** : NASA GIBS / IMERG (raster, mise à jour environ toutes les 30 min).\n"
             "- Les données sont informatives et ne remplacent pas les bulletins officiels des centres de prévision.")
-    _cyclone_risk_section(storms)
+    pts = _cyclone_risk_section(storms)
+    if pts is not None:
+        df_p, lat_c, lon_c, res = pts
+        src = res if res is not None else df_p
+        points, truncated = cm.build_points(src, lat_c, lon_c, storms, analysed=res is not None)
+        payload["points"] = points
+        payload["points_analysed"] = res is not None
+        if truncated:
+            st.caption("Carte : seuls les 5 000 premiers points sont tracés (les points impactés d'abord). Le CSV téléchargé les contient tous.")
+    with map_box:
+        components.html(cm.render_map_html(payload), height=720, scrolling=False)
 
 
 def _cyclone_risk_section(storms):
@@ -700,12 +710,12 @@ def _cyclone_risk_section(storms):
                           type=["csv", "txt"], key="cy_csv")
     if up is None:
         st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
-        return
+        return None
     try:
         df, lat_c, lon_c = cr.read_points_csv(up.getvalue())
     except InputError as e:
         st.error(str(e))
-        return
+        return None
     st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
     radius = st.slider("Distance maximale à la trajectoire (km)", 10, 500, 150, step=10, key="cy_radius",
                        help="Un point est « sur la trajectoire » s'il est à moins de cette distance de la ligne de trajectoire prévue "
@@ -718,7 +728,7 @@ def _cyclone_risk_section(storms):
             st.session_state["cy_risk_sig"] = (up.name, len(df))
     res = st.session_state.get("cy_risk")
     if res is None or st.session_state.get("cy_risk_sig") != (up.name, len(df)):
-        return
+        return df, lat_c, lon_c, None
     hit = res[res["impact"] > 0]
     m = st.columns(3)
     m[0].metric("Points analysés", len(res))
@@ -729,6 +739,7 @@ def _cyclone_risk_section(storms):
                "max_sustained_winds et max_wind_gusts en km/h, total_precipitation en mm (cumul prévu au point jusqu'à 12 h après l'impact). "
                "None = hors trajectoire ou donnée indisponible.")
     st.download_button("Télécharger le résultat (CSV)", _csv_bytes(res), "catmap_risque_cyclones.csv", "text/csv")
+    return df, lat_c, lon_c, res
 
 
 def page_temps_reel():
