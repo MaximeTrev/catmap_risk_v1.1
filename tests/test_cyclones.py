@@ -207,7 +207,7 @@ class MapOutput(unittest.TestCase):
     def test_html_is_valid_json_payload(self):
         h = render_map_html(build_payload(self.storms, {}))
         self.assertIn("L.control.layers", h)
-        self.assertEqual(h.count("</script>"), 2)
+        self.assertEqual(h.count("</script>"), 3)      # Leaflet, markercluster, notre script
 
     def test_empty(self):
         h = render_map_html(build_payload([], {}))
