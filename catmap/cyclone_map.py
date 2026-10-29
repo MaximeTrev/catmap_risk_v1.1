@@ -29,6 +29,8 @@ IMERG_TILES = ("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/IMERG_Precipi
 
 LEAFLET_CSS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"
 LEAFLET_JS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"
+CLUSTER_CSS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css"
+CLUSTER_JS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"
 
 
 def _load_path() -> str:
@@ -214,6 +216,10 @@ html,body{margin:0;height:100%;font-family:Arial,Helvetica,sans-serif}
 .cy-empty{position:absolute;z-index:1000;left:50%;top:14px;transform:translateX(-50%);background:#fff;padding:8px 14px;
   border-radius:6px;box-shadow:0 1px 5px rgba(0,0,0,.35);font-size:14px;color:#232323}
 .leaflet-control-layers{color:#232323}
+.cy-row{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.cy-ungroup{font-size:12px;color:#555;white-space:nowrap;cursor:pointer}
+.cy-ungroup input{vertical-align:middle;margin:0 2px 0 0}
+.cy-cluster div{border-radius:50%;border:2px solid #222;text-align:center;font-weight:700;font-size:12px;color:#222;box-shadow:0 0 4px rgba(0,0,0,.5)}
 """
 
 _JS = r"""
@@ -264,8 +270,43 @@ D.rain.forEach(r => L.circleMarker([r.lat, r.lon], {radius: 7 + Math.min(18, Mat
 L.tileLayer(D.rain_tiles, {opacity: .7, maxNativeZoom: 6, maxZoom: 18, attribution: 'NASA GIBS / IMERG'}).addTo(gImerg);
 
 const gPts = L.layerGroup();
-(D.points || []).forEach(p => L.circleMarker([p.lat, p.lon], {radius: 6, color: '#222', weight: 1.2, fillColor: p.color, fillOpacity: .95})
-  .bindPopup(p.popup, {maxWidth: 340}).bindTooltip(p.tip, {sticky: true}).addTo(gPts));
+const RANK = {'#d7191c': 5, '#fd8d3c': 4, '#fecc5c': 3, '#ffffb2': 2, '#2e9e5b': 1, '#1f6fb5': 0};
+const ptMarkers = (D.points || []).map(p => {
+  const mk = L.circleMarker([p.lat, p.lon], {radius: 6, color: '#222', weight: 1.2, fillColor: p.color, fillOpacity: .95});
+  mk.options.rank = RANK[p.color] || 0; mk.options.col = p.color;
+  return mk.bindPopup(p.popup, {maxWidth: 340}).bindTooltip(p.tip, {sticky: true});
+});
+const canCluster = typeof L.markerClusterGroup === 'function';
+const cluster = canCluster ? L.markerClusterGroup({
+  maxClusterRadius: 45, showCoverageOnHover: false,
+  iconCreateFunction: c => {
+    const ms = c.getAllChildMarkers();
+    const worst = ms.reduce((a, b) => (b.options.rank > a.options.rank ? b : a), ms[0]);
+    const n = c.getChildCount();
+    const s = n < 10 ? 30 : n < 100 ? 36 : 42;
+    return L.divIcon({className: 'cy-cluster', iconSize: [s, s],
+      html: '<div style="width:' + s + 'px;height:' + s + 'px;line-height:' + (s - 4) + 'px;background:' + worst.options.col + '">' + n + '</div>'});
+  }}) : null;
+const flat = L.layerGroup();
+let grouped = canCluster;
+function renderPoints() {
+  gPts.clearLayers();
+  if (grouped) { cluster.clearLayers(); cluster.addLayers(ptMarkers); gPts.addLayer(cluster); }
+  else { flat.clearLayers(); ptMarkers.forEach(m => flat.addLayer(m)); gPts.addLayer(flat); }
+}
+renderPoints();
+const ungroupBoxes = [];
+function setGrouped(g) { grouped = g; ungroupBoxes.forEach(b => { b.checked = !g; }); renderPoints(); }
+function ungroupToggle(extraClass) {
+  const l = document.createElement('label');
+  l.className = 'cy-ungroup ' + (extraClass || '');
+  const b = document.createElement('input'); b.type = 'checkbox'; b.checked = !grouped;
+  b.addEventListener('change', () => setGrouped(!b.checked));
+  ungroupBoxes.push(b);
+  l.appendChild(b); l.appendChild(document.createTextNode(' Dégrouper'));
+  ['click', 'dblclick', 'mousedown'].forEach(ev => l.addEventListener(ev, e => e.stopPropagation()));
+  return l;
+}
 
 const overlays = {
   'Cyclones actifs (position, nom)': gStorms,
@@ -275,11 +316,25 @@ const overlays = {
   'Précipitations attendues (24 h, modèle)': gRain,
   'Précipitations observées (NASA IMERG)': gImerg
 };
-if (D.points.length) overlays['Vos points (CSV)'] = gPts;
+if (D.points.length) overlays['Vos points'] = gPts;
 gStorms.addTo(map); gTrack.addTo(map); gPast.addTo(map); gRadii.addTo(map);
 if (D.rain.length) gRain.addTo(map);
 if (D.points.length) gPts.addTo(map);
-L.control.layers(base, overlays, {collapsed: false, position: 'topright'}).addTo(map);
+const layersCtl = L.control.layers(base, overlays, {collapsed: false, position: 'topright'}).addTo(map);
+function decorateCtl() {
+  if (!canCluster || !D.points.length) return;
+  const el = layersCtl.getContainer();
+  el.querySelectorAll('.leaflet-control-layers-overlays label').forEach(lab => {
+    if (lab.textContent.trim() !== 'Vos points' || lab.parentNode.classList.contains('cy-row')) return;
+    const row = document.createElement('div'); row.className = 'cy-row';
+    lab.parentNode.insertBefore(row, lab); row.appendChild(lab); row.appendChild(ungroupToggle('in-ctl'));
+  });
+}
+if (layersCtl._update) {            // Leaflet reconstruit la liste à chaque ajout/retrait de couche : on re-décore
+  const upd = layersCtl._update;
+  layersCtl._update = function () { const r = upd.apply(this, arguments); for (let i = ungroupBoxes.length - 1; i >= 0; i--) if (!ungroupBoxes[i].isConnected) ungroupBoxes.splice(i, 1); decorateCtl(); return r; };
+}
+decorateCtl();
 
 const legend = L.control({position: 'bottomleft'});
 legend.onAdd = function () {
@@ -287,11 +342,13 @@ legend.onAdd = function () {
   const names = {0: 'Tempête tropicale', 1: 'Catégorie 1', 2: 'Catégorie 2', 3: 'Catégorie 3', 4: 'Catégorie 4', 5: 'Catégorie 5'};
   d.innerHTML = '<b>Vent prévu le long de la trajectoire</b>' +
     Object.keys(names).map(k => '<div><i style="background:' + D.colors[k] + '"></i>' + names[k] + '</div>').join('');
+  L.DomEvent.disableClickPropagation(d);
   if (D.points.length) {
     const c = D.impact_colors, dot = col => '<i style="background:' + col + ';width:12px;height:12px;border-radius:50%"></i>';
     d.innerHTML += D.points_analysed
       ? '<b style="margin-top:6px">Vos points</b><div>' + dot(c.none) + 'Hors trajectoire</div><div>' + dot(c.le24) + 'Impact ≤ 24 h</div><div>' + dot(c.le48) + 'Impact ≤ 48 h</div><div>' + dot(c.le72) + 'Impact ≤ 72 h</div><div>' + dot(c.later) + 'Impact &gt; 72 h</div>'
       : '<b style="margin-top:6px">Vos points</b><div>' + dot('#1f6fb5') + 'Non analysés</div>';
+    if (canCluster) { const t = ungroupToggle('in-legend'); t.style.display = 'block'; t.style.marginTop = '4px'; d.appendChild(t); }
   }
   return d;
 };
@@ -310,5 +367,5 @@ def render_map_html(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     js = _JS.replace("__PAYLOAD__", data)
     return (f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<link rel='stylesheet' href='{LEAFLET_CSS}'><style>{_CSS}</style></head>"
-            f"<body><div id='map'></div><script src='{LEAFLET_JS}'></script><script>{js}</script></body></html>")
+            f"<link rel='stylesheet' href='{LEAFLET_CSS}'><link rel='stylesheet' href='{CLUSTER_CSS}'><style>{_CSS}</style></head>"
+            f"<body><div id='map'></div><script src='{LEAFLET_JS}'></script><script src='{CLUSTER_JS}'></script><script>{js}</script></body></html>")
