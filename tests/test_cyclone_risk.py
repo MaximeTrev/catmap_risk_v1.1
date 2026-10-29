@@ -84,6 +84,32 @@ class Assess(unittest.TestCase):
         self.assertEqual(list(r["total_precipitation"]), [5.0, 5.0])
 
 
+class MapPoints(unittest.TestCase):
+    def test_points_payload_before_and_after(self):
+        from catmap.cyclone_map import build_points, impact_color, render_map_html, build_payload
+        df = pd.DataFrame({"name": ["<i>A</i>", "B"], "lat": [16.0, 48.85], "long": [-75.0, 2.35]})
+        pts, trunc = build_points(df, "lat", "long", STORMS)
+        self.assertFalse(trunc)
+        self.assertEqual({p["color"] for p in pts}, {"#1f6fb5"})
+        self.assertNotIn("<i>A</i>", pts[0]["popup"])
+        res = cr.assess_points(df, "lat", "long", STORMS, precip_fetcher=fake_precip, now=NOW)
+        pts, _ = build_points(res, "lat", "long", STORMS, analysed=True)
+        self.assertEqual(pts[0]["color"], "#d7191c")                  # impact 12 h
+        self.assertEqual(pts[1]["color"], "#2e9e5b")                  # hors trajectoire
+        self.assertIn("max_wind_gusts", pts[0]["popup"])
+        self.assertIn("hors trajectoire", pts[1]["tip"])
+        self.assertEqual([impact_color(x) for x in (0, 12, 36, 60, 96)], ["#2e9e5b", "#d7191c", "#fd8d3c", "#fecc5c", "#ffffb2"])
+        self.assertIn("Vos points", render_map_html(build_payload(STORMS, {}, points=pts, points_analysed=True)))
+
+    def test_cap_keeps_impacted_first_and_dateline(self):
+        from catmap.cyclone_map import build_points
+        df = pd.DataFrame({"name": list("abc"), "lat": [0, 14.7, 1], "long": [10, -179, 11], "impact": [0, 24, 0]})
+        pts, trunc = build_points(df, "lat", "long", STORMS, analysed=True, cap=2)
+        self.assertTrue(trunc)
+        self.assertEqual(pts[0]["tip"], "b — impact 24 h")
+        self.assertAlmostEqual(pts[0]["lon"], 181)                    # replacé près de la trajectoire > 180°
+
+
 class Reading(unittest.TestCase):
     def test_semicolon_decimal_comma(self):
         df, la, lo = cr.read_points_csv("nom;lat;long\nA;48,85;2,35\n".encode("utf-8"))
