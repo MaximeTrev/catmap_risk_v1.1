@@ -100,7 +100,7 @@ class TestConfig(unittest.TestCase):
             if "tests" in f.parts:
                 continue
             txt = f.read_text(encoding="utf-8")
-            self.assertNotRegex(txt, r"[A-Za-z0-9._-]+@(?!example)[A-Za-z0-9.-]+\.[a-z]{2,}", f"e-mail codé en dur dans {f}")
+            self.assertNotRegex(txt, r"[A-Za-z0-9._-]+@(?!example|square-management\.com)[A-Za-z0-9.-]+\.[a-z]{2,}", f"e-mail codé en dur dans {f}")   # seule exception : l'adresse de contact choisie par l'utilisateur
             self.assertNotRegex(txt, r"(?i)client_secret\s*=\s*['\"][A-Za-z0-9_\-]{12,}['\"]")
 
 
