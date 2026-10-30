@@ -42,16 +42,28 @@ def _to_float(series: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-def read_points_csv(data: bytes) -> tuple[pd.DataFrame, str, str]:
-    """Lit un CSV (séparateur détecté, virgule décimale tolérée). Retourne (df, colonne_lat, colonne_lon)."""
-    text = _decode(data)
-    if not text.strip():
-        raise InputError("Fichier vide.")
-    delim = _sniff_delimiter(text)
-    try:
-        df = pd.read_csv(io.StringIO(text), sep=delim, dtype=str, keep_default_na=False)
-    except Exception as e:  # noqa: BLE001
-        raise InputError(f"Lecture CSV impossible : {e}") from e
+def read_points_csv(data: bytes, filename: str = "", reserved_check: bool = True) -> tuple[pd.DataFrame, str, str]:
+    """Lit un CSV (séparateur détecté, virgule décimale tolérée) ou un Excel (feuille « sites » si elle existe, sinon la
+    première : c'est l'export de la page Géolocalisation). Retourne (df, colonne_lat, colonne_lon)."""
+    if filename.lower().endswith((".xlsx", ".xlsm")):
+        try:
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str)
+        except Exception as e:  # noqa: BLE001
+            raise InputError(f"Lecture Excel impossible : {e}") from e
+        if not sheets:
+            raise InputError("Classeur vide.")
+        df = sheets.get("sites", next(iter(sheets.values()))).fillna("")
+    else:
+        text = _decode(data)
+        if not text.strip():
+            raise InputError("Fichier vide.")
+        delim = _sniff_delimiter(text)
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=delim, dtype=str, keep_default_na=False)
+        except Exception as e:  # noqa: BLE001
+            raise InputError(f"Lecture CSV impossible : {e}") from e
+    if df.empty:
+        raise InputError("Aucune ligne dans le fichier.")
     df.columns = [str(c).strip() for c in df.columns]
     low = {c.lower(): c for c in df.columns}
     lat_c = next((low[n] for n in LAT_NAMES if n in low), None)
@@ -59,7 +71,7 @@ def read_points_csv(data: bytes) -> tuple[pd.DataFrame, str, str]:
     if not lat_c or not lon_c:
         raise InputError("Colonnes de coordonnées introuvables. Nommez-les « lat » et « long » "
                          "(ou latitude/longitude, lon, lng). Colonnes lues : " + ", ".join(df.columns[:12]))
-    clash = [c for c in NEW_COLUMNS if c in df.columns]
+    clash = [c for c in NEW_COLUMNS if c in df.columns] if reserved_check else []
     if clash:
         raise InputError("Le fichier contient déjà des colonnes réservées : " + ", ".join(clash)
                          + ". Retirez-les ou renommez-les avant l'analyse.")
