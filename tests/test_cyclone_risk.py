@@ -133,6 +133,19 @@ class Reading(unittest.TestCase):
         with self.assertRaises(InputError):
             cr.read_points_csv(b"  \n")
 
+    def test_reserved_columns_allowed_when_not_checked(self):
+        df, _, _ = cr.read_points_csv(b"lat;long;impact\n1;2;3\n", reserved_check=False)
+        self.assertEqual(len(df), 1)
+
+    def test_excel_export_sheet_sites(self):
+        import io
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+            pd.DataFrame({"x": [1]}).to_excel(xw, sheet_name="rapport", index=False)
+            pd.DataFrame({"name": ["A"], "lat": [48.85], "long": [2.35]}).to_excel(xw, sheet_name="sites", index=False)
+        df, la, lo = cr.read_points_csv(buf.getvalue(), "catmap_sites.xlsx")
+        self.assertEqual((la, lo, len(df)), ("lat", "long", 1))
+
 
 class PrecipFetch(unittest.TestCase):
     def test_site_precipitation_sum_and_coverage(self):
