@@ -838,12 +838,17 @@ def _vigilance_section():
                 if cand in by_code:
                     return vg.COLOR_HEX.get(int(by_code[cand].couleur_id), "#999999")
             return "#cccccc"
-        m = folium.Map(location=[46.6, 2.5], zoom_start=6, tiles="CartoDB positron")
+        m = folium.Map(location=[46.6, 2.5], zoom_start=6, tiles=None, control_scale=True)
+        esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+        folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+        folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+        folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
         folium.GeoJson(deps.geojson, style_function=lambda f: {
             "fillColor": color_for(str((f.get("properties") or {}).get("code", ""))),
             "color": "#333", "weight": 0.6, "fillOpacity": 0.65},
             tooltip=folium.GeoJsonTooltip(fields=[k for k in ("nom", "code") if k in (deps.geojson["features"][0].get("properties") or {})])
         ).add_to(m)
+        folium.LayerControl(collapsed=True).add_to(m)
         st_folium(m, height=560, returned_objects=[], key="vigilance_map")
     _stretch(st.dataframe, worst[worst["couleur_id"] >= 2].sort_values("couleur_id", ascending=False), hide_index=True)
     with st.expander("Données brutes analysées"):
