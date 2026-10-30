@@ -162,7 +162,9 @@ def inspect_zip(data: bytes, head_chars: int = 1200) -> list[dict]:
             continue
         with zf.open(info) as fh:
             raw = fh.read(head_chars * 4)
-        out.append({"fichier": info.filename, "taille": info.file_size, "debut": raw.decode("utf-8", "replace")[:head_chars]})
+        binary = raw.startswith(b"%PDF") or b"\x00" in raw or info.filename.lower().endswith((".pdf", ".png", ".jpg", ".zip"))
+        out.append({"fichier": info.filename, "taille": info.file_size, "binaire": binary,
+                    "debut": "" if binary else raw.decode("utf-8", "replace")[:head_chars]})
     return out
 
 
@@ -203,8 +205,14 @@ def parse_vigilance(payload: dict, phenomena: Optional[dict] = None) -> pd.DataF
     avec les clés rencontrées si le format n'est pas reconnu."""
     labels = PHENOMENA if phenomena is None else phenomena     # outre-mer : {} (les identifiants diffèrent de la métropole)
     rows: list[dict] = []
-    if isinstance(payload, dict) and isinstance(payload.get("product"), dict):
-        for per in payload["product"].get("periods") or []:
+    periods = None
+    if isinstance(payload, dict) and isinstance(payload.get("product"), dict):          # métropole
+        periods = payload["product"].get("periods") or []
+    elif isinstance(payload, dict) and isinstance(payload.get("timelaps"), dict):       # Polynésie, Nouvelle-Calédonie : une seule période
+        periods = [{"echeance": "", "begin_validity_time": payload.get("update_time", ""),
+                    "end_validity_time": payload.get("end_validity_time", ""), "timelaps": payload["timelaps"]}]
+    if periods is not None:
+        for per in periods:
             tl = per.get("timelaps") or {}
             for dom in tl.get("domain_ids") or []:
                 base = {
