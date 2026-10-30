@@ -655,6 +655,11 @@ def _load_cyclones(with_rain: bool = True):
     return cm.build_payload(storms, radii, rain_available=rain), rows, storms
 
 
+def _help_icon(text: str) -> None:
+    """Pastille « ? » dont le texte n'apparaît qu'au survol (CSS pur, voir .cy-help dans assets/styles.css)."""
+    st.markdown(f'<span class="cy-help"><span class="cy-tip">{html.escape(text)}</span></span>', unsafe_allow_html=True)
+
+
 def _cyclone_section():
     import streamlit.components.v1 as components
     c1, c2 = st.columns([1, 4])
@@ -662,9 +667,14 @@ def _cyclone_section():
         if st.button("Actualiser les cyclones", key="cy_refresh"):
             _load_cyclones.clear()
     with c2:
-        with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain")
-        st.caption("Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
-                   "Décochez pour accélérer l'affichage.")
+        try:                                   # Streamlit récent : ligne horizontale, l'icône colle au texte
+            row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+        except TypeError:                      # anciennes versions : l'icône passe sous la case
+            row = st.container()
+        with row:
+            with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain")
+            _help_icon("Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
+                       "Décochez pour accélérer l'affichage.")
     try:
         with st.spinner("Chargement des cyclones actifs…"):
             payload, rows, storms = _load_cyclones(with_rain)
