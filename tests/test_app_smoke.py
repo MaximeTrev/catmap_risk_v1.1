@@ -190,6 +190,33 @@ class TestAppSmoke(unittest.TestCase):
             app.main()
         self.assertNotIn("cy_risk", st.session_state)
 
+    def test_vigilance_page_with_uploaded_file_without_geolocation(self):
+        from catmap import vigilance as vg
+        from tests.test_vigilance import GEO, PAYLOAD
+
+        class Up:
+            name = "export.csv"
+            # export « périmètre » : pas de pays_iso2, virgule décimale, colonnes lat / long
+            def getvalue(self):
+                return "name;lat;long\nBoulangerie;45,5;1,5\nHors France;10;10\nSans coord;;\n".encode()
+
+        app, st = self.load({"Navigation": "Cartographies avancées", "vg_upload": Up()})
+        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+                mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
+                mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertTrue([c for c in st.calls if c[0] == "warning"])        # ligne sans coordonnées signalée
+        metrics = {c[1][0]: c[1][1] for c in st.calls if c[0] == "metric"}
+        self.assertEqual(metrics["Hors France (non traités)"], 2 - metrics["Sites en France"])
+        self.assertFalse([c for c in st.calls if c[0] == "info"])           # plus de « lancez d'abord une géolocalisation »
+
+    def test_vigilance_page_without_source_asks_for_file(self):
+        app, st = self.load({"Navigation": "Cartographies avancées"})
+        app.main()
+        infos = [c[1][0] for c in st.calls if c[0] == "info"]
+        self.assertTrue(any("Chargez un fichier" in i for i in infos))
+
     def test_cyclone_service_down_shows_error_not_crash(self):
         from catmap import cyclones as cy
         app, st = self.load({"Navigation": "Temps réel"})
