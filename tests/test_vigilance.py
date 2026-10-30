@@ -104,5 +104,44 @@ class TestConfig(unittest.TestCase):
             self.assertNotRegex(txt, r"(?i)client_secret\s*=\s*['\"][A-Za-z0-9_\-]{12,}['\"]")
 
 
+class TestOverseas(unittest.TestCase):
+    S = Settings(mf_api_key="K")
+
+    def test_fetch_path_url_and_errors(self):
+        from tests.helpers import FakeResponse
+
+        class Sess:
+            def __init__(self, resp): self.resp, self.urls = resp, []
+            def get(self, url, headers=None, timeout=None):
+                self.urls.append((url, headers)); return self.resp
+        from catmap.vigilance import fetch_path
+        s = Sess(FakeResponse(200, PAYLOAD))
+        self.assertEqual(fetch_path(MeteoFranceAuth(self.S), self.S, "polynesie/cartevigilance/encours", session=s), PAYLOAD)
+        self.assertTrue(s.urls[0][0].endswith("/DPVigilance/v1/polynesie/cartevigilance/encours"))
+        self.assertEqual(s.urls[0][1]["apikey"], "K")
+        for code in (403, 404, 500):
+            with self.assertRaises(VigilanceError):
+                fetch_path(MeteoFranceAuth(self.S), self.S, "x", session=Sess(FakeResponse(code, text="no")))
+
+    def test_om_phenomena_not_labelled_with_metropole_names(self):
+        df = parse_vigilance(PAYLOAD, phenomena={})
+        self.assertTrue(all(str(p).startswith(("Phénomène", "Tous")) for p in df["phenomene"]))
+        self.assertIn("Vent violent", set(parse_vigilance(PAYLOAD)["phenomene"]))   # métropole inchangée
+
+    def test_zip_inspection_and_json_parsing(self):
+        import io, json, zipfile
+        from catmap.vigilance import inspect_zip, parse_zip_json
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("a.xml", "<root>x</root>")
+            z.writestr("b.json", json.dumps(PAYLOAD))
+        info = inspect_zip(buf.getvalue())
+        self.assertEqual({i["fichier"] for i in info}, {"a.xml", "b.json"})
+        self.assertEqual(len(parse_zip_json(buf.getvalue())), 1)
+        with self.assertRaises(VigilanceError):
+            inspect_zip(b"not a zip")
+        self.assertEqual(parse_zip_json(b"not a zip"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
