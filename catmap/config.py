@@ -46,7 +46,7 @@ def is_local_endpoint(url: str) -> bool:
 class Settings:
     # --- Overpass -------------------------------------------------------
     overpass_urls: tuple[str, ...] = PUBLIC_OVERPASS
-    contact: str = "maxime.trevisani@square-management.com"            # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
+    contact: str = "maxime.trevisani@square-management.com"                       # CATMAP_CONTACT : e-mail ou URL de contact (bonne pratique Overpass)
     server_timeout_s: int = 280             # [timeout:] côté serveur, recherche regex (comme la v1)
     fast_timeout_s: int = 60                # [timeout:] en mode exact (rapide)
     total_budget_s: float = 600.0           # temps maxi par entreprise, tous serveurs confondus
