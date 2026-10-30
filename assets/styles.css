@@ -91,3 +91,5 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
   background: #ffffff; color: #000000; border: 2px solid var(--cm-gold); border-radius: 8px; padding: .5rem .7rem;
   font-size: .85rem; line-height: 1.35; font-weight: 400; z-index: 99999; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .cy-help:hover .cy-tip { display: block; }
+.cy-help.cy-left .cy-tip { left: auto; right: 1.8rem; }
+.cy-help.cy-wide .cy-tip { width: 30rem; }
