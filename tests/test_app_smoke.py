@@ -222,6 +222,32 @@ class TestAppSmoke(unittest.TestCase):
         infos = [c[1][0] for c in st.calls if c[0] == "info"]
         self.assertTrue(any("Chargez un fichier" in i for i in infos))
 
+    def test_overseas_section_with_fake_payloads(self):
+        from catmap import vigilance as vg
+        from tests.test_vigilance import GEO, PAYLOAD
+        app, st = self.load({"Navigation": "Temps réel"})
+        def fake_path(auth, settings, path, session=None, binary=False):
+            if binary:
+                raise vg.VigilanceError("flux indisponible")
+            return PAYLOAD
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+                mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
+                mock.patch.object(vg, "fetch_path", side_effect=fake_path), \
+                mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        names = [c[1][0] for c in st.calls if c[0] == "metric"]
+        self.assertIn("Polynésie française", names)
+        self.assertIn("Nouvelle-Calédonie", names)
+
+    def test_secrets_flattened_and_settings_not_stale(self):
+        app, st = self.load({"Navigation": "Temps réel"})
+        flat = app._flatten_secrets({"A": "1", "section": {"METEOFRANCE_API_KEY": "k", "sub": {"X": "y"}}}, {})
+        self.assertEqual(flat, {"A": "1", "METEOFRANCE_API_KEY": "k", "X": "y"})
+        s1 = app.get_settings()
+        self.assertEqual(s1.area_max_radius_m, 10000)
+        self.assertEqual(s1.area_max_sites, 50000)
+
     def test_cyclone_service_down_shows_error_not_crash(self):
         from catmap import cyclones as cy
         app, st = self.load({"Navigation": "Temps réel"})
