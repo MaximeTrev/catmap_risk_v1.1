@@ -145,8 +145,9 @@ def _site_map(df: pd.DataFrame, area: dict | None = None):
     m = folium.Map(location=[float(d["lat"].mean()), float(d["long"].mean())], zoom_start=5,
                    control_scale=True, tiles=None)
     folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
-    folium.TileLayer("CartoDB positron", name="Fond clair").add_to(m)
-    folium.TileLayer("CartoDB dark_matter", name="Fond sombre").add_to(m)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Dark_Gray_Base"), attr="Esri", name="Fond sombre", max_native_zoom=16).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
@@ -566,13 +567,14 @@ def page_geolocalisation():
     c_mode, c_area = st.columns([3, 2])
     with c_area:
         st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
-        area_mode = st.checkbox(
-            "Entreprises sur un périmètre géographique", False, key="area_mode",
-            help="**Principe** : au lieu de chercher une entreprise par son nom, on délimite un cercle sur la carte et on "
-                 "récupère tous les établissements situés dedans.\n\n"
-                 "**Coché** : cliquez pour fixer le centre, déplacez la souris pour régler le rayon, cliquez de nouveau pour "
-                 "valider, puis lancez la recherche. Les objets portant un tag *shop*, *amenity* ou *brand* sont retenus.\n\n"
-                 "**Décoché** : recherche par nom d'entreprise (saisie, liste ou fichier).")
+        area_mode = _checkbox_with_help(
+            "Entreprises sur un périmètre géographique",
+            "**Principe** : au lieu de chercher une entreprise par son nom, on délimite un cercle sur la carte et on "
+            "récupère tous les établissements situés dedans.\n\n"
+            "**Coché** : cliquez pour fixer le centre, déplacez la souris pour régler le rayon, cliquez de nouveau pour "
+            "valider, puis lancez la recherche. Les objets portant un tag *shop*, *amenity* ou *brand* sont retenus.\n\n"
+            "**Décoché** : recherche par nom d'entreprise (saisie, liste ou fichier).",
+            key="area_mode", left=True, wide=True)
     with c_mode:
         mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"],
                         horizontal=True, disabled=area_mode)
@@ -655,9 +657,31 @@ def _load_cyclones(with_rain: bool = True):
     return cm.build_payload(storms, radii, rain_available=rain), rows, storms
 
 
-def _help_icon(text: str) -> None:
+def _help_html(text: str) -> str:
+    """Texte d'infobulle -> HTML sûr : échappé, puis **gras**, *italique* et sauts de ligne."""
+    import re
+    s = html.escape(text)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"\*(.+?)\*", r"<i>\1</i>", s)
+    return s.replace("\n\n", "<br><br>").replace("\n", "<br>")
+
+
+def _help_icon(text: str, left: bool = False, wide: bool = False) -> None:
     """Pastille « ? » dont le texte n'apparaît qu'au survol (CSS pur, voir .cy-help dans assets/styles.css)."""
-    st.markdown(f'<span class="cy-help"><span class="cy-tip">{html.escape(text)}</span></span>', unsafe_allow_html=True)
+    cls = "cy-help" + (" cy-left" if left else "") + (" cy-wide" if wide else "")
+    st.markdown(f'<span class="{cls}"><span class="cy-tip">{_help_html(text)}</span></span>', unsafe_allow_html=True)
+
+
+def _checkbox_with_help(label: str, help_text: str, *, key: str, value: bool = False, left: bool = False, wide: bool = False) -> bool:
+    """Case à cocher + « ? » collé au texte (infobulle au survol uniquement)."""
+    try:
+        row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    except TypeError:
+        row = st.container()
+    with row:
+        v = st.checkbox(label, value, key=key)
+        _help_icon(help_text, left=left, wide=wide)
+    return v
 
 
 def _cyclone_section():
@@ -717,12 +741,12 @@ def _cyclone_section():
 def _cyclone_risk_section(storms):
     st.subheader("Croiser vos points avec les cyclones")
     up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
-                          type=["csv", "txt"], key="cy_csv")
+                          type=["csv", "txt", "xlsx"], key="cy_csv")
     if up is None:
         st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
         return None
     try:
-        df, lat_c, lon_c = cr.read_points_csv(up.getvalue())
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name)
     except InputError as e:
         st.error(str(e))
         return None
@@ -801,33 +825,90 @@ def _vigilance_section():
         _stretch(st.dataframe, df, hide_index=True)
 
 
+def _vigilance_input():
+    """Source des sites : fichier chargé (export de la page Géolocalisation) sinon dernière géolocalisation de la session.
+    Retourne (df de travail, colonnes d'origine, est_un_fichier) ou None."""
+    up = st.file_uploader("Fichier de sites (CSV ou Excel téléchargé depuis la page Géolocalisation, recherche classique ou par périmètre)",
+                          type=["csv", "txt", "xlsx"], key="vg_upload")
+    res = st.session_state.get("result")
+    if up is None:
+        if res is not None and not res.sites.empty:
+            st.caption("Source : dernière géolocalisation de cette session. Chargez un fichier pour en utiliser un autre.")
+            return res.sites, list(res.sites.columns), False
+        st.info("Chargez un fichier de sites (export de la page « Géolocalisation ») ou lancez une géolocalisation : "
+                "les sites seront croisés avec la vigilance.")
+        return None
+    try:
+        raw, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name, reserved_check=False)
+    except InputError as e:
+        st.error(str(e))
+        return None
+    work = raw.copy()
+    work["lat"] = cr._to_float(raw[lat_c])
+    work["long"] = cr._to_float(raw[lon_c])
+    bad = int((work["lat"].isna() | work["long"].isna()).sum())
+    work = work.dropna(subset=["lat", "long"])
+    if bad:
+        st.warning(f"{bad} ligne(s) sans coordonnées valides ignorée(s).")
+    if work.empty:
+        st.error("Aucun point exploitable dans ce fichier.")
+        return None
+    cols = [c for c in raw.columns if c not in ("lat", "long")] if (lat_c, lon_c) != ("lat", "long") else list(raw.columns)
+    cols = list(raw.columns)
+    for c in ("name", "nom_demande", "pays", "naf_section"):          # colonnes attendues par la carte
+        if c not in work.columns:
+            work[c] = None
+    if work["name"].isna().all():
+        guess = next((c for c in raw.columns if c.lower() in cm.NAME_COLUMNS), None)
+        work["name"] = work[guess] if guess else ""
+    if "osm_url" not in work.columns:
+        work["osm_url"] = [f"https://www.openstreetmap.org/?mlat={la:.6f}&mlon={lo:.6f}#map=17/{la:.6f}/{lo:.6f}"
+                           for la, lo in zip(work["lat"], work["long"])]
+    if "match_score" not in work.columns:
+        work["match_score"] = None
+    st.caption(f"Source : fichier « {up.name} » ({len(work)} point(s) ; colonnes {lat_c} / {lon_c}).")
+    return work, cols, True
+
+
 def page_cartographies_avancees():
     st.title("Sites exposés à la vigilance en cours")
-    res = st.session_state.get("result")
-    if res is None or res.sites.empty:
-        st.info("Lancez d'abord une géolocalisation (page « Géolocalisation ») : les sites trouvés seront croisés avec la vigilance.")
+    src = _vigilance_input()
+    if src is None:
         return
+    sites, orig_cols, from_file = src
     df = _load_vigilance()
     if df is None:
         return
     try:
-        exp = vg.expose_sites(res.sites, df, get_departements())
+        exp = vg.expose_sites(sites, df, get_departements())
     except vg.VigilanceError as e:
         st.error(str(e))
         return
-    fr = exp[exp["pays_iso2"] == "FR"]
+    if "pays_iso2" in exp.columns and exp["pays_iso2"].notna().any():
+        fr = exp[exp["pays_iso2"] == "FR"]
+    else:                                  # fichier sans pays : on garde ce qui tombe dans un département français
+        fr = exp[exp["departement_code"].notna()]
     alert = fr[fr["vigilance_couleur_id"].fillna(0) >= 3]
     c = st.columns(3)
     c[0].metric("Sites en France", len(fr))
     c[1].metric("En vigilance orange ou rouge", len(alert))
     c[2].metric("Hors France (non traités)", len(exp) - len(fr))
+    vcols = ["departement_code", "departement", "vigilance_couleur_id", "vigilance_couleur", "vigilance_phenomenes"]
+    if from_file:
+        full_cols = [c for c in orig_cols if c in exp.columns and c not in vcols] + vcols
+        cols = full_cols
+    else:
+        full_cols = [c for c in exp.columns]
+        cols = ["nom_demande", "name", "departement", "vigilance_couleur", "vigilance_phenomenes", "naf_section", "surface_m2", "osm_url"]
     if alert.empty:
         st.success("Aucun site en vigilance orange ou rouge.")
     else:
-        cols = ["nom_demande", "name", "departement", "vigilance_couleur", "vigilance_phenomenes", "naf_section", "surface_m2", "osm_url"]
         _stretch(st.dataframe, alert[cols].sort_values("vigilance_couleur"), hide_index=True)
         _site_map(alert)
-        st.download_button("Télécharger (CSV)", _csv_bytes(alert[cols]), "catmap_sites_vigilance.csv", "text/csv")
+        st.download_button("Télécharger les sites en vigilance orange ou rouge (CSV)", _csv_bytes(alert[cols]),
+                           "catmap_sites_vigilance.csv", "text/csv")
+    st.download_button("Télécharger tous les sites avec leur vigilance (CSV)", _csv_bytes(exp[full_cols]),
+                       "catmap_sites_vigilance_complet.csv", "text/csv", key="vg_dl_all")
 
 
 # --------------------------------------------------------------------------
