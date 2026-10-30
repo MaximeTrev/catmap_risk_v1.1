@@ -888,10 +888,13 @@ def _overseas_section():
             tab = pd.concat(frames, ignore_index=True)
             _stretch(st.dataframe, vg.worst_by_domain(tab, None), hide_index=True)
         else:
-            st.info("Format du flux non encore pris en charge : contenu du ZIP ci-dessous (à transmettre pour l'intégration).")
+            st.info("Ce flux ne contient pas de données de couleur exploitables automatiquement (bulletins PDF). "
+                    "Contenu du flux :")
             for f in vg.inspect_zip(data):
-                st.markdown(f"**{f['fichier']}** ({f['taille']} octets)")
-                st.code(f["debut"])
+                st.markdown(f"**{f['fichier']}** ({f['taille']} octets)" + (" : document PDF/binaire" if f["binaire"] else ""))
+                if f["debut"]:
+                    st.code(f["debut"])
+        st.download_button("Télécharger le flux (ZIP)", data, "vigilance_outre_mer.zip", "application/zip", key="om_zip_dl")
 
 
 def _vigilance_section():
