@@ -120,9 +120,9 @@ class TestAppSmoke(unittest.TestCase):
         # Page vigilance croisée avec les sites (clé API factice, réseau simulé)
         from catmap import vigilance as vg
         from tests.test_vigilance import GEO, PAYLOAD
-        script["Navigation"] = "Cartographies avancées"
+        script["Navigation"] = "Temps réel"
         st.calls.clear()
-        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
                 mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
                 mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
             app.main()
@@ -200,8 +200,8 @@ class TestAppSmoke(unittest.TestCase):
             def getvalue(self):
                 return "name;lat;long\nBoulangerie;45,5;1,5\nHors France;10;10\nSans coord;;\n".encode()
 
-        app, st = self.load({"Navigation": "Cartographies avancées", "vg_upload": Up()})
-        with mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+        app, st = self.load({"Navigation": "Temps réel", "vg_upload": Up()})
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
                 mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
                 mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
             app.main()
@@ -212,8 +212,13 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse([c for c in st.calls if c[0] == "info"])           # plus de « lancez d'abord une géolocalisation »
 
     def test_vigilance_page_without_source_asks_for_file(self):
-        app, st = self.load({"Navigation": "Cartographies avancées"})
-        app.main()
+        from catmap import vigilance as vg
+        from tests.test_vigilance import GEO, PAYLOAD
+        app, st = self.load({"Navigation": "Temps réel"})
+        with self.fake_cyclones(), mock.patch.dict("os.environ", {"METEOFRANCE_API_KEY": "K"}), \
+                mock.patch.object(vg, "fetch_vigilance", return_value=PAYLOAD), \
+                mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
+            app.main()
         infos = [c[1][0] for c in st.calls if c[0] == "info"]
         self.assertTrue(any("Chargez un fichier" in i for i in infos))
 
