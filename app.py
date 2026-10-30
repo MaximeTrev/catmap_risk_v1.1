@@ -823,6 +823,8 @@ def _vigilance_section():
     _stretch(st.dataframe, worst[worst["couleur_id"] >= 2].sort_values("couleur_id", ascending=False), hide_index=True)
     with st.expander("Données brutes analysées"):
         _stretch(st.dataframe, df, hide_index=True)
+    st.divider()
+    _vigilance_sites_section(df)
 
 
 def _vigilance_input():
@@ -870,15 +872,13 @@ def _vigilance_input():
     return work, cols, True
 
 
-def page_cartographies_avancees():
-    st.title("Sites exposés à la vigilance en cours")
+def _vigilance_sites_section(df):
+    """Croise un fichier de sites (ou la dernière géolocalisation) avec la vigilance déjà chargée (``df``)."""
+    st.subheader("Sites exposés à la vigilance en cours")
     src = _vigilance_input()
     if src is None:
         return
     sites, orig_cols, from_file = src
-    df = _load_vigilance()
-    if df is None:
-        return
     try:
         exp = vg.expose_sites(sites, df, get_departements())
     except vg.VigilanceError as e:
@@ -912,8 +912,7 @@ def page_cartographies_avancees():
 
 
 # --------------------------------------------------------------------------
-PAGES = {"Géolocalisation": page_geolocalisation, "Cartographies avancées": page_cartographies_avancees,
-         "Temps réel": page_temps_reel}
+PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel}
 
 
 def main():
