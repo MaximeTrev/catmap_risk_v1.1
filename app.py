@@ -49,21 +49,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 # --------------------------------------------------------------------------
 # Ressources partagées (chargées une seule fois par processus)
 # --------------------------------------------------------------------------
+def _flatten_secrets(m, out: dict) -> dict:
+    """Aplati les sections TOML : une clé placée après un en-tête [section] reste utilisable."""
+    for k, v in m.items():
+        if hasattr(v, "items"):
+            _flatten_secrets(v, out)
+        else:
+            out.setdefault(str(k), str(v))
+    return out
+
+
 def _secrets() -> dict:
     try:
-        return {k: str(v) for k, v in st.secrets.items() if not isinstance(v, dict)}
+        return _flatten_secrets(st.secrets, {})
     except Exception:  # noqa: BLE001 - pas de fichier secrets.toml : on s'appuie sur l'environnement
         return {}
 
 
-@st.cache_resource
 def get_settings():
+    """Réglages relus à chaque exécution (peu coûteux) : un changement de code ou de secrets est pris en compte
+    sans redémarrer le processus. Un cache ici figeait les anciennes valeurs après une mise à jour."""
     return load_settings(secrets=_secrets())
 
 
+def _settings_sig() -> str:
+    import hashlib
+    return hashlib.sha1(repr(get_settings()).encode()).hexdigest()
+
+
 @st.cache_resource
-def get_client():
+def _client_for(sig: str):
     return OverpassClient(get_settings())
+
+
+def get_client():
+    return _client_for(_settings_sig())
 
 
 @st.cache_resource
@@ -77,8 +97,12 @@ def get_naf():
 
 
 @st.cache_resource
-def get_departements():
+def _departements_for(sig: str):
     return vg.load_departements(get_settings())
+
+
+def get_departements():
+    return _departements_for(_settings_sig())
 
 
 # --------------------------------------------------------------------------
@@ -629,7 +653,8 @@ def _load_vigilance():
     s = get_settings()
     if not vg.MeteoFranceAuth(s).configured:
         st.info("Identifiants Météo-France absents. Définissez `METEOFRANCE_API_KEY` (ou `METEOFRANCE_CLIENT_ID` et "
-                "`METEOFRANCE_CLIENT_SECRET`) dans l'environnement ou `.streamlit/secrets.toml`.")
+                "`METEOFRANCE_CLIENT_SECRET`) dans l'environnement ou `.streamlit/secrets.toml`.\n\n"
+                f"Noms de secrets détectés par l'application (valeurs jamais affichées) : {', '.join(sorted(_secrets())) or 'aucun'}.")
         return None
     if st.button("Actualiser"):
         _fetch_vigilance_df.clear()
