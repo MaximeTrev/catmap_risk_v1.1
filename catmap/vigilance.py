@@ -111,6 +111,81 @@ def fetch_vigilance(auth: MeteoFranceAuth, settings: Settings, session: Optional
 
 
 # --------------------------------------------------------------------------
+# Outre-mer : chemins relatifs à la même API (mf_base_url), d'après le portail Météo-France
+# --------------------------------------------------------------------------
+OM_TERRITORIES = {
+    "Polynésie française": {"path": "polynesie/cartevigilance/encours", "center": (-17.65, -149.45), "zoom": 7},
+    "Nouvelle-Calédonie": {"path": "ncaledonie/cartevigilance/encours", "center": (-21.3, 165.5), "zoom": 6},
+}
+OM_DROM_PATH = "vigilanceom/flux/dernier"
+OM_VIEWS = {
+    "Guadeloupe": ((16.2, -61.55), 9), "Martinique": ((14.65, -61.0), 9), "Guyane": ((4.0, -53.0), 7),
+    "La Réunion": ((-21.1, 55.5), 9), "Mayotte": ((-12.8, 45.15), 10), "Saint-Pierre-et-Miquelon": ((46.9, -56.3), 9),
+    "Wallis-et-Futuna": ((-13.8, -177.8), 8),
+}
+
+
+def fetch_path(auth: MeteoFranceAuth, settings: Settings, path: str, session: Optional[requests.Session] = None,
+               binary: bool = False):
+    """GET d'un produit de l'API Vigilance (JSON par défaut, octets si ``binary``)."""
+    sess = session or auth.session
+    url = settings.mf_base_url.rstrip("/") + "/" + path.lstrip("/")
+    try:
+        r = sess.get(url, headers=auth.headers(), timeout=30 if binary else 15)
+    except requests.RequestException as e:
+        raise VigilanceError(f"Appel Météo-France impossible : {e}") from e
+    if r.status_code in (401, 403):
+        raise VigilanceError(f"Accès refusé (HTTP {r.status_code}) sur « {path} » : vérifier que l'abonnement couvre ce produit.")
+    if r.status_code == 404:
+        raise VigilanceError(f"Produit introuvable (HTTP 404) : « {path} ».")
+    if r.status_code != 200:
+        raise VigilanceError(f"Erreur HTTP {r.status_code} sur « {path} » : {r.text[:200]}")
+    if binary:
+        return r.content
+    try:
+        return r.json()
+    except ValueError as e:
+        raise VigilanceError("Réponse non JSON") from e
+
+
+def inspect_zip(data: bytes, head_chars: int = 1200) -> list[dict]:
+    """Liste le contenu d'un ZIP (nom, taille, début de texte) pour diagnostiquer un format non documenté."""
+    import io
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise VigilanceError("Le flux outre-mer n'est pas un ZIP valide") from e
+    out = []
+    for info in zf.infolist()[:50]:
+        if info.is_dir():
+            continue
+        with zf.open(info) as fh:
+            raw = fh.read(head_chars * 4)
+        out.append({"fichier": info.filename, "taille": info.file_size, "debut": raw.decode("utf-8", "replace")[:head_chars]})
+    return out
+
+
+def parse_zip_json(data: bytes) -> list[pd.DataFrame]:
+    """Si le ZIP contient des JSON au format « carte » reconnu, retourne leurs tables ; sinon liste vide."""
+    import io
+    import json
+    import zipfile
+    frames = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return frames
+    for info in zf.infolist():
+        if info.filename.lower().endswith(".json") and info.file_size < 20_000_000:
+            try:
+                frames.append(parse_vigilance(json.loads(zf.read(info)), phenomena={}))
+            except (ValueError, VigilanceFormatError):
+                continue
+    return frames
+
+
+# --------------------------------------------------------------------------
 # Analyse de la réponse -> table longue
 # --------------------------------------------------------------------------
 COLUMNS = ["periode", "debut", "fin", "domaine", "phenomene_id", "phenomene", "couleur_id", "couleur"]
@@ -123,9 +198,10 @@ def _color_name(cid) -> str:
         return str(cid)
 
 
-def parse_vigilance(payload: dict) -> pd.DataFrame:
+def parse_vigilance(payload: dict, phenomena: Optional[dict] = None) -> pd.DataFrame:
     """Table longue (une ligne par période × domaine × phénomène). Lève ``VigilanceFormatError``
     avec les clés rencontrées si le format n'est pas reconnu."""
+    labels = PHENOMENA if phenomena is None else phenomena     # outre-mer : {} (les identifiants diffèrent de la métropole)
     rows: list[dict] = []
     if isinstance(payload, dict) and isinstance(payload.get("product"), dict):
         for per in payload["product"].get("periods") or []:
@@ -143,7 +219,7 @@ def parse_vigilance(payload: dict) -> pd.DataFrame:
                     pid = it.get("phenomenon_id")
                     cid = it.get("phenomenon_max_color_id")
                     try:
-                        label = PHENOMENA.get(int(pid), f"Phénomène {pid}")
+                        label = labels.get(int(pid), f"Phénomène {pid}")
                     except (TypeError, ValueError):
                         label = f"Phénomène {pid}"
                     rows.append({**base, "phenomene_id": pid, "phenomene": label,
