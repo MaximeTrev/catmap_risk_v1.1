@@ -35,6 +35,7 @@ from catmap import cyclone_map as cm
 from catmap import cyclone_risk as cr
 from catmap import cyclones as cy
 from catmap import vigilance as vg
+from catmap import meteoalarm as ma
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -803,11 +804,13 @@ def _cyclone_risk_section(storms):
 
 def page_temps_reel():
     st.title("Temps réel")
-    t_cy, t_vg = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France"])
+    t_cy, t_vg, t_eu = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France", "Vigilance Europe"])
     with t_cy:
         _cyclone_section()
     with t_vg:
         _vigilance_section()
+    with t_eu:
+        _europe_section()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -948,11 +951,11 @@ def _vigilance_section():
     _vigilance_sites_section(df)
 
 
-def _vigilance_input():
+def _vigilance_input(key: str = "vg_upload"):
     """Source des sites : fichier chargé (export de la page Géolocalisation) sinon dernière géolocalisation de la session.
     Retourne (df de travail, colonnes d'origine, est_un_fichier) ou None."""
     up = st.file_uploader("Fichier de sites (CSV ou Excel téléchargé depuis la page Géolocalisation, recherche classique ou par périmètre)",
-                          type=["csv", "txt", "xlsx"], key="vg_upload")
+                          type=["csv", "txt", "xlsx"], key=key)
     res = st.session_state.get("result")
     if up is None:
         if res is not None and not res.sites.empty:
@@ -1030,6 +1033,124 @@ def _vigilance_sites_section(df):
                            "catmap_sites_vigilance.csv", "text/csv")
     st.download_button("Télécharger tous les sites avec leur vigilance (CSV)", _csv_bytes(exp[full_cols]),
                        "catmap_sites_vigilance_complet.csv", "text/csv", key="vg_dl_all")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_europe(slugs: tuple):
+    alerts, rings, errors = ma.fetch_all(slugs)
+    return alerts, rings, errors
+
+
+def _europe_map(alerts, rings, errors_slugs, selected):
+    import folium
+    from streamlit_folium import st_folium
+    m = folium.Map(location=[50.0, 10.0], zoom_start=4, tiles=None, control_scale=True)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    poly_group = folium.FeatureGroup(name="Alertes (contours)")
+    drawn = set()
+    order = sorted(rings, key=lambda i: alerts.iloc[i]["niveau_id"] or 0)      # le plus fort dessiné en dernier
+    for i in order:
+        a = alerts.iloc[i]
+        if (a["niveau_id"] or 0) < 2:
+            continue
+        drawn.add(a["pays"])
+        tip = f"{a['pays']} · {a['type']} · {a['niveau']}"
+        for r in rings[i]:
+            folium.Polygon([(y, x) for x, y in r], color="#333", weight=0.6, fill=True,
+                           fill_color=ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999"), fill_opacity=0.55, tooltip=tip).add_to(poly_group)
+    poly_group.add_to(m)
+    mark = folium.FeatureGroup(name="Pays sans contour (niveau max)")
+    for w in ma.worst_by_country(alerts).itertuples():
+        if w.pays in drawn or pd.isna(w.niveau_id) or w.niveau_id < 2:
+            continue
+        slug = next((k for k, v in ma.COUNTRIES.items() if v[0] == w.pays), None)
+        if slug is None:
+            continue
+        la, lo = ma.COUNTRIES[slug][2]
+        folium.CircleMarker((la, lo), radius=11, color="#333", weight=1, fill=True,
+                            fill_color=ma.LEVEL_HEX.get(int(w.niveau_id), "#999"), fill_opacity=0.85,
+                            tooltip=f"{w.pays} : {w.niveau} ({w.types})").add_to(mark)
+    mark.add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+    try:
+        st_folium(m, height=560, returned_objects=[], key="europe_map", use_container_width=True)
+    except TypeError:
+        st_folium(m, height=560, width=1400, returned_objects=[], key="europe_map")
+
+
+def _europe_section():
+    st.subheader("Vigilance Europe (MeteoAlarm)")
+    st.caption("Alertes des services météo nationaux agrégées par MeteoAlarm (EUMETNET), licence CC BY 4.0. "
+               "Niveaux : jaune, orange, rouge. Les flux sont actualisés toutes les 3 minutes environ.")
+    labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
+    default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
+    chosen = st.multiselect("Pays", list(labels), default=default, format_func=lambda k: labels[k], key="eu_countries")
+    if not chosen:
+        st.info("Sélectionnez au moins un pays.")
+        return
+    with st.spinner("Lecture des flux MeteoAlarm…"):
+        alerts, rings, errors = _load_europe(tuple(sorted(chosen)))
+    if errors:
+        st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in errors.items()))
+    if alerts.empty:
+        if not errors:
+            st.success("Aucune alerte en cours pour les pays sélectionnés.")
+        return
+    c1, c2 = st.columns(2)
+    types = sorted(set(alerts["type"].dropna()))
+    sel_types = c1.multiselect("Types d'alerte", types, default=types, key="eu_types")
+    min_level = c2.selectbox("Niveau minimal", [1, 2, 3, 4], index=1, format_func=lambda i: ma.LEVELS[i], key="eu_level")
+    keep = alerts["type"].isin(sel_types) & (alerts["niveau_id"].fillna(0) >= min_level)
+    view = alerts[keep]
+    n = alerts[alerts["type"].isin(sel_types)]["niveau_id"].value_counts()
+    c = st.columns(4)
+    for i, name in ma.LEVELS.items():
+        c[i - 1].metric(name, int(n.get(i, 0)))
+    keep_idx = set(view.index)
+    _europe_map(alerts, {i: r for i, r in rings.items() if i in keep_idx}, [], chosen)
+    show = view.sort_values(["niveau_id", "pays"], ascending=[False, True])
+    cols = ["pays", "niveau", "type", "debut", "fin", "zones", "severite", "urgence", "certitude", "titre", "emetteur"]
+    st.markdown("**Alertes en cours**")
+    _stretch(st.dataframe, show[cols].rename(columns={"debut": "début", "severite": "sévérité", "certitude": "certitude"}), hide_index=True)
+    with st.expander("Détail des consignes et données brutes analysées"):
+        _stretch(st.dataframe, view.drop(columns=["niveau_id", "type_id"]), hide_index=True)
+    st.download_button("Télécharger les alertes (CSV)", _csv_bytes(view), "catmap_vigilance_europe.csv", "text/csv", key="eu_dl")
+    st.divider()
+    _europe_sites_section(alerts, rings)
+
+
+def _europe_sites_section(alerts, rings):
+    st.subheader("Sites exposés aux alertes MeteoAlarm")
+    src = _vigilance_input(key="eu_upload")
+    if src is None:
+        return
+    sites, orig_cols, from_file = src
+    exp = sites.reset_index(drop=True).copy()
+    res = ma.expose_points(exp["lat"].to_numpy(float), exp["long"].to_numpy(float), alerts, rings, min_level=2)
+    for col in res.columns:
+        exp[col] = res[col].values
+    hit = exp[exp["europe_niveau_id"].notna()]
+    orange = hit[hit["europe_niveau_id"] >= 3]
+    nocontour = sorted(set(alerts[~alerts["avec_contour"]]["pays"]))
+    c = st.columns(3)
+    c[0].metric("Sites analysés", len(exp))
+    c[1].metric("En alerte jaune ou plus", len(hit))
+    c[2].metric("En alerte orange ou rouge", len(orange))
+    if nocontour:
+        st.caption("Pays dont le flux ne fournit pas de contour (non croisés avec vos sites) : " + ", ".join(nocontour) + ".")
+    ecols = list(res.columns)
+    base = [x for x in orig_cols if x in exp.columns] if from_file else [x for x in ("nom_demande", "name", "naf_section", "surface_m2", "osm_url") if x in exp.columns]
+    cols = base + ecols
+    if orange.empty:
+        st.success("Aucun site en alerte orange ou rouge.")
+    else:
+        _stretch(st.dataframe, orange[cols].sort_values("europe_niveau_id", ascending=False), hide_index=True)
+        _site_map(orange)
+    st.download_button("Télécharger tous les sites avec leurs alertes (CSV)", _csv_bytes(exp[cols]),
+                       "catmap_sites_vigilance_europe.csv", "text/csv", key="eu_dl_sites")
 
 
 # --------------------------------------------------------------------------
