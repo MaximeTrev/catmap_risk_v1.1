@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -118,6 +119,28 @@ OM_TERRITORIES = {
     "Nouvelle-Calédonie": {"path": "ncaledonie/cartevigilance/encours", "center": (-21.3, 165.5), "zoom": 6},
 }
 OM_DROM_PATH = "vigilanceom/flux/dernier"
+# Identifiants de phénomènes (cohérents avec les bulletins outre-mer : vents forts, pluies/orages, vagues-submersion).
+# Les autres identifiants (ex. 10) restent « Phénomène N » tant qu'ils ne sont pas documentés.
+OM_PHENOMENA = {1: "Vents forts", 2: "Fortes pluies / orages", 9: "Vagues-submersion"}
+OM_TERRITORY_CODES = {
+    "971": "Guadeloupe", "972": "Martinique", "973": "Guyane", "974": "La Réunion", "975": "Saint-Pierre-et-Miquelon",
+    "976": "Mayotte", "977": "Saint-Barthélemy", "978": "Saint-Martin", "986": "Wallis-et-Futuna",
+    "987": "Polynésie française", "988": "Nouvelle-Calédonie",
+}
+OM_CENTERS = {
+    "Guadeloupe": (16.2, -61.55), "Martinique": (14.65, -61.0), "Guyane": (4.0, -53.0), "La Réunion": (-21.1, 55.5),
+    "Mayotte": (-12.8, 45.15), "Saint-Pierre-et-Miquelon": (46.9, -56.3), "Saint-Barthélemy": (17.9, -62.83),
+    "Saint-Martin": (18.07, -63.05), "Wallis-et-Futuna": (-13.8, -177.8),
+    "Polynésie française": (-17.65, -149.45), "Nouvelle-Calédonie": (-21.3, 165.5),
+}
+
+
+def territory_of(domain_id: str) -> str:
+    """« VIGI972-01 » -> « Martinique » ; « VIGI987-14-57 » -> « Polynésie française » (code à 3 chiffres après VIGI)."""
+    m = re.match(r"\s*VIGI(\d{3})", str(domain_id), re.I)
+    return OM_TERRITORY_CODES.get(m.group(1), "Autre") if m else "Autre"
+
+
 OM_VIEWS = {
     "Guadeloupe": ((16.2, -61.55), 9), "Martinique": ((14.65, -61.0), 9), "Guyane": ((4.0, -53.0), 7),
     "La Réunion": ((-21.1, 55.5), 9), "Mayotte": ((-12.8, 45.15), 10), "Saint-Pierre-et-Miquelon": ((46.9, -56.3), 9),
@@ -168,6 +191,47 @@ def inspect_zip(data: bytes, head_chars: int = 1200) -> list[dict]:
     return out
 
 
+def parse_drom_zip(data: bytes) -> pd.DataFrame:
+    """Flux ZIP des autres DROM : fichiers ``.txt`` au format JSON « carte » (Antilles, Guyane, Réunion, Mayotte) et
+    fichier XML de Saint-Pierre-et-Miquelon. Retourne la table longue + colonne ``territoire`` (vide si rien d'exploitable).
+    Les bulletins PDF et textes de suivi sont ignorés."""
+    import io
+    import re
+    import zipfile
+    frames: list[pd.DataFrame] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return pd.DataFrame(columns=COLUMNS + ["territoire"])
+    for info in zf.infolist():
+        name = info.filename.lower()
+        if info.is_dir() or info.file_size > 20_000_000 or not name.endswith((".txt", ".json", ".xml")):
+            continue
+        try:
+            text = zf.read(info).decode("utf-8", "replace").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if text.startswith("{") and '"timelaps"' in text:
+            try:
+                df = parse_vigilance(json.loads(text), phenomena=OM_PHENOMENA, include_domain_max=True)
+            except (ValueError, VigilanceFormatError):
+                continue
+            df["territoire"] = df["domaine"].map(territory_of)
+            frames.append(df)
+        elif "<CV>" in text and "<DV" in text:           # Saint-Pierre-et-Miquelon : <DV dep="975" ... coul="1">
+            rows = [{"periode": "", "debut": "", "fin": "", "domaine": f"VIGI{m.group(1)}", "phenomene_id": None,
+                     "phenomene": "Niveau global", "couleur_id": int(m.group(2)), "couleur": _color_name(m.group(2)),
+                     "territoire": territory_of(f"VIGI{m.group(1)}")}
+                    for m in re.finditer(r'<DV\s+dep="(\d+)"[^>]*?\bcoul="(-?\d+)"', text)]
+            if rows:
+                frames.append(pd.DataFrame(rows))
+    if not frames:
+        return pd.DataFrame(columns=COLUMNS + ["territoire"])
+    out = pd.concat(frames, ignore_index=True)
+    out["couleur_id"] = pd.to_numeric(out["couleur_id"], errors="coerce")
+    return out
+
+
 def parse_zip_json(data: bytes) -> list[pd.DataFrame]:
     """Si le ZIP contient des JSON au format « carte » reconnu, retourne leurs tables ; sinon liste vide."""
     import io
@@ -179,11 +243,12 @@ def parse_zip_json(data: bytes) -> list[pd.DataFrame]:
     except zipfile.BadZipFile:
         return frames
     for info in zf.infolist():
-        if info.filename.lower().endswith(".json") and info.file_size < 20_000_000:
-            try:
-                frames.append(parse_vigilance(json.loads(zf.read(info)), phenomena={}))
+        if info.filename.lower().endswith((".json", ".txt")) and info.file_size < 20_000_000:
+            try:                       # le flux outre-mer livre ses JSON dans des fichiers .txt (CDPV85_*.txt…)
+                payload = json.loads(zf.read(info).decode("utf-8", "replace"))
+                frames.append(parse_vigilance(payload, phenomena={}))
             except (ValueError, VigilanceFormatError):
-                continue
+                continue               # bulletins texte, XML, PDF : ignorés
     return frames
 
 
@@ -195,12 +260,12 @@ COLUMNS = ["periode", "debut", "fin", "domaine", "phenomene_id", "phenomene", "c
 
 def _color_name(cid) -> str:
     try:
-        return COLORS.get(int(cid), str(cid))
+        return COLORS.get(int(cid), "n/d" if int(cid) <= 0 else str(cid))
     except (TypeError, ValueError):
         return str(cid)
 
 
-def parse_vigilance(payload: dict, phenomena: Optional[dict] = None) -> pd.DataFrame:
+def parse_vigilance(payload: dict, phenomena: Optional[dict] = None, include_domain_max: bool = False) -> pd.DataFrame:
     """Table longue (une ligne par période × domaine × phénomène). Lève ``VigilanceFormatError``
     avec les clés rencontrées si le format n'est pas reconnu."""
     labels = PHENOMENA if phenomena is None else phenomena     # outre-mer : {} (les identifiants diffèrent de la métropole)
@@ -220,6 +285,9 @@ def parse_vigilance(payload: dict, phenomena: Optional[dict] = None) -> pd.DataF
                     "fin": per.get("end_validity_time", ""), "domaine": str(dom.get("domain_id", "")).strip(),
                 }
                 items = dom.get("phenomenon_items") or []
+                if include_domain_max and items and dom.get("max_color_id") is not None:   # outre-mer : niveau global du domaine
+                    rows.append({**base, "phenomene_id": None, "phenomene": "Niveau global",
+                                 "couleur_id": dom.get("max_color_id"), "couleur": _color_name(dom.get("max_color_id"))})
                 if not items:
                     rows.append({**base, "phenomene_id": None, "phenomene": "Tous phénomènes",
                                  "couleur_id": dom.get("max_color_id"), "couleur": _color_name(dom.get("max_color_id"))})
@@ -257,8 +325,8 @@ def worst_by_domain(df: pd.DataFrame, periode: Optional[str] = None) -> pd.DataF
         return pd.DataFrame(columns=["domaine", "couleur_id", "couleur", "phenomenes"])
     out = []
     for dom, g in d.groupby("domaine"):
-        mx = g["couleur_id"].max()
-        active = g[g["couleur_id"] >= 2].sort_values("couleur_id", ascending=False)
+        mx = g["couleur_id"].where(g["couleur_id"] >= 1).max()      # 0 / -1 = non applicable
+        active = g[(g["couleur_id"] >= 2) & (g["phenomene"] != "Niveau global")].sort_values("couleur_id", ascending=False)
         phen = ", ".join(f"{r.phenomene} ({r.couleur})" for r in active.drop_duplicates("phenomene").itertuples())
         out.append({"domaine": dom, "couleur_id": mx, "couleur": _color_name(mx), "phenomenes": phen})
     return pd.DataFrame(out)
