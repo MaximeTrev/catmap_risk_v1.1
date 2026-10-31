@@ -822,79 +822,78 @@ def _fetch_om_zip(path: str):
     return vg.fetch_path(vg.MeteoFranceAuth(s), s, path, binary=True)
 
 
+def _overseas_tables() -> tuple[pd.DataFrame, list[str]]:
+    """Table longue unique (colonne « territoire ») : Polynésie, Nouvelle-Calédonie et flux ZIP des autres DROM."""
+    frames, problems = [], []
+    for name, info in vg.OM_TERRITORIES.items():
+        try:
+            t = vg.parse_vigilance(_fetch_om_json(info["path"]), phenomena=vg.OM_PHENOMENA, include_domain_max=True)
+        except (vg.VigilanceError, vg.VigilanceFormatError) as e:
+            problems.append(f"{name} : {e}")
+            continue
+        t["territoire"] = name
+        frames.append(t)
+    try:
+        z = vg.parse_drom_zip(_fetch_om_zip(vg.OM_DROM_PATH))
+        if len(z):
+            frames.append(z)
+        else:
+            problems.append("Autres DROM : aucune donnée exploitable dans le flux.")
+    except vg.VigilanceError as e:
+        problems.append(f"Autres DROM : {e}")
+    if not frames:
+        return pd.DataFrame(columns=vg.COLUMNS + ["territoire"]), problems
+    return pd.concat(frames, ignore_index=True), problems
+
+
 def _overseas_section():
-    """Vigilance Polynésie, Nouvelle-Calédonie et autres DROM (flux distincts de la métropole)."""
-    import json
+    """Vigilance outre-mer : un indicateur et un repère coloré par territoire, détail par zone."""
     import folium
     from streamlit_folium import st_folium
 
     st.subheader("Outre-mer")
-    st.caption("Polynésie française et Nouvelle-Calédonie : couleur par zone. Autres DROM : flux ZIP (voir le diagnostic ci-dessous). "
-               "Les contours des zones d'outre-mer ne sont pas encore intégrés : la carte montre un repère par territoire.")
-    results = {}
-    for name, info in vg.OM_TERRITORIES.items():
-        try:
-            payload = _fetch_om_json(info["path"])
-        except vg.VigilanceError as e:
-            st.warning(f"{name} : {e}")
-            continue
-        try:
-            table = vg.parse_vigilance(payload, phenomena={})
-        except vg.VigilanceFormatError as e:
-            st.warning(f"{name} : {e}")
-            with st.expander(f"Réponse brute {name} (début)"):
-                st.code(json.dumps(payload, ensure_ascii=False)[:3000])
-            continue
-        results[name] = (table, vg.worst_by_domain(table, None), payload)
+    table, problems = _overseas_tables()
+    for p in problems:
+        st.warning(p)
+    if table.empty:
+        return
+    summary = []
+    for terr, g in table.groupby("territoire"):
+        w = vg.worst_by_domain(g, None)
+        mx = int(w["couleur_id"].max()) if len(w) and w["couleur_id"].notna().any() else 0
+        summary.append((terr, mx, w))
+    summary.sort(key=lambda x: (-x[1], x[0]))
+    for i in range(0, len(summary), 5):
+        cols = st.columns(5)
+        for col, (terr, mx, _) in zip(cols, summary[i:i + 5]):
+            col.metric(terr, vg.COLORS.get(mx, "n/d"))
 
-    c = st.columns(max(1, len(results)))
-    for col, (name, (table, worst, _)) in zip(c, results.items()):
-        mx = int(worst["couleur_id"].max()) if len(worst) and worst["couleur_id"].notna().any() else 0
-        col.metric(name, vg.COLORS.get(mx, "n/d"))
-    view = st.selectbox("Zoom de la carte", ["Polynésie française", "Nouvelle-Calédonie"] + list(vg.OM_VIEWS), key="om_view")
-    center, zoom = (vg.OM_TERRITORIES[view]["center"], vg.OM_TERRITORIES[view]["zoom"]) if view in vg.OM_TERRITORIES else vg.OM_VIEWS[view]
-    m = folium.Map(location=list(center), zoom_start=zoom, tiles=None, control_scale=True)
+    centers = dict(vg.OM_CENTERS)
+    view = st.selectbox("Zoom de la carte", list(centers), key="om_view")
+    zoom = vg.OM_TERRITORIES[view]["zoom"] if view in vg.OM_TERRITORIES else vg.OM_VIEWS.get(view, (None, 10))[1]
+    m = folium.Map(location=list(centers[view]), zoom_start=zoom, tiles=None, control_scale=True)
     esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
     folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
     folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
-    for name, (table, worst, _) in results.items():
-        mx = int(worst["couleur_id"].max()) if len(worst) and worst["couleur_id"].notna().any() else 0
+    for terr, mx, w in summary:
+        if terr not in centers:
+            continue
         zones = "<br>".join(f"{html.escape(str(r.domaine))} : {html.escape(str(r.couleur))}"
-                            + (f" — {html.escape(r.phenomenes)}" if r.phenomenes else "") for r in worst.itertuples())
-        c0 = vg.OM_TERRITORIES[name]["center"]
-        folium.CircleMarker(list(c0), radius=16, color="#222", weight=2, fill=True, fill_opacity=0.85,
+                            + (f" — {html.escape(r.phenomenes)}" if r.phenomenes else "") for r in w.itertuples())
+        folium.CircleMarker(list(centers[terr]), radius=16, color="#222", weight=2, fill=True, fill_opacity=0.85,
                             fill_color=vg.COLOR_HEX.get(mx, "#999999"),
-                            popup=folium.Popup(f"<b>{html.escape(name)}</b><br>{zones}", max_width=340),
-                            tooltip=f"{name} : {vg.COLORS.get(mx, 'n/d')}").add_to(m)
+                            popup=folium.Popup(f"<b>{html.escape(terr)}</b><br>{zones}", max_width=340),
+                            tooltip=f"{terr} : {vg.COLORS.get(mx, 'n/d')}").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
     try:
         st_folium(m, height=420, returned_objects=[], key=f"om_map_{view}", use_container_width=True)
     except TypeError:
         st_folium(m, height=420, width=1400, returned_objects=[], key=f"om_map_{view}")
-    for name, (table, worst, payload) in results.items():
-        with st.expander(f"{name} : détail par zone"):
-            _stretch(st.dataframe, worst.sort_values("couleur_id", ascending=False), hide_index=True)
-            if st.checkbox("Afficher la réponse brute (début)", key=f"raw_{name}"):
-                st.code(json.dumps(payload, ensure_ascii=False)[:3000])
-
-    with st.expander("Autres DROM (Antilles, Guyane, La Réunion, Mayotte) : flux ZIP"):
-        try:
-            data = _fetch_om_zip(vg.OM_DROM_PATH)
-        except vg.VigilanceError as e:
-            st.warning(str(e))
-            return
-        frames = vg.parse_zip_json(data)
-        if frames:
-            tab = pd.concat(frames, ignore_index=True)
-            _stretch(st.dataframe, vg.worst_by_domain(tab, None), hide_index=True)
-        else:
-            st.info("Ce flux ne contient pas de données de couleur exploitables automatiquement (bulletins PDF). "
-                    "Contenu du flux :")
-            for f in vg.inspect_zip(data):
-                st.markdown(f"**{f['fichier']}** ({f['taille']} octets)" + (" : document PDF/binaire" if f["binaire"] else ""))
-                if f["debut"]:
-                    st.code(f["debut"])
-        st.download_button("Télécharger le flux (ZIP)", data, "vigilance_outre_mer.zip", "application/zip", key="om_zip_dl")
+    with st.expander("Détail par zone"):
+        detail = pd.concat([w.assign(territoire=terr) for terr, _, w in summary], ignore_index=True)
+        detail = detail[["territoire", "domaine", "couleur", "phenomenes"]].rename(
+            columns={"domaine": "zone", "phenomenes": "phénomènes en alerte"})
+        _stretch(st.dataframe, detail, hide_index=True)
 
 
 def _vigilance_section():
