@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
@@ -331,7 +332,7 @@ def _norm(t) -> str:
     return re.sub(r"[^a-z0-9]+", " ", t).strip()
 
 
-def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 500, max_pages: int = 40) -> dict:
+def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 200, max_pages: int = 40) -> dict:
     """Retourne {"by_code": {code: (pays, nom, anneaux)}, "by_name": {(pays_normalisé, nom_normalisé): anneaux}}.
     Lève MeteoAlarmError si la couche est inaccessible ou vide."""
     s = session or requests
@@ -340,10 +341,16 @@ def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 500, max
     for k in range(max_pages):
         params = {"where": "1=1", "outFields": "code,country,name", "outSR": 4326, "f": "geojson",
                   "maxAllowableOffset": 0.02, "resultOffset": k * page, "resultRecordCount": page}
-        try:
-            r = s.get(url, params=params, headers={"User-Agent": "CatMap/3.3"}, timeout=60)
-        except requests.RequestException as e:
-            raise MeteoAlarmError(f"contours injoignables ({type(e).__name__})") from e
+        r, last = None, None
+        for attempt in range(3):             # nouvelles tentatives : le serveur ArcGIS coupe parfois la connexion
+            try:
+                r = s.get(url, params=params, headers={"User-Agent": "CatMap/3.3"}, timeout=90)
+                break
+            except requests.RequestException as e:
+                last = e
+                time.sleep(1.5 * (attempt + 1))
+        if r is None:
+            raise MeteoAlarmError(f"contours injoignables ({type(last).__name__})") from last
         if r.status_code != 200:
             raise MeteoAlarmError(f"contours : HTTP {r.status_code}")
         try:
