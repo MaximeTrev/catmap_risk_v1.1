@@ -1035,13 +1035,43 @@ def _vigilance_sites_section(df):
                        "catmap_sites_vigilance_complet.csv", "text/csv", key="vg_dl_all")
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _load_geocodes(url: str):
+    try:
+        return ma.load_geocodes(url=url or ma.GEOCODES_URL), None
+    except ma.MeteoAlarmError as e:
+        return None, str(e)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_europe(slugs: tuple):
+def _load_europe(slugs: tuple, geo_url: str):
     alerts, rings, errors = ma.fetch_all(slugs)
-    return alerts, rings, errors
+    geo, geo_err = _load_geocodes(geo_url)
+    if not alerts.empty:
+        rings, _ = ma.attach_geometry(alerts, rings, geo)
+    return alerts, rings, errors, geo_err
 
 
-def _europe_map(alerts, rings, errors_slugs, selected):
+def _alert_popup(a) -> str:
+    def esc(x):
+        return html.escape(str(x or ""))
+    def fmt(d):
+        return d.strftime("%d/%m/%Y %H:%M UTC") if d is not None and pd.notna(d) else "—"
+    col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
+    desc = esc(a["description"])[:700]
+    cons = esc(a["consigne"])[:500]
+    return (f"<div style='font:13px/1.4 sans-serif;max-width:340px'>"
+            f"<div style='background:{col};color:#fff;padding:4px 8px;border-radius:4px;font-weight:600'>"
+            f"{esc(a['type'])} · {esc(a['niveau'])}</div>"
+            f"<b>{esc(a['pays'])} — {esc(a['zone'])}</b><br>"
+            f"Début : {fmt(a['debut'])}<br>Fin : {fmt(a['fin'])}<br>"
+            f"Sévérité : {esc(a['severite'])} · Urgence : {esc(a['urgence'])} · Certitude : {esc(a['certitude'])}<br>"
+            + (f"<i>{esc(a['titre'])}</i><br>" if a["titre"] else "")
+            + (f"{desc}<br>" if desc else "") + (f"<b>Consigne :</b> {cons}<br>" if cons else "")
+            + f"<small>Émetteur : {esc(a['emetteur'])}</small></div>")
+
+
+def _europe_map(alerts, rings):
     import folium
     from streamlit_folium import st_folium
     m = folium.Map(location=[50.0, 10.0], zoom_start=4, tiles=None, control_scale=True)
@@ -1049,36 +1079,22 @@ def _europe_map(alerts, rings, errors_slugs, selected):
     folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
     folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
     folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
-    poly_group = folium.FeatureGroup(name="Alertes (contours)")
-    drawn = set()
-    order = sorted(rings, key=lambda i: alerts.iloc[i]["niveau_id"] or 0)      # le plus fort dessiné en dernier
+    grp = folium.FeatureGroup(name="Alertes par zone")
+    order = sorted(rings, key=lambda i: alerts.iloc[i]["niveau_id"] or 0)      # le plus fort dessiné en dernier (au-dessus)
     for i in order:
         a = alerts.iloc[i]
-        if (a["niveau_id"] or 0) < 2:
-            continue
-        drawn.add(a["pays"])
-        tip = f"{a['pays']} · {a['type']} · {a['niveau']}"
+        col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
+        tip = f"{a['pays']} · {a['zone']} · {a['type']} · {a['niveau']}"
+        pop = folium.Popup(folium.Html(_alert_popup(a), script=True), max_width=360)     # le popup reste ouvert après le clic
         for r in rings[i]:
-            folium.Polygon([(y, x) for x, y in r], color="#333", weight=0.6, fill=True,
-                           fill_color=ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999"), fill_opacity=0.55, tooltip=tip).add_to(poly_group)
-    poly_group.add_to(m)
-    mark = folium.FeatureGroup(name="Pays sans contour (niveau max)")
-    for w in ma.worst_by_country(alerts).itertuples():
-        if w.pays in drawn or pd.isna(w.niveau_id) or w.niveau_id < 2:
-            continue
-        slug = next((k for k, v in ma.COUNTRIES.items() if v[0] == w.pays), None)
-        if slug is None:
-            continue
-        la, lo = ma.COUNTRIES[slug][2]
-        folium.CircleMarker((la, lo), radius=11, color="#333", weight=1, fill=True,
-                            fill_color=ma.LEVEL_HEX.get(int(w.niveau_id), "#999"), fill_opacity=0.85,
-                            tooltip=f"{w.pays} : {w.niveau} ({w.types})").add_to(mark)
-    mark.add_to(m)
+            folium.Polygon([(y, x) for x, y in r], color="#222", weight=1, fill=True, fill_color=col,
+                           fill_opacity=0.55, tooltip=tip, popup=pop).add_to(grp)
+    grp.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
     try:
-        st_folium(m, height=560, returned_objects=[], key="europe_map", use_container_width=True)
+        st_folium(m, height=600, returned_objects=[], key="europe_map", use_container_width=True)
     except TypeError:
-        st_folium(m, height=560, width=1400, returned_objects=[], key="europe_map")
+        st_folium(m, height=600, width=1400, returned_objects=[], key="europe_map")
 
 
 def _europe_section():
@@ -1092,7 +1108,7 @@ def _europe_section():
         st.info("Sélectionnez au moins un pays.")
         return
     with st.spinner("Lecture des flux MeteoAlarm…"):
-        alerts, rings, errors = _load_europe(tuple(sorted(chosen)))
+        alerts, rings, errors, geo_err = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")))
     if errors:
         st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in errors.items()))
     if alerts.empty:
@@ -1110,9 +1126,16 @@ def _europe_section():
     for i, name in ma.LEVELS.items():
         c[i - 1].metric(name, int(n.get(i, 0)))
     keep_idx = set(view.index)
-    _europe_map(alerts, {i: r for i, r in rings.items() if i in keep_idx}, [], chosen)
+    shown = {i: r for i, r in rings.items() if i in keep_idx}
+    _europe_map(alerts, shown)
+    missing = view[~view.index.isin(shown)]
+    if geo_err:
+        st.warning(f"Contours des zones indisponibles ({geo_err}) : seules les alertes dont le flux contient déjà un polygone sont dessinées.")
+    if len(missing):
+        with st.expander(f"{len(missing)} alerte(s) non dessinée(s) (contour de zone introuvable)"):
+            _stretch(st.dataframe, missing[["pays", "zone", "codes_zone", "niveau", "type"]], hide_index=True)
     show = view.sort_values(["niveau_id", "pays"], ascending=[False, True])
-    cols = ["pays", "niveau", "type", "debut", "fin", "zones", "severite", "urgence", "certitude", "titre", "emetteur"]
+    cols = ["pays", "niveau", "type", "debut", "fin", "zone", "severite", "urgence", "certitude", "titre", "emetteur"]
     st.markdown("**Alertes en cours**")
     _stretch(st.dataframe, show[cols].rename(columns={"debut": "début", "severite": "sévérité", "certitude": "certitude"}), hide_index=True)
     with st.expander("Détail des consignes et données brutes analysées"):
