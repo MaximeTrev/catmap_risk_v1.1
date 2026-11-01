@@ -1060,12 +1060,12 @@ def _load_geocodes(url: str, uploaded: bytes | None = None):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, _v: int = 4):
+def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, _v: int = 5):
     alerts, rings, errors = ma.fetch_all(slugs)
     geo, geo_err = _load_geocodes(geo_url, uploaded)
     if not alerts.empty:
         rings, _ = ma.attach_geometry(alerts, rings, geo)
-    return alerts, rings, errors, geo_err
+    return alerts, rings, errors, geo_err, (len(geo["by_code"]) if geo else 0)
 
 
 def _alert_popup(a) -> str:
@@ -1136,10 +1136,13 @@ def _europe_section():
         st.info("Sélectionnez au moins un pays.")
         return
     with st.spinner("Lecture des flux MeteoAlarm…"):
-        alerts, rings, errors, geo_err = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
+        alerts, rings, errors, geo_err, n_geo = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
                                                       up_geo.getvalue() if up_geo is not None else None)
     if errors:
         st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in errors.items()))
+    with st.expander("Diagnostic par pays (flux, alertes lues, contours)"):
+        st.caption(f"Zones de contours chargées : {n_geo}.")
+        _stretch(st.dataframe, ma.diagnostic(alerts, chosen, errors, None if not n_geo else {}), hide_index=True)
     if alerts.empty:
         if not errors:
             st.success("Aucune alerte en cours pour les pays sélectionnés.")
