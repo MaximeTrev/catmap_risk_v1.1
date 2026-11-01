@@ -57,7 +57,7 @@ TYPES = {1: "Vent", 2: "Neige / verglas", 3: "Orages", 4: "Brouillard", 5: "Fort
          7: "Événement côtier", 8: "Feu de forêt", 9: "Avalanches", 10: "Fortes pluies", 11: "Inondations",
          12: "Pluie-inondation"}
 SEVERITY_TO_LEVEL = {"minor": 1, "moderate": 2, "severe": 3, "extreme": 4}
-COLUMNS = ["pays", "pays_iso2", "identifiant", "emetteur", "evenement", "niveau_id", "niveau", "type_id", "type",
+COLUMNS = ["pays", "pays_iso2", "identifiant", "emetteur", "evenement", "niveau_id", "niveau", "niveau_brut", "type_id", "type",
            "debut", "fin", "emis", "urgence", "severite", "certitude", "zone", "codes_zone", "titre", "description",
            "consigne", "langues", "avec_contour"]
 
@@ -222,6 +222,7 @@ def parse_feed(payload: Any, slug: str, *, now: Optional[datetime] = None, only_
                     "pays": label, "pays_iso2": iso2, "identifiant": str(alert.get("identifier", "")),
                     "emetteur": str(alert.get("senderName") or alert.get("sender") or ""),
                     "evenement": str(info.get("event", "")), "niveau_id": level_id, "niveau": LEVELS.get(level_id, "n/d"),
+                    "niveau_brut": f"{p.get('awareness_level', '')} | {info.get('severity', '')}",
                     "type_id": type_id, "type": tlabel, "debut": onset, "fin": expires, "emis": _dt(alert.get("sent")),
                     "urgence": str(info.get("urgency", "")), "severite": str(info.get("severity", "")),
                     "certitude": str(info.get("certainty", "")),
