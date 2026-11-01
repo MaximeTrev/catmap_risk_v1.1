@@ -57,6 +57,29 @@ class T(unittest.TestCase):
         self.assertEqual(res["europe_niveau"].tolist(), ["Orange", "Jaune", None])
         self.assertIn("Fortes pluies", res.loc[0, "europe_types"])
 
+    def test_one_row_per_area_and_geometry(self):
+        a = alert(poly=None)
+        a["alert"]["info"][0]["area"] = [
+            {"areaDesc": "Puglia", "geocode": [{"valueName": "EMMA_ID", "value": "IT009"}]},
+            {"areaDesc": "Sardegna", "geocode": [{"valueName": "EMMA_ID", "value": "IT020"}]}]
+        df, rings = ma.parse_feed([a], "italy", now=NOW)
+        self.assertEqual(df["zone"].tolist(), ["Puglia", "Sardegna"])
+        self.assertEqual(rings, {})
+
+        class R:
+            status_code = 200
+            def json(s):
+                sq = {"type": "Polygon", "coordinates": [[[16, 40], [17, 40], [17, 41], [16, 41], [16, 40]]]}
+                return {"features": [{"properties": {"code": "IT009", "country": "IT", "name": "Puglia"}, "geometry": sq},
+                                     {"properties": {"code": "", "country": "Italy", "name": "Sardegna"},
+                                      "geometry": {"type": "Polygon", "coordinates": [[[8, 39], [9, 39], [9, 40], [8, 39]]]}}]}
+        class S:
+            def get(s, *a, **k): return R()
+        geo = ma.load_geocodes(session=S())
+        rings, left = ma.attach_geometry(df, rings, geo)
+        self.assertEqual((sorted(rings), left), ([0, 1], 0))        # code pour Puglia, nom pour Sardegna
+        self.assertTrue(df["avec_contour"].all())
+
     def test_fetch_all_errors(self):
         class R:
             def __init__(s, c, j=None): s.status_code, s._j = c, j
