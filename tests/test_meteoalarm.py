@@ -80,6 +80,16 @@ class T(unittest.TestCase):
         self.assertEqual((sorted(rings), left), ([0, 1], 0))        # code pour Puglia, nom pour Sardegna
         self.assertTrue(df["avec_contour"].all())
 
+    def test_geocodes_json_variants(self):
+        sq = {"type": "Polygon", "coordinates": [[[22, 40], [23, 40], [23, 41], [22, 41], [22, 40]]]}
+        g1 = ma.parse_geocodes_json({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"EMMA_ID": "EL012", "country": "GR", "name": "Central Makedonia"}, "geometry": sq}]})
+        self.assertIn("EL012", g1["by_code"])
+        g2 = ma.parse_geocodes_json({"EL012": {"name": "Central Makedonia", "country": "GR", "geometry": sq}})
+        self.assertIn("EL012", g2["by_code"])
+        with self.assertRaises(ma.MeteoAlarmError):
+            ma.parse_geocodes_json({"features": []})
+
     def test_fetch_all_errors(self):
         class R:
             def __init__(s, c, j=None): s.status_code, s._j = c, j
