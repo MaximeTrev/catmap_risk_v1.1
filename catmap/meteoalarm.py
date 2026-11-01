@@ -417,7 +417,7 @@ def _first(props: dict, keys) -> Any:
     return None
 
 
-def _thin(r: np.ndarray, max_pts: int = 600) -> np.ndarray:
+def _thin(r: np.ndarray, max_pts: int = 400) -> np.ndarray:
     r = np.round(r[:, :2], 3)
     keep = np.ones(len(r), bool)
     keep[1:] = np.any(r[1:] != r[:-1], axis=1)
@@ -464,6 +464,9 @@ def parse_geocodes_json(data: Any) -> dict:
 
 
 def load_geocodes_bytes(raw: bytes) -> dict:
+    if raw[:2] == b"\x1f\x8b":                      # fichier compressé (.json.gz)
+        import gzip
+        raw = gzip.decompress(raw)
     try:
         data = json.loads(raw.decode("utf-8-sig"))
     except (ValueError, UnicodeDecodeError) as e:
