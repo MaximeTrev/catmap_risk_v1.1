@@ -401,3 +401,91 @@ def attach_geometry(df: pd.DataFrame, rings: dict, geo: Optional[dict]) -> tuple
                 out[i] = found
     df["avec_contour"] = [i in out for i in range(len(df))]
     return out, int((~df["avec_contour"]).sum())
+
+
+# --------------------------------------------------------------------------- fichier officiel « Geocodes » (Redistribution Hub)
+CODE_KEYS = ("code", "emma_id", "geocode", "id", "emmaid", "value")
+COUNTRY_KEYS = ("country", "cntr", "cntr_id", "iso", "iso2", "country_code", "countryname")
+NAME_KEYS = ("name", "areadesc", "name_en", "name_engl", "nom", "label")
+
+
+def _first(props: dict, keys) -> Any:
+    low = {str(k).lower(): v for k, v in (props or {}).items()}
+    for k in keys:
+        if low.get(k) not in (None, ""):
+            return low[k]
+    return None
+
+
+def _thin(r: np.ndarray, max_pts: int = 600) -> np.ndarray:
+    r = np.round(r[:, :2], 3)
+    keep = np.ones(len(r), bool)
+    keep[1:] = np.any(r[1:] != r[:-1], axis=1)
+    r = r[keep]
+    if len(r) > max_pts:
+        step = int(np.ceil(len(r) / max_pts))
+        r = np.vstack([r[::step], r[:1]])
+    return r
+
+
+def parse_geocodes_json(data: Any) -> dict:
+    """Lit le fichier « Geocodes » de MeteoAlarm (GeoJSON, liste d'objets ou dictionnaire indexé par code ; structure
+    tolérante car non vérifiée). Retourne le même format que ``load_geocodes``. Lève MeteoAlarmError si rien d'exploitable."""
+    items: list = []
+    if isinstance(data, dict) and isinstance(data.get("features"), list):
+        items = data["features"]
+    elif isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(v, dict):
+                items.append(dict(v, **({"code": k} if "code" not in v else {})))
+    by_code: dict = {}
+    by_name: dict = {}
+    for f in items:
+        if not isinstance(f, dict):
+            continue
+        props = f.get("properties") if isinstance(f.get("properties"), dict) else f
+        geom = f.get("geometry") if isinstance(f.get("geometry"), dict) else None
+        if geom is None:
+            continue
+        rg = [_thin(r) for r in _geojson_rings(geom)]
+        rg = [r for r in rg if len(r) >= 3 and np.all(np.abs(r[:, 0]) <= 180) and np.all(np.abs(r[:, 1]) <= 90)]
+        if not rg:
+            continue
+        code, ctry, name = _first(props, CODE_KEYS), _first(props, COUNTRY_KEYS), _first(props, NAME_KEYS)
+        if code:
+            by_code.setdefault(str(code).strip().upper(), (ctry, name, []))[2].extend(rg)
+        if name:
+            by_name.setdefault((_norm(ctry), _norm(name)), []).extend(rg)
+    if not by_code and not by_name:
+        raise MeteoAlarmError("fichier de contours non reconnu (aucune zone avec géométrie en degrés lon/lat)")
+    return {"by_code": by_code, "by_name": by_name}
+
+
+def load_geocodes_bytes(raw: bytes) -> dict:
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError) as e:
+        raise MeteoAlarmError("fichier de contours : JSON invalide") from e
+    return parse_geocodes_json(data)
+
+
+def load_geocodes_url(url: str, *, session=None, timeout: float = 180.0) -> dict:
+    s = session or requests
+    try:
+        r = s.get(url, headers={"User-Agent": "CatMap/3.3"}, timeout=timeout)
+    except requests.RequestException as e:
+        raise MeteoAlarmError(f"contours injoignables ({type(e).__name__})") from e
+    if r.status_code != 200:
+        raise MeteoAlarmError(f"contours : HTTP {r.status_code}")
+    return load_geocodes_bytes(r.content)
+
+
+def coverage(df: pd.DataFrame) -> pd.DataFrame:
+    """Alertes dessinables / total par pays (diagnostic)."""
+    if df.empty:
+        return pd.DataFrame(columns=["pays", "alertes", "avec contour"])
+    g = df.groupby("pays")["avec_contour"].agg(["size", "sum"]).reset_index()
+    g.columns = ["pays", "alertes", "avec contour"]
+    return g.sort_values("avec contour")
