@@ -90,6 +90,17 @@ class T(unittest.TestCase):
         with self.assertRaises(ma.MeteoAlarmError):
             ma.parse_geocodes_json({"features": []})
 
+    def test_aliases_resolve_nuts_codes(self):
+        al = ma.load_aliases("CODE\tALIAS_CODE\tALIAS_TYPE\nBG023\tBG334\tNUTS3\nIE020\tEI01\tFIPS\n")
+        self.assertEqual(al["BG334"], ["BG023"])
+        a = alert(poly=None)
+        a["alert"]["info"][0]["area"] = [{"areaDesc": "Targovishte", "geocode": [{"valueName": "EMMA_ID", "value": "BG334"}]}]
+        df, rings = ma.parse_feed([a], "bulgaria", now=NOW)
+        sq = {"type": "Polygon", "coordinates": [[[26, 43], [27, 43], [27, 44], [26, 43]]]}
+        geo = ma.parse_geocodes_json({"features": [{"properties": {"code": "BG023", "country": "BG", "name": "x"}, "geometry": sq}]})
+        rings, left = ma.attach_geometry(df, rings, geo, al)
+        self.assertEqual((sorted(rings), left), ([0], 0))
+
     def test_fetch_all_errors(self):
         class R:
             def __init__(s, c, j=None): s.status_code, s._j = c, j
