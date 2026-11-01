@@ -1062,7 +1062,7 @@ def _alert_popup(a) -> str:
     def esc(x):
         return html.escape(str(x or ""))
     def fmt(d):
-        return d.strftime("%d/%m/%Y %H:%M UTC") if d is not None and pd.notna(d) else "—"
+        return pd.Timestamp(d).tz_convert("Europe/Paris").strftime("%d/%m/%Y %H:%M (Paris)") if d is not None and pd.notna(d) else "—"
     col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
     desc = esc(a["description"])[:700]
     cons = esc(a["consigne"])[:500]
@@ -1129,13 +1129,30 @@ def _europe_section():
         if not errors:
             st.success("Aucune alerte en cours pour les pays sélectionnés.")
         return
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     types = sorted(set(alerts["type"].dropna()))
     sel_types = c1.multiselect("Types d'alerte", types, default=types, key="eu_types")
     min_level = c2.selectbox("Niveau minimal", [1, 2, 3, 4], index=1, format_func=lambda i: ma.LEVELS[i], key="eu_level")
-    keep = alerts["type"].isin(sel_types) & (alerts["niveau_id"].fillna(0) >= min_level)
-    view = alerts[keep]
-    n = alerts[alerts["type"].isin(sel_types)]["niveau_id"].value_counts()
+    day = c3.selectbox("Période", ["Aujourd'hui", "Demain", "Après-demain", "En ce moment", "Toutes"], key="eu_day")
+    now = pd.Timestamp.now(tz="Europe/Paris")
+    d0 = now.normalize()
+    if day == "Toutes":
+        win = None
+    elif day == "En ce moment":
+        win = (now, now)
+    else:
+        k = {"Aujourd'hui": 0, "Demain": 1, "Après-demain": 2}[day]
+        win = (d0 + pd.Timedelta(days=k), d0 + pd.Timedelta(days=k + 1))
+    if win is None:
+        in_win = pd.Series(True, index=alerts.index)
+    else:                                  # l'alerte chevauche la période (heure de Paris) ; fin inconnue = toujours valable
+        deb = pd.to_datetime(alerts["debut"], utc=True, errors="coerce")
+        fin = pd.to_datetime(alerts["fin"], utc=True, errors="coerce")
+        in_win = (deb.isna() | (deb < win[1])) & (fin.isna() | (fin >= win[0]))
+    base = alerts[alerts["type"].isin(sel_types) & in_win]
+    view = base[base["niveau_id"].fillna(0) >= min_level]
+    n = base["niveau_id"].value_counts()
+    st.caption("Heures affichées : Paris. La carte montre, pour chaque zone, l'alerte la plus forte de la période choisie.")
     c = st.columns(4)
     for i, name in ma.LEVELS.items():
         c[i - 1].metric(name, int(n.get(i, 0)))
@@ -1148,24 +1165,28 @@ def _europe_section():
     if len(missing):
         with st.expander(f"{len(missing)} alerte(s) non dessinée(s) (contour de zone introuvable)"):
             _stretch(st.dataframe, missing[["pays", "zone", "codes_zone", "niveau", "type"]], hide_index=True)
+    view = view.copy()
+    for c_ in ("debut", "fin", "emis"):
+        view[c_] = pd.to_datetime(view[c_], utc=True, errors="coerce").dt.tz_convert("Europe/Paris").dt.strftime("%d/%m/%Y %H:%M")
     show = view.sort_values(["niveau_id", "pays"], ascending=[False, True])
-    cols = ["pays", "niveau", "type", "debut", "fin", "zone", "severite", "urgence", "certitude", "titre", "emetteur"]
+    cols = ["pays", "niveau", "niveau_brut", "type", "debut", "fin", "zone", "severite", "urgence", "certitude", "titre", "emetteur"]
     st.markdown("**Alertes en cours**")
     _stretch(st.dataframe, show[cols].rename(columns={"debut": "début", "severite": "sévérité", "certitude": "certitude"}), hide_index=True)
     with st.expander("Détail des consignes et données brutes analysées"):
         _stretch(st.dataframe, view.drop(columns=["niveau_id", "type_id"]), hide_index=True)
     st.download_button("Télécharger les alertes (CSV)", _csv_bytes(view), "catmap_vigilance_europe.csv", "text/csv", key="eu_dl")
     st.divider()
-    _europe_sites_section(alerts, rings)
+    _europe_sites_section(alerts, rings, set(base.index))
 
 
-def _europe_sites_section(alerts, rings):
+def _europe_sites_section(alerts, rings, active=None):
     st.subheader("Sites exposés aux alertes MeteoAlarm")
     src = _vigilance_input(key="eu_upload")
     if src is None:
         return
     sites, orig_cols, from_file = src
     exp = sites.reset_index(drop=True).copy()
+    rings = {i: r for i, r in rings.items() if active is None or i in active}
     res = ma.expose_points(exp["lat"].to_numpy(float), exp["long"].to_numpy(float), alerts, rings, min_level=2)
     for col in res.columns:
         exp[col] = res[col].values
