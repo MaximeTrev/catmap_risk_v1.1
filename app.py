@@ -1128,12 +1128,7 @@ def _europe_section():
         return
     labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
     default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
-    all_countries = st.checkbox("All", value=True, key="eu_all",
-                                help="Tous les pays MeteoAlarm. Décochez pour choisir des pays précis.")
-    if all_countries:
-        chosen = list(labels)
-    else:
-        chosen = st.multiselect("Pays", list(labels), default=list(labels), format_func=lambda k: labels[k], key="eu_countries")
+    chosen = list(labels)                  # tous les pays MeteoAlarm, à chaque fois
     if st.button("Relancer la recherche", key="eu_refresh"):
         _load_europe.clear()
         _geocodes_cached.clear()
@@ -1147,14 +1142,18 @@ def _europe_section():
     with st.spinner("Lecture des flux MeteoAlarm…"):
         alerts, rings, errors, geo_err, n_geo = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
                                                       up_geo.getvalue() if up_geo is not None else None)
-    if errors:
-        st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in errors.items()))
+    no_feed = {k: v for k, v in errors.items() if "404" in v}
+    real_err = {k: v for k, v in errors.items() if k not in no_feed}
+    if real_err:
+        st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in real_err.items()))
+    if no_feed:
+        st.caption("Pas de flux publié (en général : aucune alerte en cours) : " + ", ".join(no_feed) + ".")
     with st.expander("Diagnostic par pays (flux, alertes lues, contours)"):
         st.caption(f"Zones de contours chargées : {n_geo}.")
         _stretch(st.dataframe, ma.diagnostic(alerts, chosen, errors, None if not n_geo else {}), hide_index=True)
     if alerts.empty:
-        if not errors:
-            st.success("Aucune alerte en cours pour les pays sélectionnés.")
+        if not real_err:
+            st.success("Aucune alerte en cours.")
         return
     c1, c2, c3 = st.columns(3)
     types = sorted(set(alerts["type"].dropna()))
