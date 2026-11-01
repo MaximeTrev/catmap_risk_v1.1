@@ -52,6 +52,10 @@ COUNTRIES = {
     "sweden": ("Suède", "SE", (62.0, 15.0)), "switzerland": ("Suisse", "CH", (46.8, 8.2)),
     "ukraine": ("Ukraine", "UA", (49.0, 31.4)), "united-kingdom": ("Royaume-Uni", "GB", (54.0, -2.5)),
 }
+# adresses de flux alternatives si la première répond 404
+SLUG_ALIASES = {"north-macedonia": ["republic-of-north-macedonia", "macedonia"],
+                "czechia": ["czech-republic"], "united-kingdom": ["uk"], "bosnia-herzegovina": ["bosnia-and-herzegovina"],
+                "moldova": ["republic-of-moldova"]}
 LEVELS = {1: "Vert", 2: "Jaune", 3: "Orange", 4: "Rouge"}
 LEVEL_HEX = {1: "#2e9e4f", 2: "#f2c200", 3: "#ef7d00", 4: "#d1202f"}
 TYPES = {1: "Vent", 2: "Neige / verglas", 3: "Orages", 4: "Brouillard", 5: "Fortes chaleurs", 6: "Grand froid",
@@ -245,10 +249,15 @@ def fetch_all(slugs: Iterable[str], *, session=None, url_template: str = FEED_UR
     errors: dict[str, str] = {}
 
     def one(slug):
-        try:
-            return slug, parse_feed(fetch_country(slug, session=session, url_template=url_template), slug, now=now), None
-        except MeteoAlarmError as e:
-            return slug, None, str(e)
+        err = None
+        for cand in [slug] + SLUG_ALIASES.get(slug, []):
+            try:
+                return slug, parse_feed(fetch_country(cand, session=session, url_template=url_template), slug, now=now), None
+            except MeteoAlarmError as e:
+                err = err or str(e)
+                if "404" not in str(e):
+                    break
+        return slug, None, err
 
     frames, all_rings, offset = [], {}, 0
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(slugs) or 1))) as ex:
