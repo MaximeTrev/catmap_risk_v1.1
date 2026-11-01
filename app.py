@@ -1122,6 +1122,10 @@ def _europe_section():
     st.subheader("Vigilance Europe (MeteoAlarm)")
     st.caption("Alertes des services météo nationaux agrégées par MeteoAlarm (EUMETNET), licence CC BY 4.0. "
                "Niveaux : jaune, orange, rouge. Les flux sont actualisés toutes les 3 minutes environ.")
+    if not hasattr(ma, "COUNTRIES") or not hasattr(ma, "diagnostic"):
+        st.error("Le fichier `catmap/meteoalarm.py` du dépôt n'est pas la dernière version (il manque `COUNTRIES` ou `diagnostic`). "
+                 "Remplacez-le par la version la plus récente envoyée, puis redéployez.")
+        return
     labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
     default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
     chosen = st.multiselect("Pays", list(labels), default=default, format_func=lambda k: labels[k], key="eu_countries")
