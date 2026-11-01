@@ -58,7 +58,7 @@ TYPES = {1: "Vent", 2: "Neige / verglas", 3: "Orages", 4: "Brouillard", 5: "Fort
          12: "Pluie-inondation"}
 SEVERITY_TO_LEVEL = {"minor": 1, "moderate": 2, "severe": 3, "extreme": 4}
 COLUMNS = ["pays", "pays_iso2", "identifiant", "emetteur", "evenement", "niveau_id", "niveau", "type_id", "type",
-           "debut", "fin", "emis", "urgence", "severite", "certitude", "zones", "codes_zones", "titre", "description",
+           "debut", "fin", "emis", "urgence", "severite", "certitude", "zone", "codes_zone", "titre", "description",
            "consigne", "langues", "avec_contour"]
 
 
@@ -202,10 +202,10 @@ def parse_feed(payload: Any, slug: str, *, now: Optional[datetime] = None, only_
             expires = _dt(info.get("expires"))
             if only_active and expires is not None and expires < now:
                 continue
-            areas = [a for a in _as_list(info.get("area")) if isinstance(a, dict)]
-            ring_list: list[np.ndarray] = []
-            codes = []
-            for a in areas:
+            areas = [a for a in _as_list(info.get("area")) if isinstance(a, dict)] or [{}]
+            for a in areas:                 # une ligne par zone : maille la plus fine fournie par le service national
+                ring_list: list[np.ndarray] = []
+                codes = []
                 for poly in _as_list(a.get("polygon")):
                     r = parse_polygon(poly)
                     if r is not None:
@@ -214,24 +214,23 @@ def parse_feed(payload: Any, slug: str, *, now: Optional[datetime] = None, only_
                     ring_list.extend(_geojson_rings(a["geometry"]))
                 for g in _as_list(a.get("geocode")):
                     if isinstance(g, dict) and g.get("value"):
-                        codes.append(str(g["value"]))
-            idx = len(rows)
-            if ring_list:
-                rings[idx] = ring_list
-            rows.append({
-                "pays": label, "pays_iso2": iso2, "identifiant": str(alert.get("identifier", "")),
-                "emetteur": str(alert.get("senderName") or alert.get("sender") or ""),
-                "evenement": str(info.get("event", "")), "niveau_id": level_id, "niveau": LEVELS.get(level_id, "n/d"),
-                "type_id": type_id, "type": tlabel, "debut": onset, "fin": expires, "emis": _dt(alert.get("sent")),
-                "urgence": str(info.get("urgency", "")), "severite": str(info.get("severity", "")),
-                "certitude": str(info.get("certainty", "")),
-                "zones": "; ".join(str(a.get("areaDesc", "")) for a in areas if a.get("areaDesc")),
-                "codes_zones": ", ".join(sorted(set(codes))),
-                "titre": str(info.get("headline", "")), "description": str(info.get("description", "")),
-                "consigne": str(info.get("instruction", "")),
-                "langues": ", ".join(sorted({str(i.get("language", "")) for i in glist if i.get("language")})),
-                "avec_contour": bool(ring_list),
-            })
+                        codes.append(str(g["value"]).strip())
+                idx = len(rows)
+                if ring_list:
+                    rings[idx] = ring_list
+                rows.append({
+                    "pays": label, "pays_iso2": iso2, "identifiant": str(alert.get("identifier", "")),
+                    "emetteur": str(alert.get("senderName") or alert.get("sender") or ""),
+                    "evenement": str(info.get("event", "")), "niveau_id": level_id, "niveau": LEVELS.get(level_id, "n/d"),
+                    "type_id": type_id, "type": tlabel, "debut": onset, "fin": expires, "emis": _dt(alert.get("sent")),
+                    "urgence": str(info.get("urgency", "")), "severite": str(info.get("severity", "")),
+                    "certitude": str(info.get("certainty", "")),
+                    "zone": str(a.get("areaDesc", "")), "codes_zone": ", ".join(dict.fromkeys(codes)),
+                    "titre": str(info.get("headline", "")), "description": str(info.get("description", "")),
+                    "consigne": str(info.get("instruction", "")),
+                    "langues": ", ".join(sorted({str(i.get("language", "")) for i in glist if i.get("language")})),
+                    "avec_contour": bool(ring_list),
+                })
     df = pd.DataFrame(rows, columns=COLUMNS)
     df["niveau_id"] = pd.to_numeric(df["niveau_id"], errors="coerce")
     return df, rings
@@ -314,6 +313,83 @@ def expose_points(lat: np.ndarray, lon: np.ndarray, alerts: pd.DataFrame, rings:
         fin = [d for d in worst["fin"] if d is not None and pd.notna(d)]
         out.at[p, "europe_debut"] = min(deb).strftime("%Y-%m-%d %H:%M UTC") if deb else None
         out.at[p, "europe_fin"] = max(fin).strftime("%Y-%m-%d %H:%M UTC") if fin else None
-        out.at[p, "europe_zones"] = "; ".join(sorted(set(z for z in worst["zones"] if z)))[:300] or None
+        out.at[p, "europe_zones"] = "; ".join(sorted(set(z for z in worst["zone"] if z)))[:300] or None
         out.at[p, "europe_pays"] = ", ".join(sorted(set(g["pays"])))
     return out
+
+
+# --------------------------------------------------------------------------- contours des zones (codes EMMA_ID)
+# La plupart des flux ne donnent que des codes de zones. Les contours sont lus dans la couche publique « MeteoAlarm_Geocodes »
+# (GeoSphere Austria, ArcGIS FeatureServer) : champs code / country / name. Adresse remplaçable (secret « meteoalarm_geocodes_url »).
+GEOCODES_URL = ("https://gis.geosphere.at/maps/rest/services/Hosted/MeteoAlarm_Gap_Analysis_2026_WFL1/FeatureServer/3/query")
+
+
+def _norm(t) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(t or "")).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 500, max_pages: int = 40) -> dict:
+    """Retourne {"by_code": {code: (pays, nom, anneaux)}, "by_name": {(pays_normalisé, nom_normalisé): anneaux}}.
+    Lève MeteoAlarmError si la couche est inaccessible ou vide."""
+    s = session or requests
+    by_code: dict = {}
+    by_name: dict = {}
+    for k in range(max_pages):
+        params = {"where": "1=1", "outFields": "code,country,name", "outSR": 4326, "f": "geojson",
+                  "maxAllowableOffset": 0.005, "resultOffset": k * page, "resultRecordCount": page}
+        try:
+            r = s.get(url, params=params, headers={"User-Agent": "CatMap/3.3"}, timeout=60)
+        except requests.RequestException as e:
+            raise MeteoAlarmError(f"contours injoignables ({type(e).__name__})") from e
+        if r.status_code != 200:
+            raise MeteoAlarmError(f"contours : HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise MeteoAlarmError("contours : réponse non JSON") from e
+        feats = data.get("features") if isinstance(data, dict) else None
+        if feats is None:
+            raise MeteoAlarmError("contours : format non reconnu")
+        for f in feats:
+            pr = f.get("properties") or {}
+            rg = _geojson_rings(f.get("geometry") or {})
+            if not rg:
+                continue
+            code, ctry, name = str(pr.get("code") or "").strip(), pr.get("country"), pr.get("name")
+            if code:
+                by_code.setdefault(code.upper(), (ctry, name, []))[2].extend(rg)
+            by_name.setdefault((_norm(ctry), _norm(name)), []).extend(rg)
+        if len(feats) < page:
+            break
+    if not by_code and not by_name:
+        raise MeteoAlarmError("contours : couche vide")
+    return {"by_code": by_code, "by_name": by_name}
+
+
+def attach_geometry(df: pd.DataFrame, rings: dict, geo: Optional[dict]) -> tuple[dict, int]:
+    """Complète ``rings`` pour les lignes sans contour : par code de zone, sinon par nom de zone dans le pays.
+    Retourne (nouveaux contours, nombre de lignes encore sans contour). ``df['avec_contour']`` est mis à jour."""
+    out = dict(rings)
+    if geo:
+        for i in range(len(df)):
+            if i in out:
+                continue
+            row = df.iloc[i]
+            found = None
+            for c in [x.strip().upper() for x in str(row["codes_zone"]).split(",") if x.strip()]:
+                if c in geo["by_code"]:
+                    found = geo["by_code"][c][2]
+                    break
+            if found is None:
+                z = _norm(row["zone"])
+                eng = next((k.replace("-", " ") for k, v in COUNTRIES.items() if v[1] == row["pays_iso2"]), "")
+                for cn in (_norm(row["pays"]), _norm(row["pays_iso2"]), _norm(eng)):
+                    if (cn, z) in geo["by_name"]:
+                        found = geo["by_name"][(cn, z)]
+                        break
+            if found:
+                out[i] = found
+    df["avec_contour"] = [i in out for i in range(len(df))]
+    return out, int((~df["avec_contour"]).sum())
