@@ -338,7 +338,7 @@ def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 500, max
     by_name: dict = {}
     for k in range(max_pages):
         params = {"where": "1=1", "outFields": "code,country,name", "outSR": 4326, "f": "geojson",
-                  "maxAllowableOffset": 0.005, "resultOffset": k * page, "resultRecordCount": page}
+                  "maxAllowableOffset": 0.02, "resultOffset": k * page, "resultRecordCount": page}
         try:
             r = s.get(url, params=params, headers={"User-Agent": "CatMap/3.3"}, timeout=60)
         except requests.RequestException as e:
@@ -354,7 +354,7 @@ def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 500, max
             raise MeteoAlarmError("contours : format non reconnu")
         for f in feats:
             pr = f.get("properties") or {}
-            rg = _geojson_rings(f.get("geometry") or {})
+            rg = [np.round(r, 3) for r in _geojson_rings(f.get("geometry") or {})]
             if not rg:
                 continue
             code, ctry, name = str(pr.get("code") or "").strip(), pr.get("country"), pr.get("name")
