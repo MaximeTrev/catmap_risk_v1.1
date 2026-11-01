@@ -1128,7 +1128,12 @@ def _europe_section():
         return
     labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
     default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
-    chosen = st.multiselect("Pays", list(labels), default=default, format_func=lambda k: labels[k], key="eu_countries")
+    all_countries = st.checkbox("All", value=True, key="eu_all",
+                                help="Tous les pays MeteoAlarm. Décochez pour choisir des pays précis.")
+    if all_countries:
+        chosen = list(labels)
+    else:
+        chosen = st.multiselect("Pays", list(labels), default=list(labels), format_func=lambda k: labels[k], key="eu_countries")
     if st.button("Relancer la recherche", key="eu_refresh"):
         _load_europe.clear()
         _geocodes_cached.clear()
