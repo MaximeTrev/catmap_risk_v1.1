@@ -657,8 +657,10 @@ def _load_vigilance():
                 "`METEOFRANCE_CLIENT_SECRET`) dans l'environnement ou `.streamlit/secrets.toml`.\n\n"
                 f"Noms de secrets détectés par l'application (valeurs jamais affichées) : {', '.join(sorted(_secrets())) or 'aucun'}.")
         return None
-    if st.button("Actualiser"):
+    if st.button("Relancer la recherche", key="vg_refresh"):
         _fetch_vigilance_df.clear()
+        _fetch_om_json.clear()
+        _fetch_om_zip.clear()
     try:
         return _fetch_vigilance_df()
     except vg.VigilanceError as e:
@@ -1036,9 +1038,13 @@ def _vigilance_sites_section(df):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def _geocodes_cached(url: str):
+    return ma.load_geocodes(url=url or ma.GEOCODES_URL)       # une erreur n'est jamais mise en cache
+
+
 def _load_geocodes(url: str):
     try:
-        return ma.load_geocodes(url=url or ma.GEOCODES_URL), None
+        return _geocodes_cached(url), None
     except ma.MeteoAlarmError as e:
         return None, str(e)
 
@@ -1080,15 +1086,20 @@ def _europe_map(alerts, rings):
     folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
     folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
     grp = folium.FeatureGroup(name="Alertes par zone")
-    order = sorted(rings, key=lambda i: alerts.iloc[i]["niveau_id"] or 0)      # le plus fort dessiné en dernier (au-dessus)
-    for i in order:
+    zones: dict = {}
+    for i in rings:                                   # une seule géométrie par zone (évite une page énorme)
         a = alerts.iloc[i]
+        zones.setdefault((a["pays"], a["zone"]), []).append(i)
+    for idxs in zones.values():
+        idxs.sort(key=lambda i: -(alerts.iloc[i]["niveau_id"] or 0))
+        a = alerts.iloc[idxs[0]]
         col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
-        tip = f"{a['pays']} · {a['zone']} · {a['type']} · {a['niveau']}"
-        pop = folium.Popup(folium.Html(_alert_popup(a), script=True), max_width=360)     # le popup reste ouvert après le clic
-        for r in rings[i]:
-            folium.Polygon([(y, x) for x, y in r], color="#222", weight=1, fill=True, fill_color=col,
-                           fill_opacity=0.55, tooltip=tip, popup=pop).add_to(grp)
+        tip = f"{a['pays']} · {a['zone']} · " + ", ".join(f"{alerts.iloc[i]['type']} ({alerts.iloc[i]['niveau']})" for i in idxs[:4])
+        body = "<hr style='margin:6px 0'>".join(_alert_popup(alerts.iloc[i]) for i in idxs[:6])
+        geom = {"type": "MultiPolygon", "coordinates": [[[[round(float(x), 3), round(float(y), 3)] for x, y in r]] for r in rings[idxs[0]]]}
+        folium.GeoJson({"type": "Feature", "properties": {}, "geometry": geom},
+                       style_function=lambda f, c=col: {"fillColor": c, "color": "#222", "weight": 1, "fillOpacity": 0.55},
+                       tooltip=tip, popup=folium.Popup(folium.Html(body, script=True), max_width=380, max_height=380)).add_to(grp)
     grp.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
     try:
@@ -1104,6 +1115,9 @@ def _europe_section():
     labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
     default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
     chosen = st.multiselect("Pays", list(labels), default=default, format_func=lambda k: labels[k], key="eu_countries")
+    if st.button("Relancer la recherche", key="eu_refresh"):
+        _load_europe.clear()
+        _geocodes_cached.clear()
     if not chosen:
         st.info("Sélectionnez au moins un pays.")
         return
