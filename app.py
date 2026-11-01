@@ -1060,12 +1060,31 @@ def _load_geocodes(url: str, uploaded: bytes | None = None):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, _v: int = 5):
+def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, aliases_raw: bytes | None = None, _v: int = 7):
     alerts, rings, errors = ma.fetch_all(slugs)
     geo, geo_err = _load_geocodes(geo_url, uploaded)
     if not alerts.empty:
-        rings, _ = ma.attach_geometry(alerts, rings, geo)
-    return alerts, rings, errors, geo_err, (len(geo["by_code"]) if geo else 0)
+        rings, _ = ma.attach_geometry(alerts, rings, geo, ma.load_aliases(aliases_raw) if aliases_raw else None)
+    info = {}
+    if geo:
+        for code, (ctry, name, _r) in geo["by_code"].items():
+            e = info.setdefault(str(ctry), [0, []])
+            e[0] += 1
+            if len(e[1]) < 4:
+                e[1].append(f"{code} ({name})")
+    geo_info = pd.DataFrame([{"pays (fichier)": k, "zones": v[0], "exemples de codes": ", ".join(v[1])}
+                             for k, v in sorted(info.items())])
+    return alerts, rings, errors, geo_err, (len(geo["by_code"]) if geo else 0), geo_info
+
+
+def _aliases_bytes(uploaded) -> bytes | None:
+    if uploaded is not None:
+        return uploaded.getvalue()
+    p = ASSETS.parent / "data" / "meteoalarm_geocodes_aliases.csv"
+    try:
+        return p.read_bytes() if p.exists() else None
+    except OSError:
+        return None
 
 
 def _alert_popup(a) -> str:
@@ -1136,12 +1155,14 @@ def _europe_section():
         st.caption("Par défaut : couche publique GeoSphere. Pour utiliser le fichier officiel « Geocodes » (.json) du Redistribution Hub "
                    "de MeteoAlarm, chargez-le ici, ou placez-le dans le dépôt sous `data/meteoalarm_geocodes_light.json.gz` (version allégée, voir `tools/slim_geocodes.py`).")
         up_geo = st.file_uploader("Fichier Geocodes MeteoAlarm (.json)", type=["json"], key="eu_geo_up")
+        up_al = st.file_uploader("Fichier Geocodes Aliases (.csv) — sinon `data/meteoalarm_geocodes_aliases.csv` du dépôt",
+                                 type=["csv", "txt"], key="eu_al_up")
     if not chosen:
         st.info("Sélectionnez au moins un pays.")
         return
     with st.spinner("Lecture des flux MeteoAlarm…"):
-        alerts, rings, errors, geo_err, n_geo = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
-                                                      up_geo.getvalue() if up_geo is not None else None)
+        alerts, rings, errors, geo_err, n_geo, geo_info = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
+                                                      up_geo.getvalue() if up_geo is not None else None, _aliases_bytes(up_al))
     no_feed = {k: v for k, v in errors.items() if "404" in v}
     real_err = {k: v for k, v in errors.items() if k not in no_feed}
     if real_err:
@@ -1151,6 +1172,8 @@ def _europe_section():
     with st.expander("Diagnostic par pays (flux, alertes lues, contours)"):
         st.caption(f"Zones de contours chargées : {n_geo}.")
         _stretch(st.dataframe, ma.diagnostic(alerts, chosen, errors, None if not n_geo else {}), hide_index=True)
+        st.markdown("**Codes de zones présents dans le fichier de contours**")
+        _stretch(st.dataframe, geo_info, hide_index=True)
     if alerts.empty:
         if not real_err:
             st.success("Aucune alerte en cours.")
@@ -1159,17 +1182,23 @@ def _europe_section():
     types = sorted(set(alerts["type"].dropna()))
     sel_types = c1.multiselect("Types d'alerte", types, default=types, key="eu_types")
     min_level = c2.selectbox("Niveau minimal", [1, 2, 3, 4], index=1, format_func=lambda i: ma.LEVELS[i], key="eu_level")
-    day = c3.selectbox("Période", ["Aujourd'hui", "Demain", "Après-demain", "Prochaines 24 h", "En ce moment", "Toutes"], key="eu_day")
+    d0 = pd.Timestamp.now(tz="Europe/Paris").normalize()
+    jours = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."]
+    labels_p = {"Maintenant": "Maintenant", "Prochaines 24h": "Prochaines 24h", "J": "Aujourd'hui"}
+    for k in range(1, 5):
+        dd = d0 + pd.Timedelta(days=k)
+        labels_p[f"J+{k}"] = f"J+{k} ({jours[dd.weekday()]} {dd:%d/%m})"
+    labels_p["Toutes"] = "Toutes"
+    day = c3.selectbox("Période", list(labels_p), index=2, format_func=lambda k: labels_p[k], key="eu_day2")
     now = pd.Timestamp.now(tz="Europe/Paris")
-    d0 = now.normalize()
     if day == "Toutes":
         win = None
-    elif day == "Prochaines 24 h":
-        win = (now, now + pd.Timedelta(hours=24))
-    elif day == "En ce moment":
+    elif day == "Maintenant":
         win = (now, now)
+    elif day == "Prochaines 24h":
+        win = (now, now + pd.Timedelta(hours=24))
     else:
-        k = {"Aujourd'hui": 0, "Demain": 1, "Après-demain": 2}[day]
+        k = 0 if day == "J" else int(day[2:])
         win = (d0 + pd.Timedelta(days=k), d0 + pd.Timedelta(days=k + 1))
     if win is None:
         in_win = pd.Series(True, index=alerts.index)
