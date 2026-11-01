@@ -1,519 +1,1294 @@
-"""Alertes météo européennes agrégées par MeteoAlarm (flux publics par pays, format CAP 1.2).
+"""CatMap Risk - application Streamlit.
 
-Source : ``https://feeds.meteoalarm.org/api/v1/warnings/feeds-<pays>`` (un flux par service météo national).
-Licence des données : CC BY 4.0 (MeteoAlarm / EUMETNET) ; ces flux sont mis en cache 3 minutes côté MeteoAlarm.
+Lancer :  streamlit run app.py
 
-Le format exact des réponses n'a pas pu être vérifié depuis l'environnement de développement : l'analyse est donc
-volontairement tolérante (alerte à la racine ou sous ``alert``, ``info`` en liste ou objet, paramètres en liste
-``valueName/value`` ou en dictionnaire, polygones CAP « lat,lon lat,lon » ou GeoJSON). Une réponse non reconnue
-produit un diagnostic explicite et jamais d'exception.
-
-Niveaux MeteoAlarm (``awareness_level``, ex. « 2; yellow; Moderate ») : 1 vert, 2 jaune, 3 orange, 4 rouge.
-Types (``awareness_type``, ex. « 1; Wind ») : voir ``TYPES``.
-Seuls les pays dont le flux fournit des polygones (ex. France, Norvège, Suisse, Suède, Royaume-Uni) peuvent être
-dessinés et croisés avec des points ; les autres n'indiquent que des codes de zones (EMMA_ID) sans contour.
+Toute la logique métier est dans le paquet ``catmap`` (testé sans Streamlit) ; ce fichier ne
+contient que l'interface. Points clés par rapport à la v1 :
+- la recherche part d'un bouton « Lancer » et le résultat est mémorisé (``st.session_state``) :
+  changer un filtre ne relance plus jamais Overpass (A20) ;
+- un résultat vide ou une erreur n'est plus une exception (A6) ;
+- tous les textes issus d'OSM sont échappés avant d'entrer dans une popup HTML ;
+- carte avec regroupement (MarkerCluster) et plafond d'affichage (A13) ;
+- chemins basés sur ``__file__`` : lancement possible depuis n'importe quel dossier.
 """
 from __future__ import annotations
 
-import json
-import re
-import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+import html
+import io
+import logging
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import requests
+import streamlit as st
 
-from .polygon_index import PolygonIndex
+from catmap.area import AreaOptions, AreaQuery, locate_area
+from catmap.circle_picker import circle_picker
+from catmap.analysis import completeness, summary_by_company, top_with_other
+from catmap.countries import get_country_index
+from catmap.inputs import InputError, parse_names_text, read_company_list
+from catmap.models import NameQuery, SearchOptions
+from catmap.naf import NafClassifier
+from catmap.overpass import OverpassClient
+from catmap.pipeline import geolocate
+from catmap.config import load_settings
+from catmap import cyclone_map as cm
+from catmap import cyclone_risk as cr
+from catmap import cyclones as cy
+from catmap import vigilance as vg
+from catmap import meteoalarm as ma
 
-FEED_URL = "https://feeds.meteoalarm.org/api/v1/warnings/feeds-{slug}"
-
-# slug du flux -> (libellé, ISO2, centre approximatif lat/lon)
-COUNTRIES = {
-    "austria": ("Autriche", "AT", (47.6, 14.1)), "belgium": ("Belgique", "BE", (50.6, 4.7)),
-    "bosnia-herzegovina": ("Bosnie-Herzégovine", "BA", (44.2, 17.8)), "bulgaria": ("Bulgarie", "BG", (42.7, 25.2)),
-    "croatia": ("Croatie", "HR", (45.1, 15.5)), "cyprus": ("Chypre", "CY", (35.0, 33.2)),
-    "czechia": ("Tchéquie", "CZ", (49.8, 15.5)), "denmark": ("Danemark", "DK", (56.0, 9.5)),
-    "estonia": ("Estonie", "EE", (58.7, 25.5)), "finland": ("Finlande", "FI", (64.0, 26.0)),
-    "france": ("France", "FR", (46.6, 2.5)), "germany": ("Allemagne", "DE", (51.1, 10.4)),
-    "greece": ("Grèce", "GR", (39.0, 22.5)), "hungary": ("Hongrie", "HU", (47.2, 19.4)),
-    "iceland": ("Islande", "IS", (64.9, -18.5)), "ireland": ("Irlande", "IE", (53.2, -8.0)),
-    "israel": ("Israël", "IL", (31.5, 34.9)), "italy": ("Italie", "IT", (42.8, 12.6)),
-    "latvia": ("Lettonie", "LV", (56.9, 24.9)), "lithuania": ("Lituanie", "LT", (55.3, 23.9)),
-    "luxembourg": ("Luxembourg", "LU", (49.8, 6.1)), "malta": ("Malte", "MT", (35.9, 14.4)),
-    "moldova": ("Moldavie", "MD", (47.2, 28.5)), "montenegro": ("Monténégro", "ME", (42.8, 19.3)),
-    "netherlands": ("Pays-Bas", "NL", (52.2, 5.5)), "north-macedonia": ("Macédoine du Nord", "MK", (41.6, 21.7)),
-    "norway": ("Norvège", "NO", (64.5, 11.5)), "poland": ("Pologne", "PL", (52.0, 19.4)),
-    "portugal": ("Portugal", "PT", (39.6, -8.0)), "romania": ("Roumanie", "RO", (45.9, 24.9)),
-    "serbia": ("Serbie", "RS", (44.0, 20.8)), "slovakia": ("Slovaquie", "SK", (48.7, 19.5)),
-    "slovenia": ("Slovénie", "SI", (46.1, 14.8)), "spain": ("Espagne", "ES", (40.2, -3.7)),
-    "sweden": ("Suède", "SE", (62.0, 15.0)), "switzerland": ("Suisse", "CH", (46.8, 8.2)),
-    "ukraine": ("Ukraine", "UA", (49.0, 31.4)), "united-kingdom": ("Royaume-Uni", "GB", (54.0, -2.5)),
-}
-# adresses de flux alternatives si la première répond 404
-SLUG_ALIASES = {"north-macedonia": ["republic-of-north-macedonia", "macedonia"],
-                "czechia": ["czech-republic"], "united-kingdom": ["uk"], "bosnia-herzegovina": ["bosnia-and-herzegovina"],
-                "moldova": ["republic-of-moldova"]}
-LEVELS = {1: "Vert", 2: "Jaune", 3: "Orange", 4: "Rouge"}
-LEVEL_HEX = {1: "#2e9e4f", 2: "#f2c200", 3: "#ef7d00", 4: "#d1202f"}
-TYPES = {1: "Vent", 2: "Neige / verglas", 3: "Orages", 4: "Brouillard", 5: "Fortes chaleurs", 6: "Grand froid",
-         7: "Événement côtier", 8: "Feu de forêt", 9: "Avalanches", 10: "Fortes pluies", 11: "Inondations",
-         12: "Pluie-inondation"}
-SEVERITY_TO_LEVEL = {"minor": 1, "moderate": 2, "severe": 3, "extreme": 4}
-COLUMNS = ["pays", "pays_iso2", "identifiant", "emetteur", "evenement", "niveau_id", "niveau", "niveau_brut", "type_id", "type",
-           "debut", "fin", "emis", "urgence", "severite", "certitude", "zone", "codes_zone", "titre", "description",
-           "consigne", "langues", "avec_contour"]
+ROOT = Path(__file__).resolve().parent
+ASSETS = ROOT / "assets"
+MAX_MARKERS = 5000
+PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
+DISPLAY_COLUMNS = ["nom_demande", "name", "pays", "naf_section", "naf_division", "surface_m2", "match_score",
+                   "match_field", "geom_kind", "lat", "long", "naf_source", "naf_confidence", "addr_street",
+                   "addr_postcode", "addr_city", "brand", "osm_url"]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
-class MeteoAlarmError(RuntimeError):
-    pass
-
-
-# --------------------------------------------------------------------------- HTTP
-def fetch_country(slug: str, *, session=None, url_template: str = FEED_URL, timeout: float = 25.0) -> Any:
-    s = session or requests
-    url = url_template.format(slug=slug)
-    try:
-        r = s.get(url, headers={"Accept": "application/json", "User-Agent": "CatMap/3.3"}, timeout=timeout)
-    except requests.RequestException as e:
-        raise MeteoAlarmError(f"flux injoignable ({type(e).__name__})") from e
-    if r.status_code == 404:
-        raise MeteoAlarmError("flux introuvable (HTTP 404)")
-    if r.status_code in (401, 403):
-        raise MeteoAlarmError(f"accès refusé (HTTP {r.status_code})")
-    if r.status_code != 200:
-        raise MeteoAlarmError(f"HTTP {r.status_code}")
-    try:
-        return r.json()
-    except ValueError as e:
-        raise MeteoAlarmError("réponse non JSON (format de flux différent de celui attendu)") from e
-
-
-# --------------------------------------------------------------------------- analyse
-def _dt(v) -> Optional[datetime]:
-    if not v:
-        return None
-    s = str(v).strip().replace("Z", "+00:00")
-    try:
-        d = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
-
-def _as_list(v) -> list:
-    if v is None:
-        return []
-    return v if isinstance(v, list) else [v]
-
-
-def _params(info: dict) -> dict:
-    out = {}
-    p = info.get("parameter", info.get("parameters"))
-    if isinstance(p, dict):
-        return {str(k): v for k, v in p.items()}
-    for it in _as_list(p):
-        if isinstance(it, dict) and "valueName" in it:
-            out[str(it["valueName"])] = it.get("value")
+# --------------------------------------------------------------------------
+# Ressources partagées (chargées une seule fois par processus)
+# --------------------------------------------------------------------------
+def _flatten_secrets(m, out: dict) -> dict:
+    """Aplati les sections TOML : une clé placée après un en-tête [section] reste utilisable."""
+    for k, v in m.items():
+        if hasattr(v, "items"):
+            _flatten_secrets(v, out)
+        else:
+            out.setdefault(str(k), str(v))
     return out
 
 
-def _lead_int(text) -> Optional[int]:
-    m = re.match(r"\s*(\d+)", str(text or ""))
-    return int(m.group(1)) if m else None
+def _secrets() -> dict:
+    try:
+        return _flatten_secrets(st.secrets, {})
+    except Exception:  # noqa: BLE001 - pas de fichier secrets.toml : on s'appuie sur l'environnement
+        return {}
 
 
-def parse_polygon(poly) -> Optional[np.ndarray]:
-    """Anneau CAP « lat,lon lat,lon … » (ou liste de paires) -> tableau (n, 2) en (lon, lat)."""
-    pts = []
-    if isinstance(poly, str):
-        for tok in poly.split():
-            try:
-                a, b = tok.split(",")[:2]
-                pts.append((float(b), float(a)))
-            except ValueError:
-                continue
-    elif isinstance(poly, (list, tuple)):
-        for p in poly:
-            if isinstance(p, (list, tuple)) and len(p) >= 2:
-                try:
-                    pts.append((float(p[1]), float(p[0])))      # CAP en liste : (lat, lon)
-                except (TypeError, ValueError):
-                    continue
-    return np.array(pts, dtype=float) if len(pts) >= 3 else None
+def get_settings():
+    """Réglages relus à chaque exécution (peu coûteux) : un changement de code ou de secrets est pris en compte
+    sans redémarrer le processus. Un cache ici figeait les anciennes valeurs après une mise à jour."""
+    return load_settings(secrets=_secrets())
 
 
-def _geojson_rings(geom: dict) -> list[np.ndarray]:
-    t, c = geom.get("type"), geom.get("coordinates") or []
-    polys = c if t == "MultiPolygon" else [c] if t == "Polygon" else []
-    return [np.asarray(r, dtype=float)[:, :2] for poly in polys for r in poly if len(r) >= 3]
+def _settings_sig() -> str:
+    import hashlib
+    return hashlib.sha1(repr(get_settings()).encode()).hexdigest()
 
 
-def _pick_language(infos: list[dict]) -> dict:
-    for i in infos:
-        if str(i.get("language", "")).lower().startswith("en"):
-            return i
-    return infos[0]
+@st.cache_resource
+def _client_for(sig: str):
+    return OverpassClient(get_settings())
 
 
-def parse_feed(payload: Any, slug: str, *, now: Optional[datetime] = None, only_active: bool = True
-               ) -> tuple[pd.DataFrame, dict[int, list[np.ndarray]]]:
-    """Retourne (table des alertes, {index de ligne: anneaux (lon, lat)}). Lève MeteoAlarmError si le format est inconnu."""
-    now = now or datetime.now(timezone.utc)
-    label, iso2, _ = COUNTRIES.get(slug, (slug, "", (0, 0)))
-    if isinstance(payload, dict):
-        items = payload.get("warnings", payload.get("alerts", payload.get("features")))
-        if items is None and ("alert" in payload or "info" in payload):
-            items = [payload]
+def get_client():
+    return _client_for(_settings_sig())
+
+
+@st.cache_resource
+def get_countries():
+    return get_country_index()
+
+
+@st.cache_resource
+def get_naf():
+    return NafClassifier()
+
+
+@st.cache_resource
+def _departements_for(sig: str):
+    return vg.load_departements(get_settings())
+
+
+def get_departements():
+    return _departements_for(_settings_sig())
+
+
+# --------------------------------------------------------------------------
+# Aides d'affichage (compatibles avec plusieurs versions de Streamlit)
+# --------------------------------------------------------------------------
+def _stretch(fn, *args, **kwargs):
+    try:
+        return fn(*args, width="stretch", **kwargs)
+    except TypeError:
+        return fn(*args, use_container_width=True, **kwargs)
+
+
+def _csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def _xlsx_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, d in sheets.items():
+            d.to_excel(xw, sheet_name=name[:31], index=False)
+    return buf.getvalue()
+
+
+def _popup_html(row: pd.Series) -> str:
+    def esc(v):
+        return "" if pd.isna(v) else html.escape(str(v))
+    lat, lon = float(row["lat"]), float(row["long"])
+    gmaps = f"https://www.google.com/maps/search/?api=1&query={lat:.6f},{lon:.6f}"
+    streetview = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat:.6f},{lon:.6f}"
+    surf = "" if pd.isna(row.get("surface_m2")) else f"<br>Surface : {row['surface_m2']:,.0f} m²".replace(",", " ")
+    return (f"<div style='font:12px sans-serif;min-width:180px'><b>{esc(row['name'])}</b><br>"
+            f"{esc(row['nom_demande'])}<br>{esc(row.get('pays'))}<br>{esc(row.get('naf_section'))}{surf}<br>"
+            f"Score : {esc(row.get('match_score'))}<br>"
+            f"<a href='{esc(row['osm_url'])}' target='_blank' rel='noopener'>Voir sur OpenStreetMap</a><br>"
+            f"<a href='{gmaps}' target='_blank' rel='noopener'>Voir sur Google Maps</a><br>"
+            f"<a href='{streetview}' target='_blank' rel='noopener'>Voir sur Street View</a></div>")
+
+
+_COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
+
+
+def _site_map(df: pd.DataFrame, area: dict | None = None):
+    """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
+    import folium
+    from folium.plugins import Fullscreen, MarkerCluster
+    from streamlit_folium import st_folium
+
+    d = df.dropna(subset=["lat", "long"])
+    if d.empty:
+        st.info("Aucun site à afficher.")
+        return
+    c1, c2 = st.columns([2, 1])
+    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key="map_color",
+                          index=list(_COLOR_CHOICES).index("Secteur NAF") if area else 0)
+    cluster_on = c2.checkbox("Regrouper les points proches", True, key="map_cluster")
+    color_col = _COLOR_CHOICES[choice]
+
+    if len(d) > MAX_MARKERS:
+        st.warning(f"Carte limitée à {MAX_MARKERS} sites sur {len(d)} (les mieux appariés). "
+                   "Filtrez par entreprise ou par pays pour tout voir.")
+        d = d.sort_values("match_score", ascending=False).head(MAX_MARKERS)
+
+    m = folium.Map(location=[float(d["lat"].mean()), float(d["long"].mean())], zoom_start=5,
+                   control_scale=True, tiles=None)
+    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Dark_Gray_Base"), attr="Esri", name="Fond sombre", max_native_zoom=16).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    Fullscreen().add_to(m)
+    m.fit_bounds([[float(d["lat"].min()), float(d["long"].min())], [float(d["lat"].max()), float(d["long"].max())]])
+
+    if color_col:
+        keys = sorted(d[color_col].fillna("n/d").astype(str).unique())
+        colors = {k: PALETTE[i % len(PALETTE)] for i, k in enumerate(keys)}
     else:
-        items = payload
-    if not isinstance(items, list):
-        keys = sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
-        raise MeteoAlarmError(f"format non reconnu (clés de premier niveau : {keys})")
-    rows, rings = [], {}
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        alert = it.get("alert") if isinstance(it.get("alert"), dict) else it
-        if not isinstance(alert, dict):
-            continue
-        if str(alert.get("status", "Actual")).lower() in ("test", "exercise", "draft", "system"):
-            continue
-        if str(alert.get("msgType", "Alert")).lower() == "cancel":
-            continue
-        infos = [i for i in _as_list(alert.get("info")) if isinstance(i, dict)]
-        if not infos:
-            continue
-        groups: dict[tuple, list[dict]] = {}
-        for i in infos:                       # une info par langue et par phénomène : on regroupe par phénomène
-            p = _params(i)
-            key = (_lead_int(p.get("awareness_type")), _lead_int(p.get("awareness_level")), str(i.get("onset", "")),
-                   str(i.get("event", "")) if p.get("awareness_type") is None else "")
-            groups.setdefault(key, []).append(i)
-        for (type_id, level_id, _, _), glist in groups.items():
-            info = _pick_language(glist)
-            p = _params(info)
-            if level_id is None:
-                level_id = SEVERITY_TO_LEVEL.get(str(info.get("severity", "")).lower())
-            if type_id is None:
-                type_id = _lead_int(p.get("awareness_type"))
-            tlabel = TYPES.get(type_id) if type_id else None
-            if tlabel is None:
-                tail = str(p.get("awareness_type", "")).split(";", 1)
-                tlabel = tail[1].strip() if len(tail) > 1 and tail[1].strip() else (info.get("event") or "Autre")
-            onset = _dt(info.get("onset") or info.get("effective") or alert.get("sent"))
-            expires = _dt(info.get("expires"))
-            if only_active and expires is not None and expires < now:
-                continue
-            areas = [a for a in _as_list(info.get("area")) if isinstance(a, dict)] or [{}]
-            for a in areas:                 # une ligne par zone : maille la plus fine fournie par le service national
-                ring_list: list[np.ndarray] = []
-                codes = []
-                for poly in _as_list(a.get("polygon")):
-                    r = parse_polygon(poly)
-                    if r is not None:
-                        ring_list.append(r)
-                if isinstance(a.get("geometry"), dict):
-                    ring_list.extend(_geojson_rings(a["geometry"]))
-                for g in _as_list(a.get("geocode")):
-                    if isinstance(g, dict) and g.get("value"):
-                        codes.append(str(g["value"]).strip())
-                idx = len(rows)
-                if ring_list:
-                    rings[idx] = ring_list
-                rows.append({
-                    "pays": label, "pays_iso2": iso2, "identifiant": str(alert.get("identifier", "")),
-                    "emetteur": str(alert.get("senderName") or alert.get("sender") or ""),
-                    "evenement": str(info.get("event", "")), "niveau_id": level_id, "niveau": LEVELS.get(level_id, "n/d"),
-                    "niveau_brut": f"{p.get('awareness_level', '')} | {info.get('severity', '')}",
-                    "type_id": type_id, "type": tlabel, "debut": onset, "fin": expires, "emis": _dt(alert.get("sent")),
-                    "urgence": str(info.get("urgency", "")), "severite": str(info.get("severity", "")),
-                    "certitude": str(info.get("certainty", "")),
-                    "zone": str(a.get("areaDesc", "")), "codes_zone": ", ".join(dict.fromkeys(codes)),
-                    "titre": str(info.get("headline", "")), "description": str(info.get("description", "")),
-                    "consigne": str(info.get("instruction", "")),
-                    "langues": ", ".join(sorted({str(i.get("language", "")) for i in glist if i.get("language")})),
-                    "avec_contour": bool(ring_list),
-                })
-    df = pd.DataFrame(rows, columns=COLUMNS)
-    df["niveau_id"] = pd.to_numeric(df["niveau_id"], errors="coerce")
-    return df, rings
+        keys, colors = [], {}
+    layer = MarkerCluster(name="Sites").add_to(m) if cluster_on else folium.FeatureGroup(name="Sites").add_to(m)
+    for _, r in d.iterrows():
+        col = colors.get(str(r[color_col]) if pd.notna(r[color_col]) else "n/d", "#1f77b4") if color_col else "#bd8e43"
+        folium.CircleMarker(
+            [float(r["lat"]), float(r["long"])], radius=6, color=col, fill=True, fill_opacity=0.75,
+            popup=folium.Popup(_popup_html(r), max_width=320), tooltip=html.escape(str(r["name"])),
+        ).add_to(layer)
+    if area:
+        folium.Circle([area["lat"], area["lon"]], radius=area["radius_m"], color="#bd8e43", weight=3, fill=True,
+                      fill_opacity=0.06, tooltip=f"Périmètre : {area['radius_m']:.0f} m").add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+
+    if keys:
+        shown = keys[:12]
+        st.markdown(" &nbsp; ".join(
+            f"<span style='color:#000'><span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
+            f"background:{colors[k]};margin-right:4px'></span>{html.escape(k)}</span>" for k in shown)
+            + (" …" if len(keys) > len(shown) else ""), unsafe_allow_html=True)
+    key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}_{bool(area)}"
+    try:
+        st_folium(m, height=620, returned_objects=[], key=key, use_container_width=True)
+    except TypeError:  # anciennes versions de streamlit-folium
+        st_folium(m, height=620, width=1400, returned_objects=[], key=key)
+    st.caption(f"{len(d)} site(s) affiché(s) : ceux du tableau ci-dessus (filtres Entreprises / Pays appliqués). "
+               "Cliquez sur un point pour le détail ; le sélecteur en haut à droite change le fond de carte.")
 
 
-def fetch_all(slugs: Iterable[str], *, session=None, url_template: str = FEED_URL, workers: int = 8,
-              now: Optional[datetime] = None) -> tuple[pd.DataFrame, dict[int, list[np.ndarray]], dict[str, str]]:
-    """Interroge les pays en parallèle. Retourne (alertes, contours indexés sur les lignes, {pays: erreur})."""
-    slugs = list(slugs)
-    errors: dict[str, str] = {}
-
-    def one(slug):
-        err = None
-        for cand in [slug] + SLUG_ALIASES.get(slug, []):
-            try:
-                return slug, parse_feed(fetch_country(cand, session=session, url_template=url_template), slug, now=now), None
-            except MeteoAlarmError as e:
-                err = err or str(e)
-                if "404" not in str(e):
-                    break
-        return slug, None, err
-
-    frames, all_rings, offset = [], {}, 0
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(slugs) or 1))) as ex:
-        results = list(ex.map(one, slugs))
-    for slug, res, err in results:
-        label = COUNTRIES.get(slug, (slug,))[0]
-        if err:
-            errors[label] = err
-            continue
-        df, rings = res
-        for k, v in rings.items():
-            all_rings[offset + k] = v
-        offset += len(df)
-        frames.append(df)
-    if not frames:
-        return pd.DataFrame(columns=COLUMNS), {}, errors
-    return pd.concat(frames, ignore_index=True), all_rings, errors
+def _pie(df: pd.DataFrame, col: str, title: str, empty_label: str):
+    """Camembert : 10 modalités maximum, le reste regroupé dans « Autres » ; valeurs manquantes comptées à part."""
+    import plotly.express as px
+    t = top_with_other(df[col].fillna(empty_label), top_n=10)
+    if t.empty:
+        st.info(f"Aucune donnée pour « {title.lower()} » sur cette sélection.")
+        return
+    fig = px.pie(t, names="modalite", values="n", hole=0.3, title=title)
+    fig.update_traces(textinfo="percent", texttemplate="%{percent:.0%}", sort=False,
+                      hovertemplate="%{label}<br>%{value} site(s) (%{percent})<extra></extra>")
+    fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font_color="#000000",
+                      title_font_color="#000000", legend_font_color="#000000", margin=dict(t=60, b=20, l=10, r=10))
+    _stretch(st.plotly_chart, fig)
 
 
-def worst_by_country(df: pd.DataFrame) -> pd.DataFrame:
-    """Niveau maximal, nombre d'alertes et types par pays."""
-    if df.empty:
-        return pd.DataFrame(columns=["pays", "niveau_id", "niveau", "alertes", "types"])
-    out = []
-    for pays, g in df.groupby("pays"):
-        mx = g["niveau_id"].max()
-        top = g[g["niveau_id"] >= 2]
-        out.append({"pays": pays, "niveau_id": mx, "niveau": LEVELS.get(int(mx), "n/d") if pd.notna(mx) else "n/d",
-                    "alertes": len(g), "types": ", ".join(sorted(set(top["type"]))) if len(top) else ""})
-    return pd.DataFrame(out).sort_values(["niveau_id", "pays"], ascending=[False, True]).reset_index(drop=True)
-
-
-# --------------------------------------------------------------------------- croisement avec des points
-def expose_points(lat: np.ndarray, lon: np.ndarray, alerts: pd.DataFrame, rings: dict[int, list[np.ndarray]],
-                  min_level: int = 2, now: Optional[datetime] = None) -> pd.DataFrame:
-    """Pour chaque point : niveau maximal parmi les alertes dont un contour le contient, avec types, dates et zones.
-    Les alertes sans contour dans le flux (pays à codes de zones seulement) ne peuvent pas être croisées."""
-    n = len(lat)
-    out = pd.DataFrame({"europe_niveau_id": [None] * n, "europe_niveau": [None] * n, "europe_types": [None] * n,
-                        "europe_debut": [None] * n, "europe_fin": [None] * n, "europe_zones": [None] * n,
-                        "europe_pays": [None] * n})
-    lat = np.asarray(lat, float)
-    lon = np.asarray(lon, float)
-    ok = np.isfinite(lat) & np.isfinite(lon)
-    hits: dict[int, list[int]] = {}
-    sel = [i for i in rings if i < len(alerts) and (alerts.iloc[i]["niveau_id"] or 0) >= min_level]
-    for ai in sel:
-        idx = PolygonIndex([rings[ai]])
-        x0, y0, x1, y1 = idx._bbox[0]
-        cand = np.flatnonzero(ok & (lon >= x0) & (lon <= x1) & (lat >= y0) & (lat <= y1))
-        if len(cand) == 0:
-            continue
-        inside = idx._inside(lon[cand], lat[cand], 0)
-        for p in cand[inside]:
-            hits.setdefault(int(p), []).append(ai)
-    for p, ais in hits.items():
-        g = alerts.iloc[ais]
-        mx = int(g["niveau_id"].max())
-        worst = g[g["niveau_id"] == mx]
-        out.at[p, "europe_niveau_id"] = mx
-        out.at[p, "europe_niveau"] = LEVELS.get(mx, "n/d")
-        out.at[p, "europe_types"] = ", ".join(sorted(set(f"{r.type} ({r.niveau})" for r in g.itertuples())))
-        deb = [d for d in worst["debut"] if d is not None and pd.notna(d)]
-        fin = [d for d in worst["fin"] if d is not None and pd.notna(d)]
-        out.at[p, "europe_debut"] = min(deb).strftime("%Y-%m-%d %H:%M UTC") if deb else None
-        out.at[p, "europe_fin"] = max(fin).strftime("%Y-%m-%d %H:%M UTC") if fin else None
-        out.at[p, "europe_zones"] = "; ".join(sorted(set(z for z in worst["zone"] if z)))[:300] or None
-        out.at[p, "europe_pays"] = ", ".join(sorted(set(g["pays"])))
-    return out
-
-
-# --------------------------------------------------------------------------- contours des zones (codes EMMA_ID)
-# La plupart des flux ne donnent que des codes de zones. Les contours sont lus dans la couche publique « MeteoAlarm_Geocodes »
-# (GeoSphere Austria, ArcGIS FeatureServer) : champs code / country / name. Adresse remplaçable (secret « meteoalarm_geocodes_url »).
-GEOCODES_URL = ("https://gis.geosphere.at/maps/rest/services/Hosted/MeteoAlarm_Gap_Analysis_2026_WFL1/FeatureServer/3/query")
-
-
-def _norm(t) -> str:
-    import unicodedata
-    t = unicodedata.normalize("NFKD", str(t or "")).encode("ascii", "ignore").decode().lower()
-    return re.sub(r"[^a-z0-9]+", " ", t).strip()
-
-
-def load_geocodes(*, session=None, url: str = GEOCODES_URL, page: int = 200, max_pages: int = 40) -> dict:
-    """Retourne {"by_code": {code: (pays, nom, anneaux)}, "by_name": {(pays_normalisé, nom_normalisé): anneaux}}.
-    Lève MeteoAlarmError si la couche est inaccessible ou vide."""
-    s = session or requests
-    by_code: dict = {}
-    by_name: dict = {}
-    for k in range(max_pages):
-        params = {"where": "1=1", "outFields": "code,country,name", "outSR": 4326, "f": "geojson",
-                  "maxAllowableOffset": 0.02, "resultOffset": k * page, "resultRecordCount": page}
-        r, last = None, None
-        for attempt in range(3):             # nouvelles tentatives : le serveur ArcGIS coupe parfois la connexion
-            try:
-                r = s.get(url, params=params, headers={"User-Agent": "CatMap/3.3"}, timeout=90)
-                break
-            except requests.RequestException as e:
-                last = e
-                time.sleep(1.5 * (attempt + 1))
-        if r is None:
-            raise MeteoAlarmError(f"contours injoignables ({type(last).__name__})") from last
-        if r.status_code != 200:
-            raise MeteoAlarmError(f"contours : HTTP {r.status_code}")
+# --------------------------------------------------------------------------
+# Page « Géolocalisation »
+# --------------------------------------------------------------------------
+def _collect_queries(mode: str) -> tuple[list[NameQuery], list[str]]:
+    if mode == "Un nom d'entreprise":
+        name = st.text_input("Nom de l'entreprise", placeholder="Ex. IKEA", key="in_name")
+        qid = st.text_input("Identifiant Wikidata (facultatif, recherche très précise)", placeholder="Ex. Q54078", key="in_qid")
+        if qid.strip():
+            st.info(f"Identifiant Wikidata renseigné ({qid.strip().upper()}) : il prime sur le nom et peut ramener une autre "
+                    "entreprise que celle saisie. Videz ce champ pour chercher uniquement par nom.")
+        return ([NameQuery.make(name, qid)] if name.strip() else []), []
+    if mode == "Liste (une entreprise par ligne)":
+        txt = st.text_area("Une entreprise par ligne ; identifiant Wikidata facultatif après « ; »",
+                           placeholder="IKEA;Q54078\nLeroy Merlin", height=140, key="in_text")
+        if not txt.strip():
+            return [], []
         try:
-            data = r.json()
+            return parse_names_text(txt)
+        except InputError as e:
+            st.error(str(e))
+            return [], []
+    up = st.file_uploader("Fichier CSV ou Excel (nom d'entreprise en première colonne)", type=["csv", "txt", "xlsx"], key="in_file")
+    header = st.radio("Première ligne", ["Détecter automatiquement", "C'est un en-tête", "C'est une entreprise"],
+                      horizontal=True, key="in_header")
+    if up is None:
+        return [], []
+    flag = {"Détecter automatiquement": None, "C'est un en-tête": True, "C'est une entreprise": False}[header]
+    try:
+        qs, warns = read_company_list(up.getvalue(), up.name, flag)
+    except InputError as e:
+        st.error(str(e))
+        return [], []
+    st.caption(f"{len(qs)} entreprise(s) lue(s).")
+    return qs, warns
+
+
+def _options_ui() -> SearchOptions:
+    s = get_settings()
+    with st.expander("Options de recherche (compromis rappel / précision)"):
+        c1, c2 = st.columns(2)
+        with c1:
+            by_name = st.checkbox("Chercher dans « name » (nom du lieu)", True,
+                                  help="Interroge le tag name d'OpenStreetMap par regex insensible à la casse.")
+            by_brand = st.checkbox("Chercher dans « brand » (marque)", False,
+                                   help="Interroge aussi le tag brand par regex. Plus de résultats (enseignes dont le nom du lieu diffère "
+                                        "de la marque), mais requête plus lente et plus de bruit.")
+            strict = st.checkbox(
+                "Nom en mot entier (recommandé)", True,
+                help="**Principe** : la regex envoyée à Overpass trouve toute chaîne qui *contient* le nom saisi, "
+                     "y compris « Pikea » ou « xxIKEAxx ». Cette case décide de ce qu'on garde dans la réponse.\n\n"
+                     "**Cochée** : on ne garde que les lieux où le nom apparaît comme mot entier "
+                     "(« IKEA », « IKEA Paris Nord »). Les faux positifs sont écartés.\n\n"
+                     "**Décochée** : on garde tout ce que renvoie la regex. Plus de résultats, mais plus de bruit ; "
+                     "les lieux non conformes reçoivent un score faible (0,30).\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après coup.")
+            biz = st.checkbox(
+                "Établissements uniquement", False,
+                help="**Principe** : OpenStreetMap contient aussi des objets qui portent un nom sans être un établissement "
+                     "(parking, arrêt, monument, parcelle…). Cette case filtre sur la nature de l'objet.\n\n"
+                     "**Cochée** : on ne garde que les objets ayant au moins un tag *shop, amenity, office, craft, industrial, "
+                     "man_made, power, healthcare, tourism, leisure, landuse* ou *building*. Moins de bruit, mais on peut perdre "
+                     "un site mal renseigné dans OSM.\n\n"
+                     "**Décochée** : tout objet portant le nom est gardé (plus de résultats, plus de bruit). "
+                     "Les limites administratives (tag boundary) sont toujours écartées.\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après la réponse d'Overpass.")
+            rel = st.checkbox(
+                "Inclure les grands sites (relations)", False,
+                help="**Principe** : un grand site (campus, usine, centre commercial avec cour intérieure) est parfois décrit "
+                     "dans OpenStreetMap par une *relation* multipolygone plutôt que par un point ou un contour simple.\n\n"
+                     "**Cochée** : la requête interroge aussi les relations. On trouve ces grands sites et leur surface, "
+                     "au prix d'une requête plus lourde.\n\n"
+                     "**Décochée** : seuls les points (nodes) et les contours simples (ways) sont interrogés. "
+                     "Plus rapide, mais les sites décrits par une relation sont manqués.\n\n"
+                     "**Effet sur la requête** : oui, la ligne `rel[type=multipolygon]…` est ajoutée ou retirée.")
+            op = st.checkbox(
+                "Chercher aussi dans « operator »", False,
+                help="**Principe** : le tag *operator* désigne l'exploitant d'un lieu, souvent une société différente de "
+                     "l'enseigne (ex. un franchisé).\n\n"
+                     "**Cochée** : la requête cherche aussi le nom dans operator. Plus de résultats, plus de bruit ; "
+                     "le score de ces correspondances est diminué de 0,20.\n\n"
+                     "**Décochée** : seuls name et/ou brand (selon vos cases) sont interrogés.\n\n"
+                     "**Effet sur la requête** : oui, une condition `operator` est ajoutée.")
+        with c2:
+            idx = get_countries()
+            labels = sorted(f"{a['name_fr']} ({a['iso2']})" for a in idx.attrs if a.get("iso2") and a.get("name_fr"))
+            picked = st.multiselect(
+                "Limiter à des pays (recommandé pour un grand périmètre)", labels,
+                help="**Principe** : restreint la recherche aux pays choisis.\n\n"
+                     "**Vide** : le monde entier est interrogé (plus lent, plus de résultats).\n\n"
+                     "**Rempli** : la requête est limitée à ces pays (`area[\"ISO3166-1\"=…]`), donc plus rapide "
+                     "et plus ciblée.\n\n**Effet sur la requête** : oui.")
+            min_score = st.slider(
+                "Score minimal conservé", 0.0, 1.0, 0.0, 0.05,
+                help="**Principe** : chaque lieu trouvé reçoit un score de 0 à 1 mesurant la qualité de la correspondance "
+                     "entre le nom saisi et le nom OpenStreetMap (calculé après la réponse d'Overpass, sur les mots entiers, "
+                     "sans tenir compte de la casse, des accents ni des séparateurs).\n\n"
+                     "**Calcul** :\n\n"
+                     "- **1,00** : identifiant Wikidata identique ;\n"
+                     "- **0,90** : nom identique (« IKEA » pour « IKEA ») ;\n"
+                     "- **0,75** : le nom saisi est le début du nom OSM (« IKEA Lyon ») ;\n"
+                     "- **0,60** : le nom saisi est contenu en mots entiers (« Magasin IKEA ») ;\n"
+                     "- **moins 0,20** si la correspondance vient du tag operator ;\n"
+                     "- **0,30** si « Nom en mot entier » est décoché et que le nom n'apparaît pas en mot entier.\n\n"
+                     "**Ce curseur** : tout lieu dont le score est inférieur au seuil est écarté. "
+                     "0 = on garde tout ; 0,75 = on garde les noms identiques ou commençant par le nom saisi.\n\n"
+                     "**Effet sur la requête** : aucun, le tri se fait après coup.")
+            dedup = st.slider(
+                "Fusion des doublons node/way (mètres)", 0, 100, 25,
+                help="**Principe** : un même site peut exister plusieurs fois dans OpenStreetMap (un point posé dans le bâtiment "
+                     "et le contour du bâtiment).\n\n"
+                     "**Valeur > 0** : un point situé dans un contour du même nom, ou à moins de cette distance, "
+                     "est fusionné avec lui ; on garde le contour et on reprend les tags du point.\n\n"
+                     "**0** : aucune fusion, tous les objets sont gardés.\n\n"
+                     "**Effet sur la requête** : aucun, la fusion se fait après coup.")
+            fast = st.checkbox(
+                "Mode rapide (noms exacts uniquement)", False,
+                help="**Principe** : par défaut, Overpass compare le nom à une regex insensible à la casse. "
+                     "Cela parcourt tous les lieux nommés du périmètre : c'est complet mais lent (plusieurs minutes "
+                     "sur le monde entier). Le mode rapide remplace la regex par des égalités exactes sur quelques "
+                     "graphies (IKEA, ikea, Ikea, sans accents, avec tirets…), que le serveur retrouve instantanément "
+                     "grâce à son index.\n\n"
+                     "**Coché** : réponse en quelques secondes, mais seuls les lieux dont le champ vaut exactement "
+                     "l'une de ces graphies sont trouvés. « IKEA » est trouvé, « IKEA Paris Nord » ne l'est pas.\n\n"
+                     "**Décoché** : regex complète, qui trouve aussi « IKEA Paris Nord », « Magasin IKEA », etc. "
+                     "Plus de résultats, mais plus lent.\n\n"
+                     "**Effet sur la requête** : oui. La regex est remplacée par une liste d'égalités exactes "
+                     "(les champs name / brand cochés restent respectés). Timeout serveur de 60 s au lieu de 280 s.")
+    if not (by_name or by_brand):
+        st.warning("Cochez « name » et/ou « brand » : sans champ de recherche, seule la recherche par identifiant Wikidata fonctionne.")
+    if s.uses_public_overpass:
+        st.caption("Serveurs Overpass **publics** : usage raisonnable demandé. "
+                   + ("" if s.contact else "Renseignez `CATMAP_CONTACT` (e-mail ou URL) pour vous identifier. ")
+                   + "Pour de gros volumes, voir « Overpass local » dans le README.")
+    else:
+        st.caption(f"Instance Overpass **locale** : {s.overpass_urls[0]}")
+    return SearchOptions(search_name=by_name, search_brand=by_brand, include_operator=op, include_relations=rel, require_business_tag=biz,
+                         countries=tuple(p.rsplit("(", 1)[1].rstrip(")") for p in picked),
+                         strict_word_match=strict, min_score=min_score, dedup_radius_m=float(dedup),
+                         search_mode="exact" if fast else "regex")
+
+
+def _run_search(queries: list[NameQuery], options: SearchOptions):
+    box = st.empty()
+    bar = box.progress(0.0, text="Démarrage…")
+
+    def cb(done: int, total: int, name: str):
+        bar.progress(done / total, text=f"{done}/{total} — {name}")
+
+    status = st.empty()
+    res = geolocate(queries, options, get_client(), get_settings(), get_countries(), get_naf(), progress=cb,
+                    on_event=(lambda m: status.caption(m)) if get_settings().max_workers == 1 else None)
+    status.empty()
+    box.empty()
+    st.session_state["result"] = res
+    st.session_state["result_options"] = options
+    st.session_state["result_queries"] = [(q.raw.casefold(), q.wikidata) for q in queries]
+
+
+def _status_messages(report: pd.DataFrame):
+    for statut, fn, label in (("erreur", st.error, "en erreur"), ("partiel", st.warning, "avec résultat partiel"),
+                              ("aucun résultat", st.info, "sans résultat")):
+        sub = report[report["statut"] == statut]
+        if sub.empty:
+            continue
+        lines = [f"- **{r.nom_demande}**" + (f" : {r.message}" if r.message else "") for r in sub.itertuples()]
+        fn(f"{len(sub)} entreprise(s) {label} :\n\n" + "\n".join(lines[:30]))
+
+
+def _render_result(res):
+    sites, report = res.sites, res.report
+    n_req = len(report)
+    n_found = int((report["statut"].isin(["ok", "partiel"]) & (report["n_sites"] > 0)).sum())
+    comp = completeness(sites)
+    area = res.meta.get("area")
+    c = st.columns(5)
+    c[0].metric("Sites", f"{len(sites):,}".replace(",", " "))
+    if area:
+        c[1].metric("Rayon du périmètre", f"{area['radius_m']:,.0f} m".replace(",", " "))
+    else:
+        c[1].metric("Entreprises trouvées", f"{n_found} / {n_req}")
+    c[2].metric("Pays renseigné", f"{comp['pays']:.0f} %")
+    c[3].metric("Secteur NAF renseigné", f"{comp['naf_section']:.0f} %")
+    c[4].metric("Base OSM", (res.meta["snapshots"][0][:10] if res.meta["snapshots"] else "n/d"),
+                help="Date de la base Overpass interrogée (traçabilité).")
+    _status_messages(report)
+    if sites.empty:
+        if area:
+            st.info("Aucun site à afficher sur ce périmètre. Essayez d'élargir le rayon, de décocher « Uniquement les lieux "
+                    "nommés » ou d'inclure les relations.")
+        else:
+            st.info("Aucun site à afficher. Essayez de désactiver « Nom en mot entier » ou « Établissements uniquement », "
+                    "ou de renseigner un identifiant Wikidata.")
+        _render_report_tab(res)
+        return
+
+    companies = sorted(sites["nom_demande"].unique())
+    countries = sorted(sites["pays"].dropna().unique())
+    if area:   # un seul « périmètre » : le filtre par entreprise n'a pas de sens
+        pick_c = companies
+        pick_p = st.multiselect("Pays", countries, key="f_country", help="Vide = tous (y compris sans pays)")
+    else:
+        f1, f2 = st.columns(2)
+        pick_c = f1.multiselect("Entreprises", companies, default=companies, key="f_company")
+        pick_p = f2.multiselect("Pays", countries, key="f_country", help="Vide = tous (y compris sans pays)")
+    view = sites[sites["nom_demande"].isin(pick_c)]
+    if pick_p:
+        view = view[view["pays"].isin(pick_p)]
+
+    t1, t4, t5 = st.tabs(["Tableau, graphiques et carte", "Rapport par entreprise", "Qualité"])
+    with t1:
+        cols = [c for c in DISPLAY_COLUMNS if c in view.columns]
+        if area:   # « name » en premier, puis la distance au centre après la position
+            cols = ["name"] + [c for c in cols if c not in ("name", "nom_demande")]
+            if "distance_centre_m" in view.columns:
+                cols.insert(cols.index("long") + 1 if "long" in cols else len(cols), "distance_centre_m")
+        _stretch(st.dataframe, view[cols], hide_index=True,
+                 column_config={"osm_url": st.column_config.LinkColumn("OSM", display_text="ouvrir")})
+        d1, d2 = st.columns(2)
+        d1.download_button("Télécharger (CSV)", _csv_bytes(view), "catmap_sites.csv", "text/csv")
+        d2.download_button("Télécharger (Excel)", _xlsx_bytes({"sites": view, "rapport": report}), "catmap_sites.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.subheader("Répartitions")
+        g_naf, g_pays = st.columns(2)
+        with g_naf:
+            if area:
+                naf_company = "Toutes"
+                naf_country = st.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
+                                           key="pie_naf_country")
+            else:
+                fc1, fc2 = st.columns(2)
+                naf_company = fc1.selectbox("Entreprise (secteur NAF)", ["Toutes"] + companies, key="pie_naf_company")
+                naf_country = fc2.selectbox("Pays (secteur NAF)", ["Tous"] + sorted(view["pays"].dropna().unique()),
+                                            key="pie_naf_country")
+            dn = view
+            if naf_company != "Toutes":
+                dn = dn[dn["nom_demande"] == naf_company]
+            if naf_country != "Tous":
+                dn = dn[dn["pays"] == naf_country]
+            _pie(dn, "naf_section", "Répartition par secteur NAF", "Non classé")
+        with g_pays:
+            pays_company = "Toutes" if area else st.selectbox("Entreprise (pays)", ["Toutes"] + companies, key="pie_pays_company")
+            dp = view if pays_company == "Toutes" else view[view["nom_demande"] == pays_company]
+            _pie(dp, "pays", "Répartition par pays", "Pays non renseigné")
+        st.subheader("Carte interactive")
+        _site_map(view, area)
+    with t4:
+        _render_report_tab(res)
+    with t5:
+        _render_quality_tab(view, area)
+
+
+def _render_report_tab(res):
+    st.subheader("Synthèse par entreprise")
+    _stretch(st.dataframe, summary_by_company(res.sites, res.report), hide_index=True)
+    st.subheader("Détail de la recherche")
+    _stretch(st.dataframe, res.report, hide_index=True)
+    st.caption(f"Serveur(s) : {', '.join(res.meta['endpoints']) or 'cache'} — options : {res.meta['options']}")
+
+
+def _render_quality_tab(view: pd.DataFrame, area: dict | None = None):
+    if not area:   # pas de score d'appariement du nom pour une recherche par périmètre
+        st.markdown("**Fiabilité de l'appariement du nom** (plus le score est élevé, plus le site est sûr)")
+        bins = pd.cut(view["match_score"], [0, .5, .7, .8, .95, 1.0], labels=["≤0,5", "0,5-0,7", "0,7-0,8", "0,8-0,95", "1,0"])
+        _stretch(st.dataframe, bins.value_counts().sort_index().rename("sites").reset_index().rename(columns={"match_score": "score"}), hide_index=True)
+    st.markdown("**Fiabilité de la classification NAF**")
+    _stretch(st.dataframe, view["naf_confidence"].fillna("non classé").value_counts().rename("sites").reset_index(), hide_index=True)
+    un = get_naf().unmapped(view)
+    if not un.empty:
+        st.markdown("**Valeurs de tags OSM absentes de `data/naf_mapping.csv`** (à compléter)")
+        _stretch(st.dataframe, un.head(50), hide_index=True)
+    snapped = int((view["pays_methode"] == "nearest").sum())
+    if snapped:
+        st.caption(f"{snapped} site(s) rattaché(s) au pays le plus proche (point côtier ou frontalier).")
+
+
+def _clear_all():
+    """Vide le cache disque Overpass, les résultats affichés, les filtres et la saisie (appelé par le bouton)."""
+    n = 0
+    cache_dir = Path(get_settings().cache_dir)
+    if cache_dir.is_dir():
+        for f in list(cache_dir.glob("*.json")) + list(cache_dir.glob("*.tmp")):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    for k in ("result", "result_options", "result_queries", "f_company", "f_country", "pie_naf_company", "pie_naf_country", "pie_pays_company",
+              "map_color", "map_cluster", "area_pick_n"):
+        st.session_state.pop(k, None)
+    for k in ("in_name", "in_qid", "in_text"):
+        if k in st.session_state:
+            st.session_state[k] = ""
+    try:
+        st.cache_data.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    st.session_state["_cleared"] = n
+
+
+def _area_new():
+    """Bouton « Nouvelle prise » : nouvelle instance de la carte (cercle effacé) et résultats du périmètre retirés."""
+    st.session_state["area_pick_n"] = st.session_state.get("area_pick_n", 0) + 1
+    res = st.session_state.get("result")
+    if res is not None and res.meta.get("area"):
+        st.session_state.pop("result", None)
+
+
+def _page_area():
+    s = get_settings()
+    with st.expander("Options du périmètre"):
+        rel = st.checkbox(
+            "Inclure les grands sites (relations)", False, key="area_rel",
+            help="**Principe** : un grand site (campus, usine, centre commercial) est parfois décrit par une *relation* "
+                 "multipolygone plutôt que par un point ou un contour simple.\n\n"
+                 "**Cochée** : les relations sont interrogées aussi (requête plus lourde).\n\n"
+                 "**Décochée** : seuls les points (nodes) et les contours (ways) sont interrogés.")
+        named = st.checkbox(
+            "Uniquement les lieux nommés (name ou brand)", True, key="area_named",
+            help="**Principe** : les objets *shop*, *amenity* ou *brand* incluent aussi du mobilier sans nom (bancs, "
+                 "poubelles, parkings à vélos…).\n\n"
+                 "**Cochée** : on garde les objets qui portent un name ou un brand.\n\n"
+                 "**Décochée** : tout est gardé (beaucoup plus de bruit).")
+        dedup = st.slider(
+            "Fusion des doublons node/way (mètres)", 0, 100, 25, key="area_dedup",
+            help="Un même site peut exister en point et en contour dans OpenStreetMap. Valeur > 0 : on fusionne ceux de même "
+                 "nom situés à moins de cette distance (ou un point dans un contour). 0 : aucune fusion.")
+    st.caption(f"Rayon maximal : **{s.area_max_radius_m:,} m**".replace(",", " ") + f" (au-delà, la recherche serait trop lourde) ; "
+               f"au plus {s.area_max_sites:,} sites sont conservés (les plus proches du centre).".replace(",", " "))
+    n = st.session_state.get("area_pick_n", 0)
+    picked = circle_picker(center=(46.6, 2.5), zoom=6, max_radius_m=s.area_max_radius_m, key=f"area_picker_{n}")
+    area = None
+    if picked:
+        try:
+            area = AreaQuery.from_value(picked)
+            area.validate(s.area_max_radius_m)
         except ValueError as e:
-            raise MeteoAlarmError("contours : réponse non JSON") from e
-        feats = data.get("features") if isinstance(data, dict) else None
-        if feats is None:
-            raise MeteoAlarmError("contours : format non reconnu")
-        for f in feats:
-            pr = f.get("properties") or {}
-            rg = [np.round(r, 3) for r in _geojson_rings(f.get("geometry") or {})]
-            if not rg:
-                continue
-            code, ctry, name = str(pr.get("code") or "").strip(), pr.get("country"), pr.get("name")
-            if code:
-                by_code.setdefault(code.upper(), (ctry, name, []))[2].extend(rg)
-            by_name.setdefault((_norm(ctry), _norm(name)), []).extend(rg)
-        if len(feats) < page:
-            break
-    if not by_code and not by_name:
-        raise MeteoAlarmError("contours : couche vide")
-    return {"by_code": by_code, "by_name": by_name}
+            st.error(str(e))
+            area = None
+    if area:
+        st.markdown(f"**Périmètre validé** : centre ({area.lat:.5f}, {area.lon:.5f}), rayon **{area.radius_m:,.0f} m**".replace(",", " "))
+        b1, b2 = st.columns(2)
+        b1.button("Nouvelle prise", key="area_new", on_click=_area_new)
+        go = b2.button("Recherche", type="primary", key="area_go")
+        if go:
+            _run_area(area, AreaOptions(include_relations=rel, named_only=named, dedup_radius_m=float(dedup)))
+    res = st.session_state.get("result")
+    if res is not None and res.meta.get("area"):
+        st.divider()
+        _render_result(res)
 
 
-def attach_geometry(df: pd.DataFrame, rings: dict, geo: Optional[dict]) -> tuple[dict, int]:
-    """Complète ``rings`` pour les lignes sans contour : par code de zone, sinon par nom de zone dans le pays.
-    Retourne (nouveaux contours, nombre de lignes encore sans contour). ``df['avec_contour']`` est mis à jour."""
-    out = dict(rings)
-    if geo:
-        for i in range(len(df)):
-            if i in out:
-                continue
-            row = df.iloc[i]
-            found = None
-            for c in [x.strip().upper() for x in str(row["codes_zone"]).split(",") if x.strip()]:
-                if c in geo["by_code"]:
-                    found = geo["by_code"][c][2]
-                    break
-            if found is None:
-                z = _norm(row["zone"])
-                eng = next((k.replace("-", " ") for k, v in COUNTRIES.items() if v[1] == row["pays_iso2"]), "")
-                for cn in (_norm(row["pays"]), _norm(row["pays_iso2"]), _norm(eng)):
-                    if (cn, z) in geo["by_name"]:
-                        found = geo["by_name"][(cn, z)]
-                        break
-            if found:
-                out[i] = found
-    df["avec_contour"] = [i in out for i in range(len(df))]
-    return out, int((~df["avec_contour"]).sum())
+def _run_area(area: AreaQuery, options: AreaOptions):
+    status = st.empty()
+    with st.spinner("Interrogation d'Overpass sur le périmètre…"):
+        res = locate_area(get_client(), get_settings(), area, options, get_countries(), get_naf(),
+                          on_event=lambda m: status.caption(m))
+    status.empty()
+    st.session_state["result"] = res
+    st.session_state["result_options"] = options
 
 
-# --------------------------------------------------------------------------- fichier officiel « Geocodes » (Redistribution Hub)
-CODE_KEYS = ("code", "emma_id", "geocode", "id", "emmaid", "value")
-COUNTRY_KEYS = ("country", "cntr", "cntr_id", "iso", "iso2", "country_code", "countryname")
-NAME_KEYS = ("name", "areadesc", "name_en", "name_engl", "nom", "label")
+def page_geolocalisation():
+    st.title("Géolocalisation d'entreprises")
+    c_mode, c_area = st.columns([3, 2])
+    with c_area:
+        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+        area_mode = _checkbox_with_help(
+            "Entreprises sur un périmètre géographique",
+            "**Principe** : au lieu de chercher une entreprise par son nom, on délimite un cercle sur la carte et on "
+            "récupère tous les établissements situés dedans.\n\n"
+            "**Coché** : cliquez pour fixer le centre, déplacez la souris pour régler le rayon, cliquez de nouveau pour "
+            "valider, puis lancez la recherche. Les objets portant un tag *shop*, *amenity* ou *brand* sont retenus.\n\n"
+            "**Décoché** : recherche par nom d'entreprise (saisie, liste ou fichier).",
+            key="area_mode", left=True, wide=True)
+    with c_mode:
+        mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"],
+                        horizontal=True, disabled=area_mode)
+    if area_mode:
+        _page_area()
+        return
+    queries, warns = _collect_queries(mode)
+    for w in warns[:5]:
+        st.warning(w)
+    options = _options_ui()
+    with st.expander("Tester la connexion Overpass"):
+        if st.button("Lancer le test"):
+            with st.spinner("Test des serveurs…"):
+                rows = get_client().ping()
+            for r in rows:
+                (st.success if r["ok"] else st.error)(f"{r['endpoint']} — {r['latence_s']} s — {r['message']}")
+            if not any(r["ok"] for r in rows):
+                st.info("Aucun serveur joignable depuis cet hébergement. Voir le README : instance Overpass "
+                        "payante/auto-hébergée accessible depuis internet, variable `OVERPASS_URLS`.")
+    b1, b2 = st.columns([1, 1])
+    run = b1.button("Lancer la recherche", type="primary", disabled=not queries)
+    b2.button("Vider le cache et les résultats", on_click=_clear_all)
+    b2.caption("Supprime les réponses Overpass mémorisées, les résultats affichés et la saisie. "
+               "La prochaine recherche interrogera de nouveau Overpass.")
+    if "_cleared" in st.session_state:
+        st.success(f"Cache vidé ({st.session_state.pop('_cleared')} fichier(s) supprimé(s)). Saisie et résultats réinitialisés.")
+    if run:
+        _run_search(queries, options)
+    res = st.session_state.get("result")
+    if res is not None and not res.meta.get("area"):
+        st.divider()
+        shown = sorted(res.report["nom_demande"].astype(str).unique()) if "nom_demande" in res.report else []
+        if shown:
+            st.markdown("**Résultats pour :** " + ", ".join(shown[:10]) + (" …" if len(shown) > 10 else ""))
+        current = [(q.raw.casefold(), q.wikidata) for q in queries]
+        if current and current != st.session_state.get("result_queries"):
+            st.warning("Ces résultats correspondent à la recherche précédente, pas à la saisie actuelle. "
+                       "Cliquez sur « Lancer la recherche » pour les mettre à jour.")
+        _render_result(res)
 
 
-def _first(props: dict, keys) -> Any:
-    low = {str(k).lower(): v for k, v in (props or {}).items()}
-    for k in keys:
-        if low.get(k) not in (None, ""):
-            return low[k]
-    return None
+# --------------------------------------------------------------------------
+# Pages « Temps réel » et « Cartographies avancées »
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner="Interrogation de Météo-France…")
+def _fetch_vigilance_df() -> pd.DataFrame:
+    s = get_settings()
+    return vg.parse_vigilance(vg.fetch_vigilance(vg.MeteoFranceAuth(s), s))
 
 
-def _thin(r: np.ndarray, max_pts: int = 400) -> np.ndarray:
-    r = np.round(r[:, :2], 3)
-    keep = np.ones(len(r), bool)
-    keep[1:] = np.any(r[1:] != r[:-1], axis=1)
-    r = r[keep]
-    if len(r) > max_pts:
-        step = int(np.ceil(len(r) / max_pts))
-        r = np.vstack([r[::step], r[:1]])
-    return r
-
-
-def parse_geocodes_json(data: Any) -> dict:
-    """Lit le fichier « Geocodes » de MeteoAlarm (GeoJSON, liste d'objets ou dictionnaire indexé par code ; structure
-    tolérante car non vérifiée). Retourne le même format que ``load_geocodes``. Lève MeteoAlarmError si rien d'exploitable."""
-    items: list = []
-    if isinstance(data, dict) and isinstance(data.get("features"), list):
-        items = data["features"]
-    elif isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for k, v in data.items():
-            if isinstance(v, dict):
-                items.append(dict(v, **({"code": k} if "code" not in v else {})))
-    by_code: dict = {}
-    by_name: dict = {}
-    for f in items:
-        if not isinstance(f, dict):
-            continue
-        props = f.get("properties") if isinstance(f.get("properties"), dict) else f
-        geom = f.get("geometry") if isinstance(f.get("geometry"), dict) else None
-        if geom is None:
-            continue
-        rg = [_thin(r) for r in _geojson_rings(geom)]
-        rg = [r for r in rg if len(r) >= 3 and np.all(np.abs(r[:, 0]) <= 180) and np.all(np.abs(r[:, 1]) <= 90)]
-        if not rg:
-            continue
-        code, ctry, name = _first(props, CODE_KEYS), _first(props, COUNTRY_KEYS), _first(props, NAME_KEYS)
-        if code:
-            by_code.setdefault(str(code).strip().upper(), (ctry, name, []))[2].extend(rg)
-        if name:
-            by_name.setdefault((_norm(ctry), _norm(name)), []).extend(rg)
-    if not by_code and not by_name:
-        raise MeteoAlarmError("fichier de contours non reconnu (aucune zone avec géométrie en degrés lon/lat)")
-    return {"by_code": by_code, "by_name": by_name}
-
-
-def load_geocodes_bytes(raw: bytes) -> dict:
-    if raw[:2] == b"\x1f\x8b":                      # fichier compressé (.json.gz)
-        import gzip
-        raw = gzip.decompress(raw)
+def _load_vigilance():
+    s = get_settings()
+    if not vg.MeteoFranceAuth(s).configured:
+        st.info("Identifiants Météo-France absents. Définissez `METEOFRANCE_API_KEY` (ou `METEOFRANCE_CLIENT_ID` et "
+                "`METEOFRANCE_CLIENT_SECRET`) dans l'environnement ou `.streamlit/secrets.toml`.\n\n"
+                f"Noms de secrets détectés par l'application (valeurs jamais affichées) : {', '.join(sorted(_secrets())) or 'aucun'}.")
+        return None
+    if st.button("Relancer la recherche", key="vg_refresh"):
+        _fetch_vigilance_df.clear()
+        _fetch_om_json.clear()
+        _fetch_om_zip.clear()
     try:
-        data = json.loads(raw.decode("utf-8-sig"))
-    except (ValueError, UnicodeDecodeError) as e:
-        raise MeteoAlarmError("fichier de contours : JSON invalide") from e
-    return parse_geocodes_json(data)
+        return _fetch_vigilance_df()
+    except vg.VigilanceError as e:
+        st.error(str(e))
+        return None
 
 
-def load_geocodes_url(url: str, *, session=None, timeout: float = 180.0) -> dict:
-    s = session or requests
-    try:
-        r = s.get(url, headers={"User-Agent": "CatMap/3.3"}, timeout=timeout)
-    except requests.RequestException as e:
-        raise MeteoAlarmError(f"contours injoignables ({type(e).__name__})") from e
-    if r.status_code != 200:
-        raise MeteoAlarmError(f"contours : HTTP {r.status_code}")
-    return load_geocodes_bytes(r.content)
-
-
-def coverage(df: pd.DataFrame) -> pd.DataFrame:
-    """Alertes dessinables / total par pays (diagnostic)."""
-    if df.empty:
-        return pd.DataFrame(columns=["pays", "alertes", "avec contour"])
-    g = df.groupby("pays")["avec_contour"].agg(["size", "sum"]).reset_index()
-    g.columns = ["pays", "alertes", "avec contour"]
-    return g.sort_values("avec contour")
-
-
-def diagnostic(df: pd.DataFrame, slugs: Iterable[str], errors: dict, geo: Optional[dict]) -> pd.DataFrame:
-    """Une ligne par pays demandé : état du flux, alertes lues, niveaux, alertes dessinables et exemples de codes sans contour."""
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_cyclones(with_rain: bool = True):
+    """Cyclones actifs + trajectoire + (facultatif) précipitations. Mis en cache 10 minutes."""
+    storms = cy.fetch_storms()
+    radii = cy.fetch_wind_radii()
+    rain = cy.attach_precipitation(storms) if with_rain else False
     rows = []
-    for slug in slugs:
-        label = COUNTRIES.get(slug, (slug,))[0]
-        g = df[df["pays"] == label] if not df.empty else df
-        miss = g[~g["avec_contour"]] if len(g) else g
-        codes = sorted({c.strip() for v in miss["codes_zone"] for c in str(v).split(",") if c.strip()})[:4] if len(miss) else []
-        zones = sorted(set(miss["zone"]))[:3] if len(miss) else []
-        rows.append({"pays": label, "flux": errors.get(label, "ok"), "alertes lues": len(g),
-                     "niveau ≥ jaune": int((g["niveau_id"] >= 2).sum()) if len(g) else 0,
-                     "dessinables": int(g["avec_contour"].sum()) if len(g) else 0,
-                     "codes sans contour": ", ".join(codes), "zones sans contour": ", ".join(zones)})
-    return pd.DataFrame(rows)
+    for s in storms:
+        c = s.current
+        rows.append({"Nom": s.name, "Bassin": s.basin, "Nature": cy.stage_label(c.wind_kt, s.basin),
+                     "Maximum Sustained Winds": cy.wind_text(c.wind_kt), "Max Wind Gusts": cy.wind_text(c.gust_kt),
+                     "Pressure": cy.pressure_text(c.mslp_hpa), "Movement": cy.movement_text(c.direction_deg, c.speed_kt),
+                     "Bulletin (UTC)": s.advisory_time.strftime("%d/%m %H:%M") if s.advisory_time else "",
+                     "_wind": c.wind_kt or 0, "_cat": c.category})
+    return cm.build_payload(storms, radii, rain_available=rain), rows, storms
+
+
+def _help_html(text: str) -> str:
+    """Texte d'infobulle -> HTML sûr : échappé, puis **gras**, *italique* et sauts de ligne."""
+    import re
+    s = html.escape(text)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"\*(.+?)\*", r"<i>\1</i>", s)
+    return s.replace("\n\n", "<br><br>").replace("\n", "<br>")
+
+
+def _help_icon(text: str, left: bool = False, wide: bool = False) -> None:
+    """Pastille « ? » dont le texte n'apparaît qu'au survol (CSS pur, voir .cy-help dans assets/styles.css)."""
+    cls = "cy-help" + (" cy-left" if left else "") + (" cy-wide" if wide else "")
+    st.markdown(f'<span class="{cls}"><span class="cy-tip">{_help_html(text)}</span></span>', unsafe_allow_html=True)
+
+
+def _checkbox_with_help(label: str, help_text: str, *, key: str, value: bool = False, left: bool = False, wide: bool = False) -> bool:
+    """Case à cocher + « ? » collé au texte (infobulle au survol uniquement)."""
+    try:
+        row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    except TypeError:
+        row = st.container()
+    with row:
+        v = st.checkbox(label, value, key=key)
+        _help_icon(help_text, left=left, wide=wide)
+    return v
+
+
+def _cyclone_section():
+    import streamlit.components.v1 as components
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button("Actualiser les cyclones", key="cy_refresh"):
+            _load_cyclones.clear()
+    with c2:
+        try:                                   # Streamlit récent : ligne horizontale, l'icône colle au texte
+            row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+        except TypeError:                      # anciennes versions : l'icône passe sous la case
+            row = st.container()
+        with row:
+            with_rain = st.checkbox("Calculer les précipitations attendues (Open-Meteo)", value=True, key="cy_rain")
+            _help_icon("Cumul de pluie prévu sur 24 h au centre de la tempête, à chaque échéance de la trajectoire. "
+                       "Décochez pour accélérer l'affichage.")
+    try:
+        with st.spinner("Chargement des cyclones actifs…"):
+            payload, rows, storms = _load_cyclones(with_rain)
+    except cy.CycloneError as e:
+        st.error(f"Données cyclones indisponibles : {e}")
+        return
+    n = len(rows)
+    strong = sum(1 for r in rows if r["_cat"] >= 1)
+    m = st.columns(3)
+    m[0].metric("Systèmes tropicaux actifs", n)
+    m[1].metric("Ouragans / typhons / cyclones (cat. 1 à 5)", strong)
+    m[2].metric("Vent soutenu max", f"{max((r['_wind'] for r in rows), default=0):.0f} kt" if rows else "—")
+    map_box = st.container()
+    st.caption("Cliquez sur une icône pour afficher ses caractéristiques. Les couches (trajectoire, vents, précipitations, fonds de carte) "
+               "se sélectionnent directement sur la carte, en haut à droite.")
+    if rows:
+        _stretch(st.dataframe, pd.DataFrame(rows).drop(columns=["_wind", "_cat"]), hide_index=True)
+    with st.expander("Sources et limites"):
+        st.markdown(
+            "- **Positions, vents, rafales, pression, déplacement, trajectoire** : NHC (Atlantique, Pacifique Est/Centre) et JTWC "
+            "(Pacifique Ouest, océan Indien, hémisphère Sud) via le service public Esri « Active Hurricanes ». Prévision officielle (trajectoire la plus probable).\n"
+            "- **Catégorie** : calculée à partir du vent soutenu maximal (échelle de Saffir-Simpson, nœuds) pour tous les bassins ; "
+            "les dépressions et tempêtes tropicales utilisent l'icône sans numéro.\n"
+            "- **Précipitations attendues** : modèle global Open-Meteo, valeur ponctuelle au centre (sous-estime les maxima des bandes pluvieuses). "
+            "**Précipitations observées** : NASA GIBS / IMERG (raster, mise à jour environ toutes les 30 min).\n"
+            "- Les données sont informatives et ne remplacent pas les bulletins officiels des centres de prévision.")
+    pts = _cyclone_risk_section(storms)
+    if pts is not None:
+        df_p, lat_c, lon_c, res = pts
+        src = res if res is not None else df_p
+        points, truncated = cm.build_points(src, lat_c, lon_c, storms, analysed=res is not None)
+        payload["points"] = points
+        payload["points_analysed"] = res is not None
+        if truncated:
+            st.caption("Carte : seuls les 5 000 premiers points sont tracés (les points impactés d'abord). Le CSV téléchargé les contient tous.")
+    with map_box:
+        components.html(cm.render_map_html(payload), height=720, scrolling=False)
+
+
+def _cyclone_risk_section(storms):
+    st.subheader("Croiser vos points avec les cyclones")
+    up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                          type=["csv", "txt", "xlsx"], key="cy_csv")
+    if up is None:
+        st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
+        return None
+    try:
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name)
+    except InputError as e:
+        st.error(str(e))
+        return None
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    radius = st.slider("Distance maximale à la trajectoire (km)", 10, 500, 150, step=10, key="cy_radius")
+    st.caption("Un point est « sur la trajectoire » s'il est à moins de cette distance de la ligne de trajectoire prévue "
+               "(position actuelle comprise). Ce n'est pas le rayon réel des vents, qui varie selon le cyclone.")
+    if not storms:
+        st.info("Aucun cyclone actif : tous les points auraient un impact de 0.")
+    if st.button("Analyser le risque", key="cy_analyse"):
+        with st.spinner("Croisement en cours…"):
+            st.session_state["cy_risk"] = cr.assess_points(df, lat_c, lon_c, storms, radius_km=float(radius))
+            st.session_state["cy_risk_sig"] = (up.name, len(df))
+    res = st.session_state.get("cy_risk")
+    if res is None or st.session_state.get("cy_risk_sig") != (up.name, len(df)):
+        return df, lat_c, lon_c, None
+    hit = res[res["impact"] > 0]
+    m = st.columns(3)
+    m[0].metric("Points analysés", len(res))
+    m[1].metric("Points sur la trajectoire", len(hit))
+    m[2].metric("Impact le plus proche", f"{int(hit['impact'].min())} h" if len(hit) else "—")
+    _stretch(st.dataframe, res, hide_index=True)
+    st.caption("impact : 0 = hors trajectoire, sinon échéance (12, 24… h) à laquelle le cyclone atteint le point. "
+               "max_sustained_winds et max_wind_gusts en km/h, total_precipitation en mm (cumul prévu au point jusqu'à 12 h après l'impact). "
+               "None = hors trajectoire ou donnée indisponible.")
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(res), "catmap_risque_cyclones.csv", "text/csv")
+    return df, lat_c, lon_c, res
+
+
+def page_temps_reel():
+    st.title("Temps réel")
+    t_cy, t_vg, t_eu = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France", "Vigilance Europe"])
+    with t_cy:
+        _cyclone_section()
+    with t_vg:
+        _vigilance_section()
+    with t_eu:
+        _europe_section()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_om_json(path: str):
+    s = get_settings()
+    return vg.fetch_path(vg.MeteoFranceAuth(s), s, path)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_om_zip(path: str):
+    s = get_settings()
+    return vg.fetch_path(vg.MeteoFranceAuth(s), s, path, binary=True)
+
+
+def _overseas_tables() -> tuple[pd.DataFrame, list[str]]:
+    """Table longue unique (colonne « territoire ») : Polynésie, Nouvelle-Calédonie et flux ZIP des autres DROM."""
+    frames, problems = [], []
+    for name, info in vg.OM_TERRITORIES.items():
+        try:
+            t = vg.parse_vigilance(_fetch_om_json(info["path"]), phenomena=vg.OM_PHENOMENA, include_domain_max=True)
+        except (vg.VigilanceError, vg.VigilanceFormatError) as e:
+            problems.append(f"{name} : {e}")
+            continue
+        t["territoire"] = name
+        frames.append(t)
+    try:
+        z = vg.parse_drom_zip(_fetch_om_zip(vg.OM_DROM_PATH))
+        if len(z):
+            frames.append(z)
+        else:
+            problems.append("Autres DROM : aucune donnée exploitable dans le flux.")
+    except vg.VigilanceError as e:
+        problems.append(f"Autres DROM : {e}")
+    if not frames:
+        return pd.DataFrame(columns=vg.COLUMNS + ["territoire"]), problems
+    return pd.concat(frames, ignore_index=True), problems
+
+
+def _overseas_section():
+    """Vigilance outre-mer : un indicateur et un repère coloré par territoire, détail par zone."""
+    import folium
+    from streamlit_folium import st_folium
+
+    st.subheader("Outre-mer")
+    table, problems = _overseas_tables()
+    for p in problems:
+        st.warning(p)
+    if table.empty:
+        return
+    summary = []
+    for terr, g in table.groupby("territoire"):
+        w = vg.worst_by_domain(g, None)
+        mx = int(w["couleur_id"].max()) if len(w) and w["couleur_id"].notna().any() else 0
+        summary.append((terr, mx, w))
+    summary.sort(key=lambda x: (-x[1], x[0]))
+    for i in range(0, len(summary), 5):
+        cols = st.columns(5)
+        for col, (terr, mx, _) in zip(cols, summary[i:i + 5]):
+            col.metric(terr, vg.COLORS.get(mx, "n/d"))
+
+    centers = dict(vg.OM_CENTERS)
+    view = st.selectbox("Zoom de la carte", list(centers), key="om_view")
+    zoom = vg.OM_TERRITORIES[view]["zoom"] if view in vg.OM_TERRITORIES else vg.OM_VIEWS.get(view, (None, 10))[1]
+    m = folium.Map(location=list(centers[view]), zoom_start=zoom, tiles=None, control_scale=True)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    for terr, mx, w in summary:
+        if terr not in centers:
+            continue
+        zones = "<br>".join(f"{html.escape(str(r.domaine))} : {html.escape(str(r.couleur))}"
+                            + (f" — {html.escape(r.phenomenes)}" if r.phenomenes else "") for r in w.itertuples())
+        folium.CircleMarker(list(centers[terr]), radius=16, color="#222", weight=2, fill=True, fill_opacity=0.85,
+                            fill_color=vg.COLOR_HEX.get(mx, "#999999"),
+                            popup=folium.Popup(f"<b>{html.escape(terr)}</b><br>{zones}", max_width=340),
+                            tooltip=f"{terr} : {vg.COLORS.get(mx, 'n/d')}").add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+    try:
+        st_folium(m, height=420, returned_objects=[], key=f"om_map_{view}", use_container_width=True)
+    except TypeError:
+        st_folium(m, height=420, width=1400, returned_objects=[], key=f"om_map_{view}")
+    with st.expander("Détail par zone"):
+        detail = pd.concat([w.assign(territoire=terr) for terr, _, w in summary], ignore_index=True)
+        detail = detail[["territoire", "domaine", "couleur", "phenomenes"]].rename(
+            columns={"domaine": "zone", "phenomenes": "phénomènes en alerte"})
+        _stretch(st.dataframe, detail, hide_index=True)
+
+
+def _vigilance_section():
+    st.subheader("Vigilance Météo-France")
+    df = _load_vigilance()
+    if df is None:
+        return
+    periodes = sorted(p for p in df["periode"].unique() if p) or [""]
+    per = st.selectbox("Échéance", periodes) if len(periodes) > 1 else periodes[0]
+    worst = vg.worst_by_domain(df, per or None)
+    n = worst["couleur_id"].value_counts()
+    c = st.columns(4)
+    for i, (cid, name) in enumerate(vg.COLORS.items()):
+        c[i].metric(name, int(n.get(cid, 0)))
+    try:
+        deps = get_departements()
+    except vg.VigilanceError as e:
+        st.warning(f"Carte indisponible : {e}")
+        deps = None
+    if deps is not None:
+        import folium
+        from streamlit_folium import st_folium
+        by_code = {}
+        for r in worst.itertuples():
+            by_code[str(r.domaine).strip().upper()] = r
+        def color_for(code: str):
+            for cand in vg._domain_candidates(code):
+                if cand in by_code:
+                    return vg.COLOR_HEX.get(int(by_code[cand].couleur_id), "#999999")
+            return "#cccccc"
+        m = folium.Map(location=[46.6, 2.5], zoom_start=6, tiles=None, control_scale=True)
+        esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+        folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+        folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+        folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+        folium.GeoJson(deps.geojson, style_function=lambda f: {
+            "fillColor": color_for(str((f.get("properties") or {}).get("code", ""))),
+            "color": "#333", "weight": 0.6, "fillOpacity": 0.65},
+            tooltip=folium.GeoJsonTooltip(fields=[k for k in ("nom", "code") if k in (deps.geojson["features"][0].get("properties") or {})])
+        ).add_to(m)
+        folium.LayerControl(collapsed=True).add_to(m)
+        try:
+            st_folium(m, height=560, returned_objects=[], key="vigilance_map", use_container_width=True)
+        except TypeError:  # anciennes versions de streamlit-folium
+            st_folium(m, height=560, width=1400, returned_objects=[], key="vigilance_map")
+    _stretch(st.dataframe, worst[worst["couleur_id"] >= 2].sort_values("couleur_id", ascending=False), hide_index=True)
+    with st.expander("Données brutes analysées"):
+        _stretch(st.dataframe, df, hide_index=True)
+    st.divider()
+    _overseas_section()
+    st.divider()
+    _vigilance_sites_section(df)
+
+
+def _vigilance_input(key: str = "vg_upload"):
+    """Source des sites : fichier chargé (export de la page Géolocalisation) sinon dernière géolocalisation de la session.
+    Retourne (df de travail, colonnes d'origine, est_un_fichier) ou None."""
+    up = st.file_uploader("Fichier de sites (CSV ou Excel téléchargé depuis la page Géolocalisation, recherche classique ou par périmètre)",
+                          type=["csv", "txt", "xlsx"], key=key)
+    res = st.session_state.get("result")
+    if up is None:
+        if res is not None and not res.sites.empty:
+            st.caption("Source : dernière géolocalisation de cette session. Chargez un fichier pour en utiliser un autre.")
+            return res.sites, list(res.sites.columns), False
+        st.info("Chargez un fichier de sites (export de la page « Géolocalisation ») ou lancez une géolocalisation : "
+                "les sites seront croisés avec la vigilance.")
+        return None
+    try:
+        raw, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name, reserved_check=False)
+    except InputError as e:
+        st.error(str(e))
+        return None
+    work = raw.copy()
+    work["lat"] = cr._to_float(raw[lat_c])
+    work["long"] = cr._to_float(raw[lon_c])
+    bad = int((work["lat"].isna() | work["long"].isna()).sum())
+    work = work.dropna(subset=["lat", "long"])
+    if bad:
+        st.warning(f"{bad} ligne(s) sans coordonnées valides ignorée(s).")
+    if work.empty:
+        st.error("Aucun point exploitable dans ce fichier.")
+        return None
+    cols = [c for c in raw.columns if c not in ("lat", "long")] if (lat_c, lon_c) != ("lat", "long") else list(raw.columns)
+    cols = list(raw.columns)
+    for c in ("name", "nom_demande", "pays", "naf_section"):          # colonnes attendues par la carte
+        if c not in work.columns:
+            work[c] = None
+    if work["name"].isna().all():
+        guess = next((c for c in raw.columns if c.lower() in cm.NAME_COLUMNS), None)
+        work["name"] = work[guess] if guess else ""
+    if "osm_url" not in work.columns:
+        work["osm_url"] = [f"https://www.openstreetmap.org/?mlat={la:.6f}&mlon={lo:.6f}#map=17/{la:.6f}/{lo:.6f}"
+                           for la, lo in zip(work["lat"], work["long"])]
+    if "match_score" not in work.columns:
+        work["match_score"] = None
+    st.caption(f"Source : fichier « {up.name} » ({len(work)} point(s) ; colonnes {lat_c} / {lon_c}).")
+    return work, cols, True
+
+
+def _vigilance_sites_section(df):
+    """Croise un fichier de sites (ou la dernière géolocalisation) avec la vigilance déjà chargée (``df``)."""
+    st.subheader("Sites exposés à la vigilance en cours")
+    src = _vigilance_input()
+    if src is None:
+        return
+    sites, orig_cols, from_file = src
+    try:
+        exp = vg.expose_sites(sites, df, get_departements())
+    except vg.VigilanceError as e:
+        st.error(str(e))
+        return
+    if "pays_iso2" in exp.columns and exp["pays_iso2"].notna().any():
+        fr = exp[exp["pays_iso2"] == "FR"]
+    else:                                  # fichier sans pays : on garde ce qui tombe dans un département français
+        fr = exp[exp["departement_code"].notna()]
+    alert = fr[fr["vigilance_couleur_id"].fillna(0) >= 3]
+    c = st.columns(3)
+    c[0].metric("Sites en France", len(fr))
+    c[1].metric("En vigilance orange ou rouge", len(alert))
+    c[2].metric("Hors France (non traités)", len(exp) - len(fr))
+    vcols = ["departement_code", "departement", "vigilance_couleur_id", "vigilance_couleur", "vigilance_phenomenes"]
+    if from_file:
+        full_cols = [c for c in orig_cols if c in exp.columns and c not in vcols] + vcols
+        cols = full_cols
+    else:
+        full_cols = [c for c in exp.columns]
+        cols = ["nom_demande", "name", "departement", "vigilance_couleur", "vigilance_phenomenes", "naf_section", "surface_m2", "osm_url"]
+    if alert.empty:
+        st.success("Aucun site en vigilance orange ou rouge.")
+    else:
+        _stretch(st.dataframe, alert[cols].sort_values("vigilance_couleur"), hide_index=True)
+        _site_map(alert)
+        st.download_button("Télécharger les sites en vigilance orange ou rouge (CSV)", _csv_bytes(alert[cols]),
+                           "catmap_sites_vigilance.csv", "text/csv")
+    st.download_button("Télécharger tous les sites avec leur vigilance (CSV)", _csv_bytes(exp[full_cols]),
+                       "catmap_sites_vigilance_complet.csv", "text/csv", key="vg_dl_all")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _geocodes_cached(url: str, local: str, uploaded: bytes | None):
+    """Contours des zones : fichier chargé > fichier du dépôt > adresse (secret) > couche GeoSphere. Les erreurs ne sont pas mises en cache."""
+    if uploaded:
+        return ma.load_geocodes_bytes(uploaded)
+    if local:
+        return ma.load_geocodes_bytes(Path(local).read_bytes())
+    if url and url.lower().split("?")[0].endswith(".json"):
+        return ma.load_geocodes_url(url)
+    return ma.load_geocodes(url=url or ma.GEOCODES_URL)
+
+
+def _load_geocodes(url: str, uploaded: bytes | None = None):
+    local = next((str(p) for p in (ASSETS.parent / "data" / "meteoalarm_geocodes_light.json.gz",
+                                   ASSETS.parent / "data" / "meteoalarm_geocodes.json",
+                                   ASSETS.parent / "data" / "meteoalarm_geocodes.json.gz") if p.exists()), "")
+    try:
+        return _geocodes_cached(url, local, uploaded), None
+    except (ma.MeteoAlarmError, OSError) as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, aliases_raw: bytes | None = None, _v: int = 7):
+    alerts, rings, errors = ma.fetch_all(slugs)
+    geo, geo_err = _load_geocodes(geo_url, uploaded)
+    if not alerts.empty:
+        rings, _ = ma.attach_geometry(alerts, rings, geo, ma.load_aliases(aliases_raw) if aliases_raw else None)
+    info = {}
+    if geo:
+        for code, (ctry, name, _r) in geo["by_code"].items():
+            e = info.setdefault(str(ctry), [0, []])
+            e[0] += 1
+            if len(e[1]) < 4:
+                e[1].append(f"{code} ({name})")
+    geo_info = pd.DataFrame([{"pays (fichier)": k, "zones": v[0], "exemples de codes": ", ".join(v[1])}
+                             for k, v in sorted(info.items())])
+    return alerts, rings, errors, geo_err, (len(geo["by_code"]) if geo else 0), geo_info
+
+
+def _aliases_bytes(uploaded) -> bytes | None:
+    if uploaded is not None:
+        return uploaded.getvalue()
+    p = ASSETS.parent / "data" / "meteoalarm_geocodes_aliases.csv"
+    try:
+        return p.read_bytes() if p.exists() else None
+    except OSError:
+        return None
+
+
+def _alert_popup(a) -> str:
+    def esc(x):
+        return html.escape(str(x or ""))
+    def fmt(d):
+        return pd.Timestamp(d).tz_convert("Europe/Paris").strftime("%d/%m/%Y %H:%M (Paris)") if d is not None and pd.notna(d) else "—"
+    col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
+    desc = esc(a["description"])[:700]
+    cons = esc(a["consigne"])[:500]
+    return (f"<div style='font:13px/1.4 sans-serif;max-width:340px'>"
+            f"<div style='background:{col};color:#fff;padding:4px 8px;border-radius:4px;font-weight:600'>"
+            f"{esc(a['type'])} · {esc(a['niveau'])}</div>"
+            f"<b>{esc(a['pays'])} — {esc(a['zone'])}</b><br>"
+            f"Début : {fmt(a['debut'])}<br>Fin : {fmt(a['fin'])}<br>"
+            f"Sévérité : {esc(a['severite'])} · Urgence : {esc(a['urgence'])} · Certitude : {esc(a['certitude'])}<br>"
+            + (f"<i>{esc(a['titre'])}</i><br>" if a["titre"] else "")
+            + (f"{desc}<br>" if desc else "") + (f"<b>Consigne :</b> {cons}<br>" if cons else "")
+            + f"<small>Émetteur : {esc(a['emetteur'])}</small></div>")
+
+
+def _europe_map(alerts, rings):
+    import folium
+    from streamlit_folium import st_folium
+    m = folium.Map(location=[50.0, 10.0], zoom_start=4, tiles=None, control_scale=True)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    grp = folium.FeatureGroup(name="Alertes par zone")
+    zones: dict = {}
+    for i in rings:                                   # une seule géométrie par zone (évite une page énorme)
+        a = alerts.iloc[i]
+        zones.setdefault((a["pays"], a["zone"]), []).append(i)
+    for idxs in zones.values():
+        idxs.sort(key=lambda i: -(alerts.iloc[i]["niveau_id"] or 0))
+        a = alerts.iloc[idxs[0]]
+        col = ma.LEVEL_HEX.get(int(a["niveau_id"]), "#999") if pd.notna(a["niveau_id"]) else "#999"
+        tip = f"{a['pays']} · {a['zone']} · " + ", ".join(f"{alerts.iloc[i]['type']} ({alerts.iloc[i]['niveau']})" for i in idxs[:4])
+        body = "<hr style='margin:6px 0'>".join(_alert_popup(alerts.iloc[i]) for i in idxs[:6])
+        geom = {"type": "MultiPolygon", "coordinates": [[[[round(float(x), 3), round(float(y), 3)] for x, y in r]] for r in rings[idxs[0]]]}
+        folium.GeoJson({"type": "Feature", "properties": {}, "geometry": geom},
+                       style_function=lambda f, c=col: {"fillColor": c, "color": "#222", "weight": 1, "fillOpacity": 0.55},
+                       tooltip=tip, popup=folium.Popup(folium.Html(body, script=True), max_width=380, max_height=380)).add_to(grp)
+    grp.add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+    try:
+        st_folium(m, height=600, returned_objects=[], key="europe_map", use_container_width=True)
+    except TypeError:
+        st_folium(m, height=600, width=1400, returned_objects=[], key="europe_map")
+
+
+def _europe_section():
+    st.subheader("Vigilance Europe (MeteoAlarm)")
+    st.caption("Alertes des services météo nationaux agrégées par MeteoAlarm (EUMETNET), licence CC BY 4.0. "
+               "Niveaux : jaune, orange, rouge. Les flux sont actualisés toutes les 3 minutes environ.")
+    if not hasattr(ma, "COUNTRIES") or not hasattr(ma, "diagnostic"):
+        st.error("Le fichier `catmap/meteoalarm.py` du dépôt n'est pas la dernière version (il manque `COUNTRIES` ou `diagnostic`). "
+                 "Remplacez-le par la version la plus récente envoyée, puis redéployez.")
+        return
+    labels = {k: v[0] for k, v in ma.COUNTRIES.items()}
+    default = ["france", "belgium", "luxembourg", "germany", "switzerland", "italy", "spain"]
+    chosen = list(labels)                  # tous les pays MeteoAlarm, à chaque fois
+    if st.button("Relancer la recherche", key="eu_refresh"):
+        _load_europe.clear()
+        _geocodes_cached.clear()
+    with st.expander("Contours des zones (avancé)"):
+        st.caption("Par défaut : couche publique GeoSphere. Pour utiliser le fichier officiel « Geocodes » (.json) du Redistribution Hub "
+                   "de MeteoAlarm, chargez-le ici, ou placez-le dans le dépôt sous `data/meteoalarm_geocodes_light.json.gz` (version allégée, voir `tools/slim_geocodes.py`).")
+        up_geo = st.file_uploader("Fichier Geocodes MeteoAlarm (.json)", type=["json"], key="eu_geo_up")
+        up_al = st.file_uploader("Fichier Geocodes Aliases (.csv) — sinon `data/meteoalarm_geocodes_aliases.csv` du dépôt",
+                                 type=["csv", "txt"], key="eu_al_up")
+    if not chosen:
+        st.info("Sélectionnez au moins un pays.")
+        return
+    with st.spinner("Lecture des flux MeteoAlarm…"):
+        alerts, rings, errors, geo_err, n_geo, geo_info = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
+                                                      up_geo.getvalue() if up_geo is not None else None, _aliases_bytes(up_al))
+    no_feed = {k: v for k, v in errors.items() if "404" in v}
+    real_err = {k: v for k, v in errors.items() if k not in no_feed}
+    if real_err:
+        st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in real_err.items()))
+    if no_feed:
+        st.caption("Pas de flux publié (en général : aucune alerte en cours) : " + ", ".join(no_feed) + ".")
+    with st.expander("Diagnostic par pays (flux, alertes lues, contours)"):
+        st.caption(f"Zones de contours chargées : {n_geo}.")
+        _stretch(st.dataframe, ma.diagnostic(alerts, chosen, errors, None if not n_geo else {}), hide_index=True)
+        st.markdown("**Codes de zones présents dans le fichier de contours**")
+        _stretch(st.dataframe, geo_info, hide_index=True)
+    if alerts.empty:
+        if not real_err:
+            st.success("Aucune alerte en cours.")
+        return
+    c1, c2, c3 = st.columns(3)
+    types = sorted(set(alerts["type"].dropna()))
+    sel_types = c1.multiselect("Types d'alerte", types, default=types, key="eu_types")
+    min_level = c2.selectbox("Niveau minimal", [1, 2, 3, 4], index=1, format_func=lambda i: ma.LEVELS[i], key="eu_level")
+    d0 = pd.Timestamp.now(tz="Europe/Paris").normalize()
+    jours = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."]
+    labels_p = {"Maintenant": "Maintenant", "Prochaines 24h": "Prochaines 24h", "J": "Aujourd'hui"}
+    for k in range(1, 5):
+        dd = d0 + pd.Timedelta(days=k)
+        labels_p[f"J+{k}"] = f"J+{k} ({jours[dd.weekday()]} {dd:%d/%m})"
+    labels_p["Toutes"] = "Toutes"
+    day = c3.selectbox("Période", list(labels_p), index=2, format_func=lambda k: labels_p[k], key="eu_day2")
+    now = pd.Timestamp.now(tz="Europe/Paris")
+    if day == "Toutes":
+        win = None
+    elif day == "Maintenant":
+        win = (now, now)
+    elif day == "Prochaines 24h":
+        win = (now, now + pd.Timedelta(hours=24))
+    else:
+        k = 0 if day == "J" else int(day[2:])
+        win = (d0 + pd.Timedelta(days=k), d0 + pd.Timedelta(days=k + 1))
+    if win is None:
+        in_win = pd.Series(True, index=alerts.index)
+    else:                                  # l'alerte chevauche la période (heure de Paris) ; fin inconnue = toujours valable
+        deb = pd.to_datetime(alerts["debut"], utc=True, errors="coerce")
+        fin = pd.to_datetime(alerts["fin"], utc=True, errors="coerce")
+        in_win = (deb.isna() | (deb < win[1])) & (fin.isna() | (fin >= win[0]))
+    base = alerts[alerts["type"].isin(sel_types) & in_win]
+    view = base[base["niveau_id"].fillna(0) >= min_level]
+    n = base["niveau_id"].value_counts()
+    st.caption("Heures affichées : Paris. La carte montre, pour chaque zone, l'alerte la plus forte de la période choisie.")
+    c = st.columns(4)
+    for i, name in ma.LEVELS.items():
+        c[i - 1].metric(name, int(n.get(i, 0)))
+    keep_idx = set(view.index)
+    shown = {i: r for i, r in rings.items() if i in keep_idx}
+    _europe_map(alerts, shown)
+    missing = view[~view.index.isin(shown)]
+    if geo_err:
+        st.warning(f"Contours des zones indisponibles ({geo_err}) : seules les alertes dont le flux contient déjà un polygone sont dessinées.")
+    if len(missing):
+        with st.expander(f"{len(missing)} alerte(s) non dessinée(s) (contour de zone introuvable)"):
+            _stretch(st.dataframe, ma.coverage(alerts), hide_index=True)
+            _stretch(st.dataframe, missing[["pays", "zone", "codes_zone", "niveau", "type"]], hide_index=True)
+    view = view.copy()
+    for c_ in ("debut", "fin", "emis"):
+        view[c_] = pd.to_datetime(view[c_], utc=True, errors="coerce").dt.tz_convert("Europe/Paris").dt.strftime("%d/%m/%Y %H:%M")
+    show = view.sort_values(["niveau_id", "pays"], ascending=[False, True])
+    cols = ["pays", "niveau", "niveau_brut", "type", "debut", "fin", "zone", "severite", "urgence", "certitude", "titre", "emetteur"]
+    st.markdown("**Alertes en cours**")
+    cols = [c_ for c_ in cols if c_ in show.columns]
+    _stretch(st.dataframe, show[cols].rename(columns={"debut": "début", "severite": "sévérité", "certitude": "certitude"}), hide_index=True)
+    with st.expander("Détail des consignes et données brutes analysées"):
+        _stretch(st.dataframe, view.drop(columns=["niveau_id", "type_id"]), hide_index=True)
+    st.download_button("Télécharger les alertes (CSV)", _csv_bytes(view), "catmap_vigilance_europe.csv", "text/csv", key="eu_dl")
+    st.divider()
+    _europe_sites_section(alerts, rings, set(base.index))
+
+
+def _europe_sites_section(alerts, rings, active=None):
+    st.subheader("Sites exposés aux alertes MeteoAlarm")
+    src = _vigilance_input(key="eu_upload")
+    if src is None:
+        return
+    sites, orig_cols, from_file = src
+    exp = sites.reset_index(drop=True).copy()
+    rings = {i: r for i, r in rings.items() if active is None or i in active}
+    res = ma.expose_points(exp["lat"].to_numpy(float), exp["long"].to_numpy(float), alerts, rings, min_level=2)
+    for col in res.columns:
+        exp[col] = res[col].values
+    hit = exp[exp["europe_niveau_id"].notna()]
+    orange = hit[hit["europe_niveau_id"] >= 3]
+    nocontour = sorted(set(alerts[~alerts["avec_contour"]]["pays"]))
+    c = st.columns(3)
+    c[0].metric("Sites analysés", len(exp))
+    c[1].metric("En alerte jaune ou plus", len(hit))
+    c[2].metric("En alerte orange ou rouge", len(orange))
+    if nocontour:
+        st.caption("Pays dont le flux ne fournit pas de contour (non croisés avec vos sites) : " + ", ".join(nocontour) + ".")
+    ecols = list(res.columns)
+    base = [x for x in orig_cols if x in exp.columns] if from_file else [x for x in ("nom_demande", "name", "naf_section", "surface_m2", "osm_url") if x in exp.columns]
+    cols = base + ecols
+    if orange.empty:
+        st.success("Aucun site en alerte orange ou rouge.")
+    else:
+        _stretch(st.dataframe, orange[cols].sort_values("europe_niveau_id", ascending=False), hide_index=True)
+        _site_map(orange)
+    st.download_button("Télécharger tous les sites avec leurs alertes (CSV)", _csv_bytes(exp[cols]),
+                       "catmap_sites_vigilance_europe.csv", "text/csv", key="eu_dl_sites")
+
+
+# --------------------------------------------------------------------------
+PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel}
+
+
+def main():
+    st.set_page_config(page_title="CatMap Risk", page_icon=str(ASSETS / "Logo_CatMapV2.png"), layout="wide")
+    css = ASSETS / "styles.css"
+    if css.exists():
+        st.markdown(f"<style>{css.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+    with st.sidebar:
+        logo = ASSETS / "Logo_CatMapV2.png"
+        if logo.exists():
+            st.image(str(logo))
+        page = st.radio("Navigation", list(PAGES), label_visibility="collapsed")
+        sm = ASSETS / "SquareManagement.png"
+        if sm.exists():
+            st.image(str(sm))
+    PAGES[page]()
+
+
+if __name__ == "__main__":
+    main()
