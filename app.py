@@ -1038,21 +1038,31 @@ def _vigilance_sites_section(df):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _geocodes_cached(url: str):
-    return ma.load_geocodes(url=url or ma.GEOCODES_URL)       # une erreur n'est jamais mise en cache
+def _geocodes_cached(url: str, local: str, uploaded: bytes | None):
+    """Contours des zones : fichier chargé > fichier du dépôt > adresse (secret) > couche GeoSphere. Les erreurs ne sont pas mises en cache."""
+    if uploaded:
+        return ma.load_geocodes_bytes(uploaded)
+    if local:
+        return ma.load_geocodes_bytes(Path(local).read_bytes())
+    if url and url.lower().split("?")[0].endswith(".json"):
+        return ma.load_geocodes_url(url)
+    return ma.load_geocodes(url=url or ma.GEOCODES_URL)
 
 
-def _load_geocodes(url: str):
+def _load_geocodes(url: str, uploaded: bytes | None = None):
+    local = next((str(p) for p in (ASSETS.parent / "data" / "meteoalarm_geocodes_light.json.gz",
+                                   ASSETS.parent / "data" / "meteoalarm_geocodes.json",
+                                   ASSETS.parent / "data" / "meteoalarm_geocodes.json.gz") if p.exists()), "")
     try:
-        return _geocodes_cached(url), None
-    except ma.MeteoAlarmError as e:
+        return _geocodes_cached(url, local, uploaded), None
+    except (ma.MeteoAlarmError, OSError) as e:
         return None, str(e)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_europe(slugs: tuple, geo_url: str, _v: int = 3):
+def _load_europe(slugs: tuple, geo_url: str, uploaded: bytes | None = None, _v: int = 4):
     alerts, rings, errors = ma.fetch_all(slugs)
-    geo, geo_err = _load_geocodes(geo_url)
+    geo, geo_err = _load_geocodes(geo_url, uploaded)
     if not alerts.empty:
         rings, _ = ma.attach_geometry(alerts, rings, geo)
     return alerts, rings, errors, geo_err
@@ -1118,11 +1128,16 @@ def _europe_section():
     if st.button("Relancer la recherche", key="eu_refresh"):
         _load_europe.clear()
         _geocodes_cached.clear()
+    with st.expander("Contours des zones (avancé)"):
+        st.caption("Par défaut : couche publique GeoSphere. Pour utiliser le fichier officiel « Geocodes » (.json) du Redistribution Hub "
+                   "de MeteoAlarm, chargez-le ici, ou placez-le dans le dépôt sous `data/meteoalarm_geocodes_light.json.gz` (version allégée, voir `tools/slim_geocodes.py`).")
+        up_geo = st.file_uploader("Fichier Geocodes MeteoAlarm (.json)", type=["json"], key="eu_geo_up")
     if not chosen:
         st.info("Sélectionnez au moins un pays.")
         return
     with st.spinner("Lecture des flux MeteoAlarm…"):
-        alerts, rings, errors, geo_err = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")))
+        alerts, rings, errors, geo_err = _load_europe(tuple(sorted(chosen)), str(_secrets().get("meteoalarm_geocodes_url", "")),
+                                                      up_geo.getvalue() if up_geo is not None else None)
     if errors:
         st.warning("Pays indisponibles : " + " ; ".join(f"{k} ({v})" for k, v in errors.items()))
     if alerts.empty:
@@ -1166,6 +1181,7 @@ def _europe_section():
         st.warning(f"Contours des zones indisponibles ({geo_err}) : seules les alertes dont le flux contient déjà un polygone sont dessinées.")
     if len(missing):
         with st.expander(f"{len(missing)} alerte(s) non dessinée(s) (contour de zone introuvable)"):
+            _stretch(st.dataframe, ma.coverage(alerts), hide_index=True)
             _stretch(st.dataframe, missing[["pays", "zone", "codes_zone", "niveau", "type"]], hide_index=True)
     view = view.copy()
     for c_ in ("debut", "fin", "emis"):
