@@ -1050,7 +1050,7 @@ def _load_geocodes(url: str):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_europe(slugs: tuple, geo_url: str):
+def _load_europe(slugs: tuple, geo_url: str, _v: int = 3):
     alerts, rings, errors = ma.fetch_all(slugs)
     geo, geo_err = _load_geocodes(geo_url)
     if not alerts.empty:
@@ -1133,11 +1133,13 @@ def _europe_section():
     types = sorted(set(alerts["type"].dropna()))
     sel_types = c1.multiselect("Types d'alerte", types, default=types, key="eu_types")
     min_level = c2.selectbox("Niveau minimal", [1, 2, 3, 4], index=1, format_func=lambda i: ma.LEVELS[i], key="eu_level")
-    day = c3.selectbox("Période", ["Aujourd'hui", "Demain", "Après-demain", "En ce moment", "Toutes"], key="eu_day")
+    day = c3.selectbox("Période", ["Aujourd'hui", "Demain", "Après-demain", "Prochaines 24 h", "En ce moment", "Toutes"], key="eu_day")
     now = pd.Timestamp.now(tz="Europe/Paris")
     d0 = now.normalize()
     if day == "Toutes":
         win = None
+    elif day == "Prochaines 24 h":
+        win = (now, now + pd.Timedelta(hours=24))
     elif day == "En ce moment":
         win = (now, now)
     else:
@@ -1171,6 +1173,7 @@ def _europe_section():
     show = view.sort_values(["niveau_id", "pays"], ascending=[False, True])
     cols = ["pays", "niveau", "niveau_brut", "type", "debut", "fin", "zone", "severite", "urgence", "certitude", "titre", "emetteur"]
     st.markdown("**Alertes en cours**")
+    cols = [c_ for c_ in cols if c_ in show.columns]
     _stretch(st.dataframe, show[cols].rename(columns={"debut": "début", "severite": "sévérité", "certitude": "certitude"}), hide_index=True)
     with st.expander("Détail des consignes et données brutes analysées"):
         _stretch(st.dataframe, view.drop(columns=["niveau_id", "type_id"]), hide_index=True)
