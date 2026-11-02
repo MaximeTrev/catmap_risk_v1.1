@@ -732,24 +732,36 @@ def _sc_auto_search(client: str):
     if not client:
         st.info("Renseignez d'abord le nom du client.")
         return
-    st.caption("1) Recherche des documents publics (listes de fournisseurs, rapports) et lecture de leurs tableaux. "
-               "2) Facultatif : extraction par l'IA de Linkup, qui lit les documents, y compris en texte libre, et propose "
-               "des fournisseurs avec leur source et une citation.")
-    use_ai = st.checkbox("Extraction par IA (Linkup) : consomme des crédits Linkup (environ 0,06 $ par recherche)", False, key="sc_use_ai",
-                         help="**Principe** : un modèle de langage cherche sur le web et extrait les fournisseurs en texte libre "
-                              "(rapports RSE, rapports annuels).\n\n**Coût** : environ 0,055 $ par recherche, en plus de la "
-                              "recherche de documents (environ 0,02 $). Décoché : seule la recherche de documents est utilisée.\n\n"
-                              "**Fiabilité** : chaque ligne est marquée « citation vérifiée » (confiance C) si la citation est "
-                              "retrouvée mot pour mot dans la page source, sinon « à vérifier » (confiance D).")
-    if st.button("Lancer la recherche automatique", type="primary", key="sc_auto_run"):
+    use_docs = _checkbox_with_help(
+        "Recherche de documents",
+        "**Ce qui est extrait** : des adresses de documents publics (pages web, PDF) susceptibles de contenir une liste de "
+        "fournisseurs, puis les tableaux qu'ils contiennent (nom du fournisseur, pays).\n\n"
+        "**Comment** : 4 recherches Linkup (liste de fournisseurs, usines, version française, rapport de durabilité). "
+        "L'application télécharge les 8 meilleurs résultats et détecte leurs tableaux, sans modèle de langage. Les documents "
+        "sans tableau ne sont pas analysés.\n\n"
+        "**Coût** : environ 0,02 $ par recherche (4 requêtes à 0,005 $), prélevé sur vos crédits Linkup.",
+        key="sc_use_docs", value=True, wide=True)
+    use_ai = _checkbox_with_help(
+        "Extraction par IA",
+        "Utilisation de Linkup : consomme des crédits (environ 0,06 $ par recherche)\n\n"
+        "**Ce qui est extrait** : les fournisseurs, fabricants et sous-traitants déclarés publiquement, avec pays, type de "
+        "relation, rang, adresse de la source et citation.\n\n"
+        "**Comment** : un modèle de langage de Linkup cherche sur le web (plusieurs langues), lit les documents, y compris en "
+        "texte libre (rapports RSE, rapports annuels), et renvoie une liste structurée. L'application vérifie ensuite chaque "
+        "citation dans la page source : retrouvée mot pour mot = confiance C, sinon D (à vérifier).\n\n"
+        "**Coût** : environ 0,055 $ par recherche (profondeur « deep »).",
+        key="sc_use_ai", value=False, wide=True)
+    if st.button("Lancer la recherche automatique", type="primary", key="sc_auto_run", disabled=not (use_docs or use_ai)):
         st.session_state.pop("sc_ai", None)
+        st.session_state.pop("sc_found", None)
         try:
-            with st.spinner("Recherche des documents…"):
-                found = ws.rank(ws.search_documents(ws.build_queries(client), key), client)
-            with st.spinner(f"Lecture de {len(found)} document(s)…"):
-                res = sp.analyse_urls([f["url"] for f in found])
-            by_url = {r["url"]: r for r in res}
-            st.session_state["sc_found"] = {"client": client, "docs": [dict(f, **{k: by_url[f["url"]][k] for k in ("tables", "error")}) for f in found]}
+            if use_docs:
+                with st.spinner("Recherche des documents…"):
+                    found = ws.rank(ws.search_documents(ws.build_queries(client), key), client)
+                with st.spinner(f"Lecture de {len(found)} document(s)…"):
+                    res = sp.analyse_urls([f["url"] for f in found])
+                by_url = {r["url"]: r for r in res}
+                st.session_state["sc_found"] = {"client": client, "docs": [dict(f, **{k: by_url[f["url"]][k] for k in ("tables", "error")}) for f in found]}
             if use_ai:
                 with st.spinner("Extraction par l'IA de Linkup (jusqu'à 1 à 2 minutes)…"):
                     items = ws.extract_suppliers(client, key)
