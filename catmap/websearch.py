@@ -31,7 +31,8 @@ SUPPLIER_SCHEMA = {
                 "properties": {
                     "name": {"type": "string", "description": "Nom de l'entreprise fournisseur"},
                     "country": {"type": "string", "description": "Pays du fournisseur ou du site, si connu"},
-                    "relation": {"type": "string", "description": "fournisseur direct, fabricant, sous-traitant, matières premières, logistique ou autre"},
+                    "relation": {"type": "string", "enum": ["fournisseur direct", "fabricant", "sous-traitant", "matières premières", "logistique", "autre"],
+                                 "description": "Nature de la relation (une seule valeur de la liste)"},
                     "tier": {"type": "string", "description": "1 pour un fournisseur direct, 2 ou plus pour un fournisseur de fournisseur"},
                     "source_url": {"type": "string", "description": "Adresse exacte de la page ou du document consulté"},
                     "quote": {"type": "string", "description": "Citation exacte, mot pour mot, du document qui justifie la relation"},
@@ -102,12 +103,24 @@ def search_documents(queries: list[str], key: str, *, session=None, max_results:
     return list(seen.values())
 
 
-def extract_suppliers(client: str, key: str, *, session=None, depth: str = "deep") -> list[dict]:
+FOCUS = {
+    "production": "Production : usines, fabricants, matières premières",
+    "all": "Tous les fournisseurs (y compris logistique, services, informatique)",
+}
+
+
+def extract_suppliers(client: str, key: str, *, session=None, depth: str = "deep", focus: str = "production") -> list[dict]:
     """Extraction structurée par l'IA de Linkup : [{name, country, relation, tier, source_url, quote}]."""
-    q = (f"Find the suppliers, manufacturers and subcontractors that {client.strip()} publicly declares: official supplier "
-         "lists, sustainability / ESG / annual reports, sourcing disclosures. Search in several languages. Only include "
-         "companies explicitly described as suppliers of that company in a source you consulted, with the exact URL and a "
-         "verbatim quote. Do not include customers, competitors or subsidiaries. Do not invent anything.")
+    scope = ("Only include companies that supply products, components, raw materials or manufacturing capacity "
+             "(factories, manufacturers, subcontract producers, raw material suppliers). EXCLUDE software, IT, recruitment, "
+             "marketing, consulting and other service providers. "
+             if focus == "production" else
+             "Include suppliers of products, components, raw materials, manufacturing, logistics and services. ")
+    q = (f"List as many as possible (up to 100) of the suppliers that {client.strip()} publicly declares: official supplier "
+         "lists (often published as PDF or Excel on the company's website), sustainability / ESG / annual reports, sourcing "
+         "disclosures, factory lists. Search in several languages. " + scope +
+         "Only include companies explicitly named as suppliers of that company in a source you consulted, with the exact URL "
+         "and a verbatim quote from it. Do not include customers, competitors or subsidiaries. Do not invent anything.")
     data = _call({"q": q, "depth": depth, "outputType": "structured",
                   "structuredOutputSchema": json.dumps(SUPPLIER_SCHEMA)}, key, session, timeout=120.0)
     if isinstance(data, dict) and "suppliers" not in data:           # certaines enveloppes possibles : data / result / output
