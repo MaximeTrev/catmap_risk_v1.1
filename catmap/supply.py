@@ -387,3 +387,82 @@ def not_found(report: pd.DataFrame, cands: pd.DataFrame, client: str) -> pd.Data
     out = out.merge(c.drop_duplicates("_k")[["_k", "pays", "type_relation", "confiance", "source_url"]], on="_k", how="left").drop(columns="_k")
     out.insert(0, "client", client)
     return out
+
+
+# --------------------------------------------------------------------------- analyse automatique de documents trouvés
+def useful_tables(tables: list[tuple[str, pd.DataFrame]], min_rows: int = 5) -> list[tuple[str, pd.DataFrame]]:
+    """Tableaux qui ressemblent à une liste de fournisseurs : une colonne de noms et au moins ``min_rows`` lignes."""
+    out = []
+    for label, df in tables:
+        if len(df) < min_rows:
+            continue
+        name, _ = guess_columns(df)
+        if name is not None:
+            out.append((label, df))
+    return out
+
+
+def analyse_urls(urls: list[str], *, workers: int = 4) -> list[dict]:
+    """Télécharge et analyse plusieurs documents en parallèle. Ne lève jamais : chaque résultat porte son erreur."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(url):
+        try:
+            data, mime = fetch_url(url, timeout=30)
+            name = urlparse(url).path.rsplit("/", 1)[-1]
+            return {"url": url, "tables": useful_tables(tables_from_bytes(data, name, mime)), "error": ""}
+        except SupplyError as e:
+            return {"url": url, "tables": [], "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"url": url, "tables": [], "error": f"{type(e).__name__}"}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(urls) or 1))) as ex:
+        return list(ex.map(one, urls))
+
+
+# --------------------------------------------------------------------------- IA : conversion et vérification des citations
+def _squash(t: str) -> str:
+    t = unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+def page_text(data: bytes, name: str = "", mime: str = "") -> str:
+    """Texte brut d'un document (PDF ou HTML) pour vérifier une citation."""
+    low = (name or "").lower()
+    if data[:4] == b"%PDF" or low.endswith(".pdf") or "pdf" in mime:
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                return "\n".join((p.extract_text() or "") for p in pdf.pages[:200])
+        except Exception:  # noqa: BLE001
+            return ""
+    text = data.decode("utf-8", "ignore")
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+    return re.sub(r"<[^>]+>", " ", text)
+
+
+def candidates_from_ai(items: list[dict], *, verify: bool = True, source: str = "IA Linkup") -> pd.DataFrame:
+    """Convertit les fournisseurs extraits par l'IA. Confiance C si la citation est retrouvée mot pour mot dans la page
+    source, D sinon (page illisible, citation absente ou inventée)."""
+    rows = []
+    texts: dict[str, str] = {}
+    urls = list(dict.fromkeys(str(i.get("source_url") or "") for i in items if str(i.get("source_url") or "").startswith("http")))
+    if verify and urls:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def grab(u):
+            try:
+                data, mime = fetch_url(u, timeout=30)
+                return u, _squash(page_text(data, urlparse(u).path.rsplit("/", 1)[-1], mime))
+            except Exception:  # noqa: BLE001
+                return u, ""
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            texts = dict(ex.map(grab, urls[:12]))
+    for i in items:
+        url = str(i.get("source_url") or "")
+        quote = str(i.get("quote") or "")
+        ok = bool(verify and quote and texts.get(url) and _squash(quote)[:90] in texts[url])
+        rows.append({"fournisseur": str(i.get("name") or "").strip(), "pays": str(i.get("country") or "").strip(),
+                     "type_relation": str(i.get("relation") or "").strip(), "rang": str(i.get("tier") or "").strip(),
+                     "source": source + (" (citation vérifiée)" if ok else " (à vérifier)"),
+                     "source_url": url if url.startswith("http") else "", "citation": quote, "confiance": "C" if ok else "D"})
+    return pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
