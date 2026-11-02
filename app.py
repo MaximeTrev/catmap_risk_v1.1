@@ -37,6 +37,7 @@ from catmap import cyclones as cy
 from catmap import vigilance as vg
 from catmap import meteoalarm as ma
 from catmap import supply as sp
+from catmap import websearch as ws
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -687,27 +688,111 @@ def _sc_table_source(src: str):
                 st.session_state.pop("sc_tables", None)
                 st.error(str(e))
     info = st.session_state.get("sc_tables")
-    if not info:
-        return
+    if info:
+        _sc_pick_table(info, "sc")
+
+
+def _sc_pick_table(info: dict, kp: str, official_default: bool = True):
+    """Choix d'un tableau détecté, de ses colonnes, puis ajout à la liste des fournisseurs."""
     if not info["tables"]:
         st.warning("Aucun tableau détecté dans ce document. Si la liste est dans du texte libre, utilisez le mode assisté.")
         return
     labels = [t[0] for t in info["tables"]]
-    pick = st.selectbox("Tableau à utiliser", labels, key="sc_table_pick")
+    pick = st.selectbox("Tableau à utiliser", labels, key=f"{kp}_table_pick")
     df = info["tables"][labels.index(pick)][1]
     _stretch(st.dataframe, df.head(8), hide_index=True)
     g_name, g_country = sp.guess_columns(df)
     cols = list(df.columns)
     c1, c2 = st.columns(2)
     name_col = c1.selectbox("Colonne du nom du fournisseur", cols, index=cols.index(g_name) if g_name in cols else 0,
-                            key=f"sc_namecol_{pick}")
+                            key=f"{kp}_namecol_{pick}")
     country_col = c2.selectbox("Colonne du pays (facultatif)", ["(aucune)"] + cols,
-                               index=(cols.index(g_country) + 1) if g_country in cols else 0, key=f"sc_ctrcol_{pick}")
-    official = st.checkbox("Ce document est la liste de fournisseurs publiée par l'entreprise elle-même", True, key="sc_official",
-                           help="Coché : confiance A. Décoché : confiance C (source tierce).")
-    if st.button("Ajouter ces fournisseurs à la liste", key="sc_add_tbl"):
+                               index=(cols.index(g_country) + 1) if g_country in cols else 0, key=f"{kp}_ctrcol_{pick}")
+    official = st.checkbox("Ce document est la liste de fournisseurs publiée par l'entreprise elle-même", official_default,
+                           key=f"{kp}_official", help="Coché : confiance A. Décoché : confiance C (source tierce).")
+    if st.button("Ajouter ces fournisseurs à la liste", key=f"{kp}_add_tbl"):
         _sc_add(sp.candidates_from_table(df, name_col, None if country_col == "(aucune)" else country_col,
                                          source=info["label"][:120], source_url=info["url"], confiance="A" if official else "C"))
+
+
+def _search_key() -> str:
+    import os
+    sec = _secrets()
+    return (os.environ.get("LINKUP_API_KEY") or str(sec.get("LINKUP_API_KEY") or sec.get("linkup_api_key") or "")).strip()
+
+
+def _sc_auto_search(client: str):
+    key = _search_key()
+    if not key:
+        st.info("La recherche automatique utilise Linkup (linkup.so). Créez un compte, copiez votre clé d'API et ajoutez-la dans "
+                "les secrets Streamlit sous `LINKUP_API_KEY`. D'après leur documentation, les comptes créés avec une adresse "
+                "professionnelle reçoivent 20 $ de crédit par mois (à vérifier). En attendant, utilisez l'adresse web, le "
+                "fichier ou le mode assisté.")
+        return
+    if not client:
+        st.info("Renseignez d'abord le nom du client.")
+        return
+    st.caption("1) Recherche des documents publics (listes de fournisseurs, rapports) et lecture de leurs tableaux. "
+               "2) Facultatif : extraction par l'IA de Linkup, qui lit les documents, y compris en texte libre, et propose "
+               "des fournisseurs avec leur source et une citation.")
+    use_ai = st.checkbox("Extraction par IA (Linkup) : consomme des crédits Linkup (environ 0,06 $ par recherche)", False, key="sc_use_ai",
+                         help="**Principe** : un modèle de langage cherche sur le web et extrait les fournisseurs en texte libre "
+                              "(rapports RSE, rapports annuels).\n\n**Coût** : environ 0,055 $ par recherche, en plus de la "
+                              "recherche de documents (environ 0,02 $). Décoché : seule la recherche de documents est utilisée.\n\n"
+                              "**Fiabilité** : chaque ligne est marquée « citation vérifiée » (confiance C) si la citation est "
+                              "retrouvée mot pour mot dans la page source, sinon « à vérifier » (confiance D).")
+    if st.button("Lancer la recherche automatique", type="primary", key="sc_auto_run"):
+        st.session_state.pop("sc_ai", None)
+        try:
+            with st.spinner("Recherche des documents…"):
+                found = ws.rank(ws.search_documents(ws.build_queries(client), key), client)
+            with st.spinner(f"Lecture de {len(found)} document(s)…"):
+                res = sp.analyse_urls([f["url"] for f in found])
+            by_url = {r["url"]: r for r in res}
+            st.session_state["sc_found"] = {"client": client, "docs": [dict(f, **{k: by_url[f["url"]][k] for k in ("tables", "error")}) for f in found]}
+            if use_ai:
+                with st.spinner("Extraction par l'IA de Linkup (jusqu'à 1 à 2 minutes)…"):
+                    items = ws.extract_suppliers(client, key)
+                with st.spinner("Vérification des citations…"):
+                    st.session_state["sc_ai"] = {"client": client, "df": sp.candidates_from_ai(items)}
+        except ws.SearchError as e:
+            st.error(str(e))
+    ai = st.session_state.get("sc_ai")
+    if ai and ai["client"] == client:
+        df = ai["df"]
+        st.markdown(f"**Propositions de l'IA : {len(df)} fournisseur(s)** "
+                    f"({int((df['confiance'] == 'C').sum())} avec citation vérifiée, les autres à vérifier).")
+        if df.empty:
+            st.info("L'IA n'a trouvé aucun fournisseur déclaré publiquement.")
+        else:
+            ed = df.copy()
+            ed.insert(0, "garder", df["confiance"] == "C")
+            edited = st.data_editor(ed, hide_index=True, key="sc_ai_editor", disabled=[c for c in ed.columns if c != "garder"],
+                                    column_config={"source_url": st.column_config.LinkColumn("source_url")})
+            if st.button("Ajouter la sélection à la liste", key="sc_ai_add"):
+                _sc_add(df[edited["garder"].to_numpy()])
+                st.success("Ajouté à la liste ci-dessous.")
+    fd = st.session_state.get("sc_found")
+    if not fd or fd["client"] != client:
+        return
+    docs = fd["docs"]
+    if not docs:
+        st.warning("Aucun document trouvé.")
+        return
+    with_tables = [d for d in docs if d["tables"]]
+    st.markdown(f"**{len(docs)} document(s) trouvé(s), dont {len(with_tables)} avec une liste exploitable.**")
+    for i, d in enumerate(docs):
+        title = f"{'✅' if d['tables'] else '⚪'} {d['title']}"
+        with st.expander(title, expanded=bool(d["tables"]) and i == 0):
+            st.markdown(f"[{d['url']}]({d['url']})")
+            if d["snippet"]:
+                st.caption(d["snippet"])
+            if d["error"]:
+                st.warning(f"Lecture impossible : {d['error']}")
+            elif not d["tables"]:
+                st.caption("Aucun tableau de fournisseurs détecté dans ce document.")
+            else:
+                _sc_pick_table({"label": d["title"], "url": d["url"], "tables": d["tables"]}, f"sc_auto{i}", official_default=False)
 
 
 def urlparse_name(url: str) -> str:
@@ -716,17 +801,16 @@ def urlparse_name(url: str) -> str:
 
 
 def _tab_supply_chain():
-    st.markdown(
-        "Recense les **fournisseurs d'une entreprise** (le « client »), puis les géolocalise comme dans l'onglet précédent "
-        "(recherche par nom sur OpenStreetMap). Le fichier produit est identique au fichier de géolocalisation, avec la "
-        "colonne **client** en première position et la qualification de chaque relation.")
     st.caption("Seuls les fournisseurs déclarés publiquement peuvent être recensés ; une chaîne d'approvisionnement complète n'est "
                "jamais publique. Les usines hors d'Europe sont souvent absentes d'OpenStreetMap : elles figurent alors dans la liste « non trouvés ».")
     client = st.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
     src = st.radio("Source des noms de fournisseurs",
-                   ["Adresse web (page ou PDF)", "Fichier", "Mode assisté (Claude / ChatGPT)", "Saisie manuelle"],
+                   ["Recherche automatique sur internet", "Adresse web (page ou PDF)", "Fichier",
+                    "Mode assisté (Claude / ChatGPT)", "Saisie manuelle"],
                    horizontal=True, key="sc_src")
-    if src in ("Adresse web (page ou PDF)", "Fichier"):
+    if src == "Recherche automatique sur internet":
+        _sc_auto_search(client.strip())
+    elif src in ("Adresse web (page ou PDF)", "Fichier"):
         _sc_table_source(src)
     elif src == "Mode assisté (Claude / ChatGPT)":
         st.caption("Gratuit : l'application prépare la consigne, vous la collez dans Claude ou ChatGPT (avec recherche web), puis "
