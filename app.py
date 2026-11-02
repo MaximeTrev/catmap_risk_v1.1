@@ -36,6 +36,7 @@ from catmap import cyclone_risk as cr
 from catmap import cyclones as cy
 from catmap import vigilance as vg
 from catmap import meteoalarm as ma
+from catmap import supply as sp
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -146,7 +147,7 @@ def _popup_html(row: pd.Series) -> str:
 _COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
 
 
-def _site_map(df: pd.DataFrame, area: dict | None = None):
+def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = ""):
     """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
     import folium
     from folium.plugins import Fullscreen, MarkerCluster
@@ -157,9 +158,9 @@ def _site_map(df: pd.DataFrame, area: dict | None = None):
         st.info("Aucun site à afficher.")
         return
     c1, c2 = st.columns([2, 1])
-    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key="map_color",
+    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key=f"{kp}map_color",
                           index=list(_COLOR_CHOICES).index("Secteur NAF") if area else 0)
-    cluster_on = c2.checkbox("Regrouper les points proches", True, key="map_cluster")
+    cluster_on = c2.checkbox("Regrouper les points proches", True, key=f"{kp}map_cluster")
     color_col = _COLOR_CHOICES[choice]
 
     if len(d) > MAX_MARKERS:
@@ -202,7 +203,7 @@ def _site_map(df: pd.DataFrame, area: dict | None = None):
             f"<span style='color:#000'><span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
             f"background:{colors[k]};margin-right:4px'></span>{html.escape(k)}</span>" for k in shown)
             + (" …" if len(keys) > len(shown) else ""), unsafe_allow_html=True)
-    key = f"map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}_{bool(area)}"
+    key = f"{kp}map_{color_col}_{cluster_on}_{len(d)}_{round(float(d['lat'].sum()), 4)}_{bool(area)}"
     try:
         st_folium(m, height=620, returned_objects=[], key=key, use_container_width=True)
     except TypeError:  # anciennes versions de streamlit-folium
@@ -588,7 +589,15 @@ def _run_area(area: AreaQuery, options: AreaOptions):
 
 
 def page_geolocalisation():
-    st.title("Géolocalisation d'entreprises")
+    st.title("Géolocalisation")
+    t_ent, t_sc = st.tabs(["Géolocalisation des entreprises", "Géolocalisation supply chain"])
+    with t_ent:
+        _tab_entreprises()
+    with t_sc:
+        _tab_supply_chain()
+
+
+def _tab_entreprises():
     c_mode, c_area = st.columns([3, 2])
     with c_area:
         st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
@@ -639,6 +648,178 @@ def page_geolocalisation():
             st.warning("Ces résultats correspondent à la recherche précédente, pas à la saisie actuelle. "
                        "Cliquez sur « Lancer la recherche » pour les mettre à jour.")
         _render_result(res)
+
+
+# --------------------------------------------------------------------------
+# Onglet « Géolocalisation supply chain »
+# --------------------------------------------------------------------------
+SC_MAX_SUPPLIERS = 300
+
+
+def _sc_add(df: pd.DataFrame):
+    cur = st.session_state.get("sc_cands")
+    both = df if cur is None or cur.empty else pd.concat([cur, df], ignore_index=True)
+    st.session_state["sc_cands"] = sp.consolidate(both)
+    st.session_state.pop("sc_result", None)
+
+
+def _sc_table_source(src: str):
+    """Charge un document (adresse web ou fichier) et mémorise les tableaux détectés."""
+    if src == "Adresse web (page ou PDF)":
+        url = st.text_input("Adresse du document", placeholder="https://… (page web ou PDF contenant la liste des fournisseurs)", key="sc_url")
+        if st.button("Lire le document", key="sc_read_url", disabled=not url.strip()):
+            try:
+                with st.spinner("Téléchargement et lecture…"):
+                    data, mime = sp.fetch_url(url.strip())
+                    tabs = sp.tables_from_bytes(data, urlparse_name(url), mime)
+                st.session_state["sc_tables"] = {"label": url.strip(), "url": url.strip(), "tables": tabs}
+            except sp.SupplyError as e:
+                st.session_state.pop("sc_tables", None)
+                st.error(str(e))
+    else:
+        up = st.file_uploader("Fichier de fournisseurs (CSV, Excel, PDF ou page HTML enregistrée)",
+                              type=["csv", "txt", "xlsx", "xlsm", "pdf", "html", "htm"], key="sc_file")
+        if up is not None and st.session_state.get("sc_tables", {}).get("label") != up.name:
+            try:
+                tabs = sp.tables_from_bytes(up.getvalue(), up.name, up.type or "")
+                st.session_state["sc_tables"] = {"label": up.name, "url": "", "tables": tabs}
+            except sp.SupplyError as e:
+                st.session_state.pop("sc_tables", None)
+                st.error(str(e))
+    info = st.session_state.get("sc_tables")
+    if not info:
+        return
+    if not info["tables"]:
+        st.warning("Aucun tableau détecté dans ce document. Si la liste est dans du texte libre, utilisez le mode assisté.")
+        return
+    labels = [t[0] for t in info["tables"]]
+    pick = st.selectbox("Tableau à utiliser", labels, key="sc_table_pick")
+    df = info["tables"][labels.index(pick)][1]
+    _stretch(st.dataframe, df.head(8), hide_index=True)
+    g_name, g_country = sp.guess_columns(df)
+    cols = list(df.columns)
+    c1, c2 = st.columns(2)
+    name_col = c1.selectbox("Colonne du nom du fournisseur", cols, index=cols.index(g_name) if g_name in cols else 0,
+                            key=f"sc_namecol_{pick}")
+    country_col = c2.selectbox("Colonne du pays (facultatif)", ["(aucune)"] + cols,
+                               index=(cols.index(g_country) + 1) if g_country in cols else 0, key=f"sc_ctrcol_{pick}")
+    official = st.checkbox("Ce document est la liste de fournisseurs publiée par l'entreprise elle-même", True, key="sc_official",
+                           help="Coché : confiance A. Décoché : confiance C (source tierce).")
+    if st.button("Ajouter ces fournisseurs à la liste", key="sc_add_tbl"):
+        _sc_add(sp.candidates_from_table(df, name_col, None if country_col == "(aucune)" else country_col,
+                                         source=info["label"][:120], source_url=info["url"], confiance="A" if official else "C"))
+
+
+def urlparse_name(url: str) -> str:
+    from urllib.parse import urlparse
+    return urlparse(url).path.rsplit("/", 1)[-1]
+
+
+def _tab_supply_chain():
+    st.markdown(
+        "Recense les **fournisseurs d'une entreprise** (le « client »), puis les géolocalise comme dans l'onglet précédent "
+        "(recherche par nom sur OpenStreetMap). Le fichier produit est identique au fichier de géolocalisation, avec la "
+        "colonne **client** en première position et la qualification de chaque relation.")
+    st.caption("Seuls les fournisseurs déclarés publiquement peuvent être recensés ; une chaîne d'approvisionnement complète n'est "
+               "jamais publique. Les usines hors d'Europe sont souvent absentes d'OpenStreetMap : elles figurent alors dans la liste « non trouvés ».")
+    client = st.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
+    src = st.radio("Source des noms de fournisseurs",
+                   ["Adresse web (page ou PDF)", "Fichier", "Mode assisté (Claude / ChatGPT)", "Saisie manuelle"],
+                   horizontal=True, key="sc_src")
+    if src in ("Adresse web (page ou PDF)", "Fichier"):
+        _sc_table_source(src)
+    elif src == "Mode assisté (Claude / ChatGPT)":
+        st.caption("Gratuit : l'application prépare la consigne, vous la collez dans Claude ou ChatGPT (avec recherche web), puis "
+                   "vous collez ici leur réponse. Les lignes sont marquées « à vérifier » (confiance C ou D).")
+        if not client.strip():
+            st.info("Renseignez d'abord le nom du client.")
+        else:
+            st.markdown("**1. Copiez cette consigne** (bouton en haut à droite du cadre) :")
+            st.code(sp.build_prompt(client.strip()), language=None)
+            st.markdown("**2. Collez ici la réponse de l'assistant :**")
+            reply = st.text_area("Réponse de l'assistant", height=180, key="sc_reply", label_visibility="collapsed")
+            if st.button("Lire la réponse", key="sc_read_reply", disabled=not reply.strip()):
+                got = sp.parse_assisted_reply(reply)
+                if got.empty:
+                    st.warning("Aucun fournisseur lu dans cette réponse (ou « aucun fournisseur trouvé »).")
+                else:
+                    _sc_add(got)
+                    st.success(f"{len(got)} ligne(s) lue(s).")
+    else:
+        txt = st.text_area("Un fournisseur par ligne (pays facultatif après « ; »)", placeholder="Acme Furniture;Poland\nBeta Textiles",
+                           height=140, key="sc_manual")
+        if st.button("Ajouter à la liste", key="sc_add_manual", disabled=not txt.strip()):
+            _sc_add(sp.candidates_from_text(txt))
+
+    cands = st.session_state.get("sc_cands")
+    if cands is None or cands.empty:
+        return
+    st.divider()
+    st.markdown(f"**Fournisseurs recensés : {len(cands)}** (doublons fusionnés). Décochez ceux à exclure avant la recherche.")
+    ed = cands.copy()
+    ed.insert(0, "garder", True)
+    edited = st.data_editor(ed, hide_index=True, key="sc_editor", disabled=[c for c in ed.columns if c != "garder"],
+                            column_config={"source_url": st.column_config.LinkColumn("source_url")})
+    kept = cands[edited["garder"].to_numpy()] if len(edited) == len(cands) else cands
+    b1, b2 = st.columns([1, 1])
+    with b2:
+        if st.button("Vider la liste", key="sc_clear"):
+            for k in ("sc_cands", "sc_result", "sc_tables"):
+                st.session_state.pop(k, None)
+            st.rerun()
+    with st.expander("Options de recherche OpenStreetMap"):
+        o_brand = st.checkbox("Chercher aussi dans « brand »", False, key="sc_o_brand")
+        o_biz = st.checkbox("Établissements uniquement (plus précis, moins de résultats)", False, key="sc_o_biz")
+    too_many = len(kept) > SC_MAX_SUPPLIERS
+    if too_many:
+        st.warning(f"{len(kept)} fournisseurs : limitez à {SC_MAX_SUPPLIERS} par recherche (décochez des lignes).")
+    if not client.strip():
+        st.info("Renseignez le nom du client pour lancer la recherche.")
+    if b1.button("Géolocaliser les fournisseurs", type="primary", key="sc_run",
+                 disabled=(not client.strip()) or kept.empty or too_many):
+        queries = [NameQuery.make(n) for n in kept["fournisseur"]]
+        options = SearchOptions(search_brand=o_brand, require_business_tag=o_biz, include_relations=False)
+        box = st.empty()
+        bar = box.progress(0.0, text="Démarrage…")
+
+        def cb(done: int, total: int, name: str):
+            bar.progress(done / total, text=f"{done}/{total} — {name}")
+
+        res = geolocate(queries, options, get_client(), get_settings(), get_countries(), get_naf(), progress=cb)
+        box.empty()
+        st.session_state["sc_result"] = {"client": client.strip(), "res": res, "cands": kept.copy()}
+    out = st.session_state.get("sc_result")
+    if out:
+        _sc_render(out)
+
+
+def _sc_render(out: dict):
+    res, cands, client = out["res"], out["cands"], out["client"]
+    final = sp.build_output(client, res.sites, cands)
+    miss = sp.not_found(res.report, cands, client)
+    st.divider()
+    found = int(final["nom_demande"].nunique()) if len(final) else 0
+    m = st.columns(3)
+    m[0].metric("Fournisseurs recherchés", len(cands))
+    m[1].metric("Trouvés sur OpenStreetMap", f"{found} / {len(cands)}")
+    m[2].metric("Sites", len(final))
+    _status_messages(res.report)
+    if final.empty:
+        st.info("Aucun site trouvé pour ces fournisseurs.")
+    else:
+        show = [c for c in ["client", "nom_demande", "name", "pays", "addr_city", "confiance", "type_relation", "rang",
+                            "lat", "long", "osm_url", "source_url"] if c in final.columns]
+        _stretch(st.dataframe, final[show], hide_index=True,
+                 column_config={"osm_url": st.column_config.LinkColumn("OSM", display_text="ouvrir"),
+                                "source_url": st.column_config.LinkColumn("source_url")})
+        _site_map(final, kp="sc_")
+    d1, d2 = st.columns(2)
+    d1.download_button("Télécharger « suply » (CSV)", _csv_bytes(final), "suply.csv", "text/csv", key="sc_dl_csv")
+    d2.download_button("Télécharger « suply » (Excel)", _xlsx_bytes({"suply": final, "non_trouves": miss, "fournisseurs": cands}),
+                       "suply.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="sc_dl_xlsx")
+    if len(miss):
+        with st.expander(f"{len(miss)} fournisseur(s) sans site trouvé sur OpenStreetMap"):
+            _stretch(st.dataframe, miss, hide_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -1030,7 +1211,7 @@ def _vigilance_sites_section(df):
         st.success("Aucun site en vigilance orange ou rouge.")
     else:
         _stretch(st.dataframe, alert[cols].sort_values("vigilance_couleur"), hide_index=True)
-        _site_map(alert)
+        _site_map(alert, kp="vg_")
         st.download_button("Télécharger les sites en vigilance orange ou rouge (CSV)", _csv_bytes(alert[cols]),
                            "catmap_sites_vigilance.csv", "text/csv")
     st.download_button("Télécharger tous les sites avec leur vigilance (CSV)", _csv_bytes(exp[full_cols]),
@@ -1265,7 +1446,7 @@ def _europe_sites_section(alerts, rings, active=None):
         st.success("Aucun site en alerte orange ou rouge.")
     else:
         _stretch(st.dataframe, orange[cols].sort_values("europe_niveau_id", ascending=False), hide_index=True)
-        _site_map(orange)
+        _site_map(orange, kp="eu_")
     st.download_button("Télécharger tous les sites avec leurs alertes (CSV)", _csv_bytes(exp[cols]),
                        "catmap_sites_vigilance_europe.csv", "text/csv", key="eu_dl_sites")
 
