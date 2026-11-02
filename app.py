@@ -751,6 +751,10 @@ def _sc_auto_search(client: str):
         "citation dans la page source : retrouvée mot pour mot = confiance C, sinon D (à vérifier).\n\n"
         "**Coût** : environ 0,055 $ par recherche (profondeur « deep »).",
         key="sc_use_ai", value=False, wide=True)
+    focus = "production"
+    if use_ai:
+        focus_label = st.selectbox("Fournisseurs recherchés par l'IA", list(ws.FOCUS.values()), key="sc_focus")
+        focus = next(k for k, v in ws.FOCUS.items() if v == focus_label)
     if st.button("Lancer la recherche automatique", type="primary", key="sc_auto_run", disabled=not (use_docs or use_ai)):
         st.session_state.pop("sc_ai", None)
         st.session_state.pop("sc_found", None)
@@ -764,7 +768,7 @@ def _sc_auto_search(client: str):
                 st.session_state["sc_found"] = {"client": client, "docs": [dict(f, **{k: by_url[f["url"]][k] for k in ("tables", "error")}) for f in found]}
             if use_ai:
                 with st.spinner("Extraction par l'IA de Linkup (jusqu'à 1 à 2 minutes)…"):
-                    items = ws.extract_suppliers(client, key)
+                    items = ws.extract_suppliers(client, key, focus=focus)
                 with st.spinner("Vérification des citations…"):
                     st.session_state["sc_ai"] = {"client": client, "df": sp.candidates_from_ai(items)}
         except ws.SearchError as e:
@@ -974,7 +978,8 @@ def _help_html(text: str) -> str:
 def _help_icon(text: str, left: bool = False, wide: bool = False) -> None:
     """Pastille « ? » dont le texte n'apparaît qu'au survol (CSS pur, voir .cy-help dans assets/styles.css)."""
     cls = "cy-help" + (" cy-left" if left else "") + (" cy-wide" if wide else "")
-    st.markdown(f'<span class="{cls}"><span class="cy-tip">{_help_html(text)}</span></span>', unsafe_allow_html=True)
+    tip = _help_html(text).replace("$", "&#36;")          # « $ » déclencherait le rendu des formules mathématiques
+    st.markdown(f'<span class="{cls}"><span class="cy-tip">{tip}</span></span>', unsafe_allow_html=True)
 
 
 def _checkbox_with_help(label: str, help_text: str, *, key: str, value: bool = False, left: bool = False, wide: bool = False) -> bool:
