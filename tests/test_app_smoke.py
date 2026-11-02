@@ -94,9 +94,16 @@ class TestAppSmoke(unittest.TestCase):
         from catmap import cyclones as cy
         from tests.test_cyclones import FORECAST, NOW, OBSERVED
         storms = cy.build_storms(cy.parse_forecast(FORECAST), cy.parse_observed(OBSERVED), now=NOW)
-        stack = mock.patch.multiple(cy, fetch_storms=mock.Mock(return_value=storms),
-                                    fetch_wind_radii=mock.Mock(return_value={}),
-                                    attach_precipitation=mock.Mock(return_value=True))
+        from catmap import meteoalarm as ma
+        import contextlib
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.multiple(cy, fetch_storms=mock.Mock(return_value=storms),
+                                                fetch_wind_radii=mock.Mock(return_value={}),
+                                                attach_precipitation=mock.Mock(return_value=True)))
+        # aucun accès réseau pour l'onglet Vigilance Europe
+        import pandas as pd
+        stack.enter_context(mock.patch.object(ma, "fetch_all", return_value=(pd.DataFrame(columns=ma.COLUMNS), {}, {})))
+        stack.enter_context(mock.patch.object(ma, "load_geocodes", side_effect=ma.MeteoAlarmError("hors ligne")))
         return stack
 
     def fake_fetch(self):
