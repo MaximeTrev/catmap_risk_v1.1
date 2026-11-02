@@ -20,7 +20,7 @@ class R:
 class T(unittest.TestCase):
     def test_search_dedupes_and_ranks(self):
         class S:
-            def get(self, url, **k):
+            def post(self, url, **k):
                 return R(200, {"results": [{"type": "text", "name": "News", "url": "https://news.com/ikea", "content": "x"},
                                            {"type": "text", "name": "List", "url": "https://www.ikea.com/suppliers.pdf", "content": "y"}]})
         res = ws.search_documents(["a", "b"], "K", session=S())
@@ -30,20 +30,20 @@ class T(unittest.TestCase):
     def test_errors_are_readable(self):
         for code, msg in ((401, "refusée"), (402, "Crédits"), (429, "Quota"), (500, "HTTP 500")):
             class S:
-                def get(self, url, code=code, **k):
+                def post(self, url, code=code, **k):
                     return R(code)
             with self.assertRaises(ws.SearchError) as c:
                 ws.search_documents(["q"], "K", session=S())
             self.assertIn(msg, str(c.exception))
 
         class Bad:
-            def get(self, url, **k):
+            def post(self, url, **k):
                 return R(200, {"oops": 1})
         with self.assertRaises(ws.SearchError):
             ws.search_documents(["q"], "K", session=Bad())
 
         class Down:
-            def get(self, url, **k):
+            def post(self, url, **k):
                 raise requests.ConnectionError()
         with self.assertRaises(ws.SearchError):
             ws.search_documents(["q"], "K", session=Down())
@@ -69,8 +69,8 @@ class T(unittest.TestCase):
             {"name": ""}]}
 
         class S:
-            def get(self, url, params=None, **k):
-                assert params["outputType"] == "structured" and "suppliers" in params["structuredOutputSchema"]
+            def post(self, url, json=None, **k):
+                assert json["outputType"] == "structured" and "suppliers" in json["structuredOutputSchema"]
                 return R(200, payload)
         items = ws.extract_suppliers("IKEA", "K", session=S())
         self.assertEqual(len(items), 2)                                  # ligne sans nom écartée
@@ -82,10 +82,23 @@ class T(unittest.TestCase):
 
     def test_extract_unexpected_format(self):
         class S:
-            def get(self, url, **k):
+            def post(self, url, **k):
                 return R(200, {"foo": 1})
         with self.assertRaises(ws.SearchError):
             ws.extract_suppliers("IKEA", "K", session=S())
+
+    def test_post_404_falls_back_to_get(self):
+        calls = []
+
+        class S:
+            def post(self, url, **k):
+                calls.append("post")
+                return R(404)
+            def get(self, url, **k):
+                calls.append("get")
+                return R(200, {"results": [{"name": "A", "url": "https://a.com/x", "content": ""}]})
+        self.assertEqual(len(ws.search_documents(["q"], "K", session=S())), 1)
+        self.assertEqual(calls, ["post", "get"])
 
     def test_useful_tables_filters_small(self):
         small = pd.DataFrame({"Supplier": ["A", "B"]})
