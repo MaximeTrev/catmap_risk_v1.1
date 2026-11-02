@@ -54,10 +54,16 @@ def build_queries(client: str) -> list[str]:
             f"{c} sustainability report supplier disclosure"]
 
 
-def _get(params: dict, key: str, session=None, timeout: float = 90.0):
+def _call(params: dict, key: str, session=None, timeout: float = 90.0):
+    """Appelle l'API Linkup. POST (JSON) d'abord ; si le serveur répond 404 ou 405, nouvel essai en GET (paramètres d'adresse).
+    En cas de refus de la requête (400, 422), le message du service est repris pour faciliter le diagnostic."""
     s = session or requests
+    headers = {"Authorization": f"Bearer {key}"}
+    r = None
     try:
-        r = s.get(LINKUP_URL, params=params, headers={"Authorization": f"Bearer {key}"}, timeout=timeout)
+        r = s.post(LINKUP_URL, json=params, headers=dict(headers, **{"Content-Type": "application/json"}), timeout=timeout)
+        if r.status_code in (404, 405):
+            r = s.get(LINKUP_URL, params=params, headers=headers, timeout=timeout)
     except requests.RequestException as e:
         raise SearchError(f"Service de recherche injoignable ({type(e).__name__}).") from e
     if r.status_code in (401, 403):
@@ -67,7 +73,12 @@ def _get(params: dict, key: str, session=None, timeout: float = 90.0):
     if r.status_code == 429:
         raise SearchError("Quota de recherche dépassé.")
     if r.status_code != 200:
-        raise SearchError(f"Service de recherche : HTTP {r.status_code}.")
+        detail = ""
+        try:
+            detail = " — " + re.sub(r"\s+", " ", str(getattr(r, "text", "") or ""))[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        raise SearchError(f"Service de recherche : HTTP {r.status_code}{detail}")
     try:
         return r.json()
     except ValueError as e:
@@ -78,7 +89,7 @@ def search_documents(queries: list[str], key: str, *, session=None, max_results:
     """Recherche de pages et de PDF. Retourne [{title, url, snippet}] sans doublons."""
     seen: dict[str, dict] = {}
     for q in queries:
-        data = _get({"q": q, "depth": "standard", "outputType": "searchResults", "maxResults": max_results}, key, session)
+        data = _call({"q": q, "depth": "standard", "outputType": "searchResults", "maxResults": max_results}, key, session)
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
             raise SearchError("Format de réponse inattendu du service de recherche.")
@@ -97,8 +108,8 @@ def extract_suppliers(client: str, key: str, *, session=None, depth: str = "deep
          "lists, sustainability / ESG / annual reports, sourcing disclosures. Search in several languages. Only include "
          "companies explicitly described as suppliers of that company in a source you consulted, with the exact URL and a "
          "verbatim quote. Do not include customers, competitors or subsidiaries. Do not invent anything.")
-    data = _get({"q": q, "depth": depth, "outputType": "structured",
-                 "structuredOutputSchema": json.dumps(SUPPLIER_SCHEMA)}, key, session, timeout=120.0)
+    data = _call({"q": q, "depth": depth, "outputType": "structured",
+                  "structuredOutputSchema": json.dumps(SUPPLIER_SCHEMA)}, key, session, timeout=120.0)
     if isinstance(data, dict) and "suppliers" not in data:           # certaines enveloppes possibles : data / result / output
         for k in ("data", "result", "output", "structured"):
             if isinstance(data.get(k), dict) and "suppliers" in data[k]:
