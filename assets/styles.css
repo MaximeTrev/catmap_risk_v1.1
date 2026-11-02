@@ -93,3 +93,10 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 .cy-help:hover .cy-tip { display: block; }
 .cy-help.cy-left .cy-tip { left: auto; right: 1.8rem; }
 .cy-help.cy-wide .cy-tip { width: 30rem; }
+
+/* Bouton « Lancer la recherche automatique » (supply chain) : texte blanc */
+.st-key-sc_auto_run button,
+.st-key-sc_auto_run button p,
+.st-key-sc_auto_run button span {
+    color: #ffffff !important;
+}
