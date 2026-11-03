@@ -130,6 +130,23 @@ def _xlsx_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     return buf.getvalue()
 
 
+def _supply_popup_lines(row: pd.Series) -> str:
+    """Lignes supplémentaires du popup pour la carte supply chain (rôle, relation, confiance, source)."""
+    def g(k):
+        v = row.get(k)
+        return "" if v is None or (not isinstance(v, str) and pd.isna(v)) else html.escape(str(v))
+    out = []
+    if g("role"):
+        out.append(f"<b>Rôle :</b> {g('role')}" + (f" (client : {g('client')})" if g("role") == "fournisseur" and g("client") else ""))
+    if g("type_relation"):
+        out.append(f"<b>Relation :</b> {g('type_relation')}" + (f", rang {g('rang')}" if g("rang") else ""))
+    if g("confiance"):
+        out.append(f"<b>Confiance :</b> {g('confiance')}")
+    if g("source_url"):
+        out.append(f"<a href='{g('source_url')}' target='_blank' rel='noopener'>Source du recensement</a>")
+    return ("<br>".join(out) + "<br>") if out else ""
+
+
 def _popup_html(row: pd.Series) -> str:
     def esc(v):
         return "" if pd.isna(v) else html.escape(str(v))
@@ -139,16 +156,17 @@ def _popup_html(row: pd.Series) -> str:
     surf = "" if pd.isna(row.get("surface_m2")) else f"<br>Surface : {row['surface_m2']:,.0f} m²".replace(",", " ")
     return (f"<div style='font:12px sans-serif;min-width:180px'><b>{esc(row['name'])}</b><br>"
             f"{esc(row['nom_demande'])}<br>{esc(row.get('pays'))}<br>{esc(row.get('naf_section'))}{surf}<br>"
-            f"Score : {esc(row.get('match_score'))}<br>"
+            f"Score : {esc(row.get('match_score'))}<br>{_supply_popup_lines(row)}"
             f"<a href='{esc(row['osm_url'])}' target='_blank' rel='noopener'>Voir sur OpenStreetMap</a><br>"
             f"<a href='{gmaps}' target='_blank' rel='noopener'>Voir sur Google Maps</a><br>"
             f"<a href='{streetview}' target='_blank' rel='noopener'>Voir sur Street View</a></div>")
 
 
-_COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None}
+_COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "naf_section", "Aucune (une seule couleur)": None,
+                  "Rôle (client / fournisseurs)": "role"}
 
 
-def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = ""):
+def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = "", default_color: str | None = None):
     """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
     import folium
     from folium.plugins import Fullscreen, MarkerCluster
@@ -158,11 +176,13 @@ def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = ""):
     if d.empty:
         st.info("Aucun site à afficher.")
         return
+    choices = {k: v for k, v in _COLOR_CHOICES.items() if v != "role" or "role" in d.columns}
     c1, c2 = st.columns([2, 1])
-    choice = c1.selectbox("Colorer les points par", list(_COLOR_CHOICES), key=f"{kp}map_color",
-                          index=list(_COLOR_CHOICES).index("Secteur NAF") if area else 0)
+    choice = c1.selectbox("Colorer les points par", list(choices), key=f"{kp}map_color",
+                          index=list(choices).index(default_color) if default_color in choices else
+                          (list(choices).index("Secteur NAF") if area else 0))
     cluster_on = c2.checkbox("Regrouper les points proches", True, key=f"{kp}map_cluster")
-    color_col = _COLOR_CHOICES[choice]
+    color_col = choices[choice]
 
     if len(d) > MAX_MARKERS:
         st.warning(f"Carte limitée à {MAX_MARKERS} sites sur {len(d)} (les mieux appariés). "
@@ -184,6 +204,8 @@ def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = ""):
     if color_col:
         keys = sorted(d[color_col].fillna("n/d").astype(str).unique())
         colors = {k: PALETTE[i % len(PALETTE)] for i, k in enumerate(keys)}
+        if color_col == "role":                      # client en or, fournisseurs en bleu
+            colors.update({"client": "#bd8e43", "fournisseur": "#1f77b4"})
     else:
         keys, colors = [], {}
     layer = MarkerCluster(name="Sites").add_to(m) if cluster_on else folium.FeatureGroup(name="Sites").add_to(m)
@@ -655,6 +677,14 @@ def _tab_entreprises():
 # Onglet « Géolocalisation supply chain »
 # --------------------------------------------------------------------------
 SC_MAX_SUPPLIERS = 300
+CONFIDENCE_HELP = (
+    "**Niveau de confiance** : solidité de la preuve que l'entreprise est bien un fournisseur du client.\n\n"
+    "**A** : liste publiée par l'entreprise elle-même (document fourni).\n\n"
+    "**B** : site de production rattaché au client dans une base ouverte (réservé, pas encore utilisé).\n\n"
+    "**C** : proposé par l'IA avec une source, et la citation a été retrouvée mot pour mot dans la page source.\n\n"
+    "**D** : proposé par l'IA ; citation non retrouvée ou page illisible : à vérifier avant usage.\n\n"
+    "**n/d** : saisie manuelle, non documentée.\n\n"
+    "Une citation retrouvée prouve que la phrase existe dans la page, pas que l'IA l'a bien interprétée.")
 
 
 def _sc_add(df: pd.DataFrame):
@@ -776,14 +806,22 @@ def _sc_auto_search(client: str):
     ai = st.session_state.get("sc_ai")
     if ai and ai["client"] == client:
         df = ai["df"]
-        st.markdown(f"**Propositions de l'IA : {len(df)} fournisseur(s)** "
-                    f"({int((df['confiance'] == 'C').sum())} avec citation vérifiée, les autres à vérifier).")
+        try:
+            hrow = st.container(horizontal=True, vertical_alignment="center", gap="small")
+        except TypeError:
+            hrow = st.container()
+        with hrow:
+            st.markdown(f"**Propositions de l'IA : {len(df)} fournisseur(s)** "
+                        f"({int((df['confiance'] == 'C').sum())} avec citation vérifiée, les autres à vérifier).")
+            _help_icon(CONFIDENCE_HELP, wide=True)
         if df.empty:
             st.info("L'IA n'a trouvé aucun fournisseur déclaré publiquement.")
         else:
+            sel_all = st.checkbox("Tout sélectionner", False, key="sc_ai_all")
             ed = df.copy()
-            ed.insert(0, "garder", df["confiance"] == "C")
-            edited = st.data_editor(ed, hide_index=True, key="sc_ai_editor", disabled=[c for c in ed.columns if c != "garder"],
+            ed.insert(0, "garder", True if sel_all else (df["confiance"] == "C"))
+            edited = st.data_editor(ed, hide_index=True, key=f"sc_ai_editor_{int(sel_all)}",
+                                    disabled=[c for c in ed.columns if c != "garder"],
                                     column_config={"source_url": st.column_config.LinkColumn("source_url")})
             if st.button("Ajouter la sélection à la liste", key="sc_ai_add"):
                 _sc_add(df[edited["garder"].to_numpy()])
@@ -819,7 +857,10 @@ def urlparse_name(url: str) -> str:
 def _tab_supply_chain():
     st.caption("Seuls les fournisseurs déclarés publiquement peuvent être recensés ; une chaîne d'approvisionnement complète n'est "
                "jamais publique. Les usines hors d'Europe sont souvent absentes d'OpenStreetMap : elles figurent alors dans la liste « non trouvés ».")
-    client = st.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
+    cc1, cc2 = st.columns([3, 1])
+    client = cc1.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
+    client_qid = cc2.text_input("Wikidata du client (facultatif)", placeholder="Ex. Q54078", key="sc_client_qid",
+                                help="Identifiant Wikidata : recherche très précise du client sur OpenStreetMap (marque).")
     src = st.radio("Source des noms de fournisseurs",
                    ["Recherche automatique sur internet", "Adresse web (page ou PDF)", "Fichier",
                     "Mode assisté (Claude / ChatGPT)", "Saisie manuelle"],
@@ -856,17 +897,13 @@ def _tab_supply_chain():
         return
     st.divider()
     st.markdown(f"**Fournisseurs recensés : {len(cands)}** (doublons fusionnés). Décochez ceux à exclure avant la recherche.")
+    all_on = st.checkbox("Tout sélectionner", True, key="sc_all")
     ed = cands.copy()
-    ed.insert(0, "garder", True)
-    edited = st.data_editor(ed, hide_index=True, key="sc_editor", disabled=[c for c in ed.columns if c != "garder"],
+    ed.insert(0, "garder", bool(all_on))
+    edited = st.data_editor(ed, hide_index=True, key=f"sc_editor_{int(all_on)}_{len(cands)}",
+                            disabled=[c for c in ed.columns if c != "garder"],
                             column_config={"source_url": st.column_config.LinkColumn("source_url")})
     kept = cands[edited["garder"].to_numpy()] if len(edited) == len(cands) else cands
-    b1, b2 = st.columns([1, 1])
-    with b2:
-        if st.button("Vider la liste", key="sc_clear"):
-            for k in ("sc_cands", "sc_result", "sc_tables"):
-                st.session_state.pop(k, None)
-            st.rerun()
     with st.expander("Options de recherche OpenStreetMap"):
         o_brand = st.checkbox("Chercher aussi dans « brand »", False, key="sc_o_brand")
         o_biz = st.checkbox("Établissements uniquement (plus précis, moins de résultats)", False, key="sc_o_biz")
@@ -875,9 +912,19 @@ def _tab_supply_chain():
         st.warning(f"{len(kept)} fournisseurs : limitez à {SC_MAX_SUPPLIERS} par recherche (décochez des lignes).")
     if not client.strip():
         st.info("Renseignez le nom du client pour lancer la recherche.")
-    if b1.button("Géolocaliser les fournisseurs", type="primary", key="sc_run",
-                 disabled=(not client.strip()) or kept.empty or too_many):
+    b1, b3, b2 = st.columns([1, 1, 1])
+    dis = (not client.strip()) or kept.empty or too_many
+    run_sup = b1.button("Géolocaliser les fournisseurs", type="primary", key="sc_run", disabled=dis)
+    run_all = b3.button("Géolocalisation client & fournisseurs", type="primary", key="sc_run_all", disabled=dis)
+    with b2:
+        if st.button("Vider la liste", key="sc_clear"):
+            for k in ("sc_cands", "sc_result", "sc_tables"):
+                st.session_state.pop(k, None)
+            st.rerun()
+    if run_sup or run_all:
         queries = [NameQuery.make(n) for n in kept["fournisseur"]]
+        if run_all:
+            queries = [NameQuery.make(client.strip(), client_qid)] + queries
         options = SearchOptions(search_brand=o_brand, require_business_tag=o_biz, include_relations=False)
         box = st.empty()
         bar = box.progress(0.0, text="Démarrage…")
@@ -887,7 +934,7 @@ def _tab_supply_chain():
 
         res = geolocate(queries, options, get_client(), get_settings(), get_countries(), get_naf(), progress=cb)
         box.empty()
-        st.session_state["sc_result"] = {"client": client.strip(), "res": res, "cands": kept.copy()}
+        st.session_state["sc_result"] = {"client": client.strip(), "res": res, "cands": kept.copy(), "with_client": bool(run_all)}
     out = st.session_state.get("sc_result")
     if out:
         _sc_render(out)
@@ -895,30 +942,40 @@ def _tab_supply_chain():
 
 def _sc_render(out: dict):
     res, cands, client = out["res"], out["cands"], out["client"]
-    final = sp.build_output(client, res.sites, cands)
+    with_client = bool(out.get("with_client"))
+    final = sp.build_output(client, res.sites, cands, include_client=with_client)
     miss = sp.not_found(res.report, cands, client)
     st.divider()
-    found = int(final["nom_demande"].nunique()) if len(final) else 0
-    m = st.columns(3)
+    sup = final[final["role"] == "fournisseur"] if len(final) else final
+    found = int(sup["nom_demande"].nunique()) if len(sup) else 0
+    m = st.columns(4 if with_client else 3)
     m[0].metric("Fournisseurs recherchés", len(cands))
     m[1].metric("Trouvés sur OpenStreetMap", f"{found} / {len(cands)}")
-    m[2].metric("Sites", len(final))
+    m[2].metric("Sites fournisseurs", len(sup))
+    if with_client:
+        m[3].metric("Sites du client", int((final["role"] == "client").sum()) if len(final) else 0)
     _status_messages(res.report)
     if final.empty:
         st.info("Aucun site trouvé pour ces fournisseurs.")
     else:
-        show = [c for c in ["client", "nom_demande", "name", "pays", "addr_city", "confiance", "type_relation", "rang",
-                            "lat", "long", "osm_url", "source_url"] if c in final.columns]
-        _stretch(st.dataframe, final[show], hide_index=True,
+        view = final
+        if with_client:
+            pick = st.multiselect("Afficher", ["Client", "Fournisseurs"], default=["Client", "Fournisseurs"], key="sc_show",
+                                  help="Filtre le tableau et la carte.")
+            roles = [{"Client": "client", "Fournisseurs": "fournisseur"}[x] for x in pick]
+            view = final[final["role"].isin(roles)]
+        show = [c for c in ["client", "role", "nom_demande", "name", "pays", "addr_city", "naf_section", "confiance",
+                            "type_relation", "rang", "lat", "long", "osm_url", "source_url"] if c in view.columns]
+        _stretch(st.dataframe, view[show], hide_index=True,
                  column_config={"osm_url": st.column_config.LinkColumn("OSM", display_text="ouvrir"),
                                 "source_url": st.column_config.LinkColumn("source_url")})
-        _site_map(final, kp="sc_")
+        _site_map(view, kp="sc_", default_color="Rôle (client / fournisseurs)" if with_client else "Entreprise")
     d1, d2 = st.columns(2)
     d1.download_button("Télécharger « suply » (CSV)", _csv_bytes(final), "suply.csv", "text/csv", key="sc_dl_csv")
     d2.download_button("Télécharger « suply » (Excel)", _xlsx_bytes({"suply": final, "non_trouves": miss, "fournisseurs": cands}),
                        "suply.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="sc_dl_xlsx")
     if len(miss):
-        with st.expander(f"{len(miss)} fournisseur(s) sans site trouvé sur OpenStreetMap"):
+        with st.expander(f"{len(miss)} entreprise(s) sans site trouvé sur OpenStreetMap"):
             _stretch(st.dataframe, miss, hide_index=True)
 
 
@@ -1553,7 +1610,13 @@ def _europe_sites_section(alerts, rings, active=None):
 
 
 # --------------------------------------------------------------------------
-PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel}
+def page_risques_climatiques():
+    st.title("Risque climatiques")
+    st.caption("Section à venir.")
+
+
+PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel,
+         "Risque climatiques": page_risques_climatiques}
 
 
 def main():
