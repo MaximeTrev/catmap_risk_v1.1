@@ -54,6 +54,12 @@ class T(unittest.TestCase):
         self.assertEqual(out.columns[0], "client")
         self.assertEqual(out.iloc[0]["client"], "IKEA")
         self.assertEqual(out.iloc[0]["confiance"], "A")
+        both = pd.DataFrame({"nom_demande": ["IKEA", "Acme"], "name": ["IKEA Lyon", "Acme Factory"], "lat": [1.0, 2.0], "long": [2.0, 3.0]})
+        o2 = sp.build_output("IKEA", both, cands, include_client=True)
+        self.assertEqual(list(o2.columns[:2]), ["client", "role"])
+        self.assertEqual(o2["role"].tolist(), ["client", "fournisseur"])
+        self.assertTrue(pd.isna(o2.iloc[0]["confiance"]))
+        self.assertEqual(sp.build_output("IKEA", both, cands)["role"].tolist(), ["fournisseur", "fournisseur"])
         rep = pd.DataFrame({"nom_demande": ["Acme", "Zed"], "statut": ["ok", "aucun résultat"], "n_sites": [1, 0], "message": ["", ""]})
         self.assertEqual(sp.not_found(rep, pd.concat([cands, sp.candidates_from_text("Zed")]), "IKEA")["nom_demande"].tolist(), ["Zed"])
 
