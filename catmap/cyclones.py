@@ -285,6 +285,7 @@ def parse_observed(payload: dict) -> dict[tuple, list[dict]]:
 
 
 
+VERSION = 2   # incrémenté à chaque évolution du format (échéances résolues, liens vers les bulletins)
 TAU_ALT_KEYS = ("FCSTPRD", "FCST_PRD", "FHOUR", "FORECASTHOUR", "FHR", "HOUR", "FCSTHOUR")
 
 
@@ -485,12 +486,25 @@ def source_link(storm: Storm, p: TrackPoint, step_ok: bool = True) -> tuple[str,
             return NHC_HUB, "Site du National Hurricane Center"
         url = f"https://www.nhc.noaa.gov/archive/{year}/{code}{nn}/{code}{nn}{year}.fstadv.{int(m.group()):03d}.shtml"
         frag = t.strftime("%d/%H%MZ") if (t and step_ok) else ""
-        label = "Bulletin NHC de ce pas de temps"
+        label = "Bulletin NHC"
     else:
         url = f"https://www.metoc.navy.mil/jtwc/products/{code}{nn}{str(year)[2:]}web.txt"
         frag = t.strftime("%d%H%MZ") if (t and step_ok) else ""
-        label = "Bulletin JTWC de ce pas de temps"
+        label = "Bulletin JTWC"
     if frag:
         from urllib.parse import quote
         url += "#:~:text=" + quote(frag, safe="")
     return url, label
+
+
+def map_link(storm: Storm) -> Optional[tuple[str, str]]:
+    """Adresse de la carte officielle de la tempête (cône de prévision NHC, image de trajectoire JTWC) : (url, libellé).
+    None si le centre ou le numéro de la tempête est inconnu. Format des adresses non vérifié en ligne."""
+    center, code = _basin_family(storm.basin)
+    if not center or not storm.number:
+        return None
+    if center == "NHC":
+        short = "at" if code == "al" else code
+        return f"https://www.nhc.noaa.gov/graphics_{short}{storm.number}.shtml", "Carte NHC"
+    year = (storm.advisory_time or datetime.now(timezone.utc)).year
+    return f"https://www.metoc.navy.mil/jtwc/products/{code}{storm.number:02d}{str(year)[2:]}.gif", "Carte JTWC"
