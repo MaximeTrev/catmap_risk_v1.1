@@ -53,6 +53,7 @@ def make_fakes(script):
     st.text_area = lambda label, **k: script.get(k.get("key"), "")
     st.file_uploader = lambda *a, **k: script.get(k.get("key"))
     st.checkbox = lambda label, value=False, **k: value
+    st.date_input = lambda label, value=None, **k: value
     st.multiselect = lambda label, options=None, default=None, **k: script.get(k.get("key"), default or [])
     st.slider = lambda label, mn, mx, value, *a, **k: value
     st.selectbox = lambda label, options, **k: options[0]
@@ -105,6 +106,14 @@ class TestAppSmoke(unittest.TestCase):
         import pandas as pd
         stack.enter_context(mock.patch.object(ma, "fetch_all", return_value=(pd.DataFrame(columns=ma.COLUMNS), {}, {})))
         stack.enter_context(mock.patch.object(ma, "load_geocodes", side_effect=ma.MeteoAlarmError("hors ligne")))
+        # aucun accès réseau pour « Suivi évènements climatiques »
+        from catmap import events as evt
+        from tests.test_events import ACT, CAPS
+        stack.enter_context(mock.patch.object(evt, "fetch_activations",
+                                              return_value=(evt.parse_activations(ACT["results"]), [])))
+        stack.enter_context(mock.patch.object(evt, "discover_wms",
+                                              return_value=("http://wms.test", evt.parse_capabilities(CAPS), [])))
+        stack.enter_context(mock.patch.object(evt, "burnt_areas", return_value=(None, [])))
         return stack
 
     def fake_fetch(self):
@@ -144,6 +153,15 @@ class TestAppSmoke(unittest.TestCase):
                 mock.patch.object(vg, "load_departements", return_value=vg.DepartementIndex(GEO)):
             app.main()
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_events_section_renders_without_error(self):
+        app, st = self.load({"Navigation": "Temps réel"})
+        with self.fake_cyclones():
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertTrue([c for c in st.calls if c[0] == "download"])          # CSV des activations
+        self.assertTrue([c for c in st.calls if c[0] == "st_folium"])
 
     def test_cyclone_section_renders_map_and_table(self):
         app, st = self.load({"Navigation": "Temps réel"})
