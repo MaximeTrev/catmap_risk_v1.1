@@ -71,6 +71,7 @@ def make_fakes(script):
     folium = M(); sf = types.ModuleType("streamlit_folium"); sf.st_folium = rec("st_folium")
     comp = types.ModuleType("streamlit.components"); comp_v1 = types.ModuleType("streamlit.components.v1")
     comp_v1.html = rec("components_html"); comp.v1 = comp_v1; st.components = comp
+    comp_v1.declare_component = lambda *a, **k: (lambda **kw: None)
     st.spinner = lambda *a, **k: Container(st)
     st.container = lambda *a, **k: Container(st)
     return {"streamlit.components": comp, "streamlit.components.v1": comp_v1, "streamlit": st, "plotly": plotly, "plotly.express": px, "folium": folium, "folium.plugins": folium.plugins,
