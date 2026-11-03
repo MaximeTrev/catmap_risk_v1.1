@@ -859,8 +859,18 @@ def _tab_supply_chain():
                "jamais publique. Les usines hors d'Europe sont souvent absentes d'OpenStreetMap : elles figurent alors dans la liste « non trouvés ».")
     cc1, cc2 = st.columns([3, 1])
     client = cc1.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
-    client_qid = cc2.text_input("Wikidata du client (facultatif)", placeholder="Ex. Q54078", key="sc_client_qid",
-                                help="Identifiant Wikidata : recherche très précise du client sur OpenStreetMap (marque).")
+    with cc2:
+        try:
+            lrow = st.container(horizontal=True, vertical_alignment="center", gap="small")
+        except TypeError:
+            lrow = st.container()
+        with lrow:
+            st.markdown("Wikidata du client (facultatif)")
+            _help_icon("**Identifiant Wikidata** : code unique d'une entreprise sur wikidata.org (exemple : Q54078 pour IKEA).\n\n"
+                       "**Renseigné** : il prime sur le nom et cherche, dans OpenStreetMap, les lieux rattachés à cette marque. "
+                       "Recherche très précise, qui évite les homonymes.\n\n"
+                       "**Vide** : recherche du client par son nom, comme pour les fournisseurs.", left=True, wide=True)
+        client_qid = st.text_input("Wikidata du client", placeholder="Ex. Q54078", key="sc_client_qid", label_visibility="collapsed")
     src = st.radio("Source des noms de fournisseurs",
                    ["Recherche automatique sur internet", "Adresse web (page ou PDF)", "Fichier",
                     "Mode assisté (Claude / ChatGPT)", "Saisie manuelle"],
