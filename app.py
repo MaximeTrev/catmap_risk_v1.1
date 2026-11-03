@@ -549,37 +549,37 @@ def _clear_all():
     st.session_state["_cleared"] = n
 
 
-def _area_new():
+def _area_new(kp="area_", result_key="result"):
     """Bouton « Nouvelle prise » : nouvelle instance de la carte (cercle effacé) et résultats du périmètre retirés."""
-    st.session_state["area_pick_n"] = st.session_state.get("area_pick_n", 0) + 1
-    res = st.session_state.get("result")
+    st.session_state[f"{kp}pick_n"] = st.session_state.get(f"{kp}pick_n", 0) + 1
+    res = st.session_state.get(result_key)
     if res is not None and res.meta.get("area"):
-        st.session_state.pop("result", None)
+        st.session_state.pop(result_key, None)
 
 
-def _page_area():
+def _page_area(kp="area_", result_key="result", center=(46.6, 2.5), zoom=6):
     s = get_settings()
     with st.expander("Options du périmètre"):
         rel = st.checkbox(
-            "Inclure les grands sites (relations)", False, key="area_rel",
+            "Inclure les grands sites (relations)", False, key=f"{kp}rel",
             help="**Principe** : un grand site (campus, usine, centre commercial) est parfois décrit par une *relation* "
                  "multipolygone plutôt que par un point ou un contour simple.\n\n"
                  "**Cochée** : les relations sont interrogées aussi (requête plus lourde).\n\n"
                  "**Décochée** : seuls les points (nodes) et les contours (ways) sont interrogés.")
         named = st.checkbox(
-            "Uniquement les lieux nommés (name ou brand)", True, key="area_named",
+            "Uniquement les lieux nommés (name ou brand)", True, key=f"{kp}named",
             help="**Principe** : les objets *shop*, *amenity* ou *brand* incluent aussi du mobilier sans nom (bancs, "
                  "poubelles, parkings à vélos…).\n\n"
                  "**Cochée** : on garde les objets qui portent un name ou un brand.\n\n"
                  "**Décochée** : tout est gardé (beaucoup plus de bruit).")
         dedup = st.slider(
-            "Fusion des doublons node/way (mètres)", 0, 100, 25, key="area_dedup",
+            "Fusion des doublons node/way (mètres)", 0, 100, 25, key=f"{kp}dedup",
             help="Un même site peut exister en point et en contour dans OpenStreetMap. Valeur > 0 : on fusionne ceux de même "
                  "nom situés à moins de cette distance (ou un point dans un contour). 0 : aucune fusion.")
     st.caption(f"Rayon maximal : **{s.area_max_radius_m:,} m**".replace(",", " ") + f" (au-delà, la recherche serait trop lourde) ; "
                f"au plus {s.area_max_sites:,} sites sont conservés (les plus proches du centre).".replace(",", " "))
-    n = st.session_state.get("area_pick_n", 0)
-    picked = circle_picker(center=(46.6, 2.5), zoom=6, max_radius_m=s.area_max_radius_m, key=f"area_picker_{n}")
+    n = st.session_state.get(f"{kp}pick_n", 0)
+    picked = circle_picker(center=center, zoom=zoom, max_radius_m=s.area_max_radius_m, key=f"{kp}picker_{n}")
     area = None
     if picked:
         try:
@@ -591,23 +591,24 @@ def _page_area():
     if area:
         st.markdown(f"**Périmètre validé** : centre ({area.lat:.5f}, {area.lon:.5f}), rayon **{area.radius_m:,.0f} m**".replace(",", " "))
         b1, b2 = st.columns(2)
-        b1.button("Nouvelle prise", key="area_new", on_click=_area_new)
-        go = b2.button("Recherche", type="primary", key="area_go")
+        b1.button("Nouvelle prise", key=f"{kp}new", on_click=_area_new, args=(kp, result_key))
+        go = b2.button("Recherche", type="primary", key=f"{kp}go")
         if go:
-            _run_area(area, AreaOptions(include_relations=rel, named_only=named, dedup_radius_m=float(dedup)))
-    res = st.session_state.get("result")
+            _run_area(area, AreaOptions(include_relations=rel, named_only=named, dedup_radius_m=float(dedup)),
+                      result_key=result_key)
+    res = st.session_state.get(result_key)
     if res is not None and res.meta.get("area"):
         st.divider()
         _render_result(res)
 
 
-def _run_area(area: AreaQuery, options: AreaOptions):
+def _run_area(area: AreaQuery, options: AreaOptions, result_key="result"):
     status = st.empty()
     with st.spinner("Interrogation d'Overpass sur le périmètre…"):
         res = locate_area(get_client(), get_settings(), area, options, get_countries(), get_naf(),
                           on_event=lambda m: status.caption(m))
     status.empty()
-    st.session_state["result"] = res
+    st.session_state[result_key] = res
     st.session_state["result_options"] = options
 
 
@@ -1117,6 +1118,35 @@ def _cyclone_section():
             st.caption("Carte : seuls les 5 000 premiers points sont tracés (les points impactés d'abord). Le CSV téléchargé les contient tous.")
     with map_box:
         components.html(cm.render_map_html(payload), height=720, scrolling=False)
+    _cyclone_tau_diagnostic(storms)
+    _cyclone_area_section(storms)
+
+
+def _cyclone_tau_diagnostic(storms):
+    with st.expander("Diagnostic des pas de temps (échéances de prévision)"):
+        rows = [{"Tempête": s.name, "Bassin": s.basin, "Bulletin": s.advisory, "Points de prévision": len(s.forecast),
+                 "TAU lus": ", ".join("—" if t is None else str(t) for t in s.tau_raw),
+                 "Échéances utilisées": ", ".join(str(p.tau) for p in s.forecast) if s.tau_ok else "indisponibles",
+                 "Source": s.tau_source} for s in storms]
+        if rows:
+            _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+        st.caption("Si une tempête indique « indisponibles », le service source ne fournit pas d'échéance distincte : "
+                   "les points sont alors étiquetés « prév. n » (rang) au lieu de « +0 h ».")
+
+
+def _cyclone_area_section(storms):
+    st.divider()
+    st.subheader("Entreprises sur un périmètre autour d'un cyclone")
+    st.caption("Délimitez un cercle sur la carte (par exemple sur la zone d'impact prévue) pour extraire toutes les entreprises "
+               "situées dedans, comme dans l'onglet Géolocalisation.")
+    center, zoom = (20.0, -60.0), 3
+    names = [s.name for s in storms if s.current is not None]
+    if names:
+        pick = st.selectbox("Centrer la carte sur", ["—"] + names, key="cy_area_center")
+        st_ = next((s for s in storms if s.name == pick and s.current is not None), None)
+        if st_:
+            center, zoom = (st_.current.lat, st_.current.lon), 6
+    _page_area(kp="cy_area_", result_key="cy_area_result", center=center, zoom=zoom)
 
 
 def _cyclone_risk_section(storms):
