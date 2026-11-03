@@ -100,3 +100,12 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 .st-key-sc_auto_run button span {
     color: #ffffff !important;
 }
+
+/* Supply chain : boutons principaux en texte blanc, zones de collage en texte blanc */
+.st-key-sc_run button, .st-key-sc_run button p, .st-key-sc_run button span,
+.st-key-sc_run_all button, .st-key-sc_run_all button p, .st-key-sc_run_all button span {
+    color: #ffffff !important;
+}
+.st-key-sc_reply textarea, .st-key-sc_manual textarea {
+    color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; caret-color: #ffffff !important;
+}
