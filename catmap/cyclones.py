@@ -20,6 +20,7 @@ Hypothèse de classification : la catégorie est calculée à partir du vent sou
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -83,6 +84,10 @@ class Storm:
     forecast: list[TrackPoint] = field(default_factory=list)   # y compris la position actuelle en tête
     past: list[tuple[float, float]] = field(default_factory=list)
     source: str = ""
+    number: int = 0                      # numéro de la tempête dans le bassin (STORMNUM)
+    tau_source: str = "TAU"              # d'où viennent les échéances (TAU, FCSTPRD, horodatage, indisponible)
+    tau_ok: bool = True                  # False : échéances non distinctes (toutes à +0 h) et non reconstituables
+    tau_raw: list = field(default_factory=list)   # valeurs TAU lues (diagnostic)
 
     @property
     def kind(self) -> str:
@@ -256,9 +261,9 @@ def parse_forecast(payload: dict) -> dict[tuple, list[dict]]:
             lon = lon if lon is not None else _num(geom.get("x"))
             lat = lat if lat is not None else _num(geom.get("y"))
         tau = _num(a.get("TAU"))
-        if lat is None or lon is None or tau is None:
+        if lat is None or lon is None or (tau is None and not a.get("STORMNAME")):
             continue
-        a["_lat"], a["_lon"], a["_tau"] = lat, lon, int(tau)
+        a["_lat"], a["_lon"], a["_tau"] = lat, lon, (int(tau) if tau is not None else None)
         key = (str(a.get("BASIN") or "").strip().upper(), int(_num(a.get("STORMNUM")) or 0), _title(a.get("STORMNAME")))
         groups.setdefault(key, []).append(a)
     return groups
@@ -279,17 +284,54 @@ def parse_observed(payload: dict) -> dict[tuple, list[dict]]:
     return groups
 
 
+
+TAU_ALT_KEYS = ("FCSTPRD", "FCST_PRD", "FHOUR", "FORECASTHOUR", "FHR", "HOUR", "FCSTHOUR")
+
+
+def resolve_taus(rows: list[dict]) -> tuple[list[Optional[int]], str]:
+    """Échéances (heures après le bulletin) de chaque point d'une prévision.
+
+    Certaines tempêtes (selon le centre) arrivent avec TAU vide ou égal à 0 sur tous les points : on cherche alors une
+    autre colonne d'échéance (FCSTPRD…), puis un horodatage propre à chaque point (heure de validité). Retourne
+    (échéances, source) ; source = « indisponible » si rien n'est exploitable (les échéances ne sont alors pas affichées).
+    """
+    n = len(rows)
+    taus = [r.get("_tau") for r in rows]
+    if n < 2:
+        return [t if t is not None else 0 for t in taus], "TAU"
+    if all(t is not None for t in taus) and len(set(taus)) == n:
+        return list(taus), "TAU"
+    for key in TAU_ALT_KEYS:
+        vals = [_num(r.get(key)) for r in rows]
+        if all(v is not None for v in vals) and len(set(vals)) == n:
+            lo = min(vals)
+            return [int(round(v - lo)) for v in vals], key
+    keys = [k for k in rows[0] if not str(k).startswith("_")]
+    prefer = sorted(keys, key=lambda k: (0 if any(w in str(k) for w in ("VALID", "FCST", "DTG")) else 1))
+    for key in prefer:
+        vals = [_num(r.get(key)) for r in rows]
+        if all(v is not None and v > 1e11 for v in vals) and len(set(vals)) == n:      # millisecondes depuis 1970
+            lo = min(vals)
+            return [int(round((v - lo) / 3_600_000)) for v in vals], f"horodatage {key}"
+    return [t if t is not None else 0 for t in taus], "indisponible"
+
+
 def build_storms(forecast: dict, observed: dict, *, now: Optional[datetime] = None) -> list[Storm]:
     now = now or datetime.now(timezone.utc)
     storms: list[Storm] = []
     used_obs: set[tuple] = set()
 
     for (basin, num, name), rows in forecast.items():
-        rows = sorted(rows, key=lambda r: r["_tau"])
+        tau_raw = [r.get("_tau") for r in rows]
+        taus, tau_source = resolve_taus(rows)
+        for r, t in zip(rows, taus):
+            r["_tau"] = t
+        tau_ok = tau_source != "indisponible"
+        rows = sorted(rows, key=lambda r: r["_tau"])          # tri stable : l'ordre d'origine est conservé si tout est à 0
         adv_time = _dt(rows[0].get("ADVDATE"))
         pts: list[TrackPoint] = []
         for r in rows:
-            valid = (adv_time + timedelta(hours=r["_tau"])) if adv_time else None
+            valid = (adv_time + timedelta(hours=r["_tau"])) if (adv_time and tau_ok) else None
             wind = _clean_wind(r.get("MAXWIND"))
             pts.append(TrackPoint(
                 tau=r["_tau"], lat=r["_lat"], lon=r["_lon"], valid=valid, wind_kt=wind,
@@ -312,7 +354,8 @@ def build_storms(forecast: dict, observed: dict, *, now: Optional[datetime] = No
             cur.direction_deg, cur.speed_kt = bearing_speed((cur.lat, cur.lon), (pts[1].lat, pts[1].lon), pts[1].tau - cur.tau)
         storms.append(Storm(key=f"{basin}{num:02d}", name=name, basin=basin,
                             advisory=str(rows[0].get("ADVISNUM") or ""), advisory_time=adv_time,
-                            current=cur, forecast=pts, past=past, source="NHC/JTWC"))
+                            current=cur, forecast=pts, past=past, source="NHC/JTWC", number=num,
+                            tau_source=tau_source, tau_ok=tau_ok, tau_raw=tau_raw))
 
     # Tempêtes présentes seulement dans la trace observée (pas de prévision publiée) et récentes.
     for (basin, num), rows in observed.items():
@@ -330,7 +373,7 @@ def build_storms(forecast: dict, observed: dict, *, now: Optional[datetime] = No
                          direction_deg=direction, speed_kt=speed)
         past = list(zip([r["_lat"] for r in rows], unwrap_longitudes([r["_lon"] for r in rows], cur.lon)))
         storms.append(Storm(key=f"{basin}{num:02d}", name=_title(last.get("STORMNAME")), basin=basin,
-                            advisory_time=last["_dtg"], current=cur, forecast=[cur], past=past, source="observé seul"))
+                            advisory_time=last["_dtg"], current=cur, forecast=[cur], past=past, source="observé seul", number=num))
 
     storms.sort(key=lambda s: -(s.current.wind_kt or 0) if s.current else 0)
     return storms
@@ -406,3 +449,48 @@ def attach_precipitation(storms: list[Storm], *, session=None, window_h: int = 2
                 p.precip_mm = round(total, 1)
                 ok = True
     return ok
+
+
+# --------------------------------------------------------------------------- lien vers le bulletin source
+NHC_HUB = "https://www.nhc.noaa.gov/"
+JTWC_HUB = "https://www.metoc.navy.mil/jtwc/jtwc.html"
+
+
+def _basin_family(basin: str) -> tuple[str, str]:
+    """(centre, code court) : ('NHC', 'al'|'ep'|'cp') ou ('JTWC', 'wp'|'io'|'sh') ; ('', '') si inconnu."""
+    b = (basin or "").strip().upper()
+    direct = {"AL": ("NHC", "al"), "EP": ("NHC", "ep"), "CP": ("NHC", "cp"), "WP": ("JTWC", "wp"), "IO": ("JTWC", "io"),
+              "NI": ("JTWC", "io"), "SI": ("JTWC", "sh"), "SP": ("JTWC", "sh"), "SH": ("JTWC", "sh")}
+    if b in direct:
+        return direct[b]
+    for word, val in (("ATLANT", ("NHC", "al")), ("CENTRAL", ("NHC", "cp")), ("EAST", ("NHC", "ep")), ("WEST", ("JTWC", "wp")),
+                      ("INDIAN", ("JTWC", "io")), ("SOUTH", ("JTWC", "sh"))):
+        if word in b:
+            return val
+    return "", ""
+
+
+def source_link(storm: Storm, p: TrackPoint, step_ok: bool = True) -> tuple[str, str]:
+    """Adresse du bulletin officiel de la tempête, avec un « fragment de texte » qui fait défiler la page jusqu'à l'heure
+    de validité du point (navigateurs récents) : (url, libellé). Le format des adresses n'a pas pu être vérifié en ligne."""
+    center, code = _basin_family(storm.basin)
+    t = p.valid or storm.advisory_time
+    if not center or not storm.number:
+        return (NHC_HUB, "Site du National Hurricane Center") if center != "JTWC" else (JTWC_HUB, "Site du JTWC")
+    year = (storm.advisory_time or t or datetime.now(timezone.utc)).year
+    nn = f"{storm.number:02d}"
+    if center == "NHC":
+        m = re.match(r"\d+", str(storm.advisory or ""))
+        if not m:
+            return NHC_HUB, "Site du National Hurricane Center"
+        url = f"https://www.nhc.noaa.gov/archive/{year}/{code}{nn}/{code}{nn}{year}.fstadv.{int(m.group()):03d}.shtml"
+        frag = t.strftime("%d/%H%MZ") if (t and step_ok) else ""
+        label = "Bulletin NHC de ce pas de temps"
+    else:
+        url = f"https://www.metoc.navy.mil/jtwc/products/{code}{nn}{str(year)[2:]}web.txt"
+        frag = t.strftime("%d%H%MZ") if (t and step_ok) else ""
+        label = "Bulletin JTWC de ce pas de temps"
+    if frag:
+        from urllib.parse import quote
+        url += "#:~:text=" + quote(frag, safe="")
+    return url, label
