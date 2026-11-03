@@ -36,6 +36,7 @@ from catmap import cyclone_risk as cr
 from catmap import cyclones as cy
 from catmap import vigilance as vg
 from catmap import meteoalarm as ma
+from catmap import events as evt
 from catmap import supply as sp
 from catmap import websearch as ws
 
@@ -1016,7 +1017,7 @@ def _load_vigilance():
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _load_cyclones(with_rain: bool = True):
+def _load_cyclones(with_rain: bool = True, _v: int = 2):
     """Cyclones actifs + trajectoire + (facultatif) précipitations. Mis en cache 10 minutes."""
     storms = cy.fetch_storms()
     radii = cy.fetch_wind_radii()
@@ -1130,6 +1131,11 @@ def _cyclone_section():
 
 def _cyclone_tau_diagnostic(storms):
     with st.expander("Diagnostic des pas de temps (échéances de prévision)"):
+        ver = getattr(cy, "VERSION", 1)
+        if ver < 2 or not hasattr(cm, "step_label"):
+            st.error("Les modules cyclones en mémoire sont anciens (le serveur n'a pas rechargé les fichiers mis à jour). "
+                     "Redémarrez l'application : « Manage app » > menu ⋮ > « Reboot app ».")
+        st.caption(f"Version du module cyclones : {ver}")
         rows = [{"Tempête": s.name, "Bassin": s.basin, "Bulletin": s.advisory, "Points de prévision": len(s.forecast),
                  "TAU lus": ", ".join("—" if t is None else str(t) for t in getattr(s, "tau_raw", [])),
                  "Échéances utilisées": ", ".join(str(p.tau) for p in s.forecast) if getattr(s, "tau_ok", True) else "indisponibles",
@@ -1195,13 +1201,213 @@ def _cyclone_risk_section(storms):
 
 def page_temps_reel():
     st.title("Temps réel")
-    t_cy, t_vg, t_eu = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France", "Vigilance Europe"])
+    t_cy, t_vg, t_eu, t_ev = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France", "Vigilance Europe",
+                                      "Suivi évènements climatiques"])
+    with t_ev:
+        _events_section()
     with t_cy:
         _cyclone_section()
     with t_vg:
         _vigilance_section()
     with t_eu:
         _europe_section()
+
+
+# --------------------------------------------------------------------------- Suivi évènements climatiques
+@st.cache_data(ttl=900, show_spinner=False)
+def _ev_activations():
+    return evt.fetch_activations()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ev_discover(kind: str):
+    urls = {"effis": evt.EFFIS_WMS, "efas": evt.EFAS_WMS, "glofas": evt.GLOFAS_WMS}[kind]
+    return evt.discover_wms(urls)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ev_burnt(bbox: tuple):
+    return evt.burnt_areas(bbox)
+
+
+def _ev_diag(diag, title="Diagnostic des appels"):
+    with st.expander(title):
+        if diag:
+            _stretch(st.dataframe, pd.DataFrame(diag), hide_index=True)
+        else:
+            st.caption("Aucun appel effectué.")
+
+
+def _ev_show_map(m, key):
+    import folium
+    from streamlit_folium import st_folium
+    folium.LayerControl(collapsed=True).add_to(m)
+    try:
+        st_folium(m, height=580, returned_objects=[], key=key, use_container_width=True)
+    except TypeError:
+        st_folium(m, height=580, width=1400, returned_objects=[], key=key)
+
+
+def _ev_base_map(center, zoom):
+    import folium
+    m = folium.Map(location=list(center), zoom_start=zoom, tiles=None, control_scale=True)
+    _add_basemaps(m)
+    return m
+
+
+def _ev_add_wms(m, base_url, layers, time_value=None):
+    import folium
+    for name in layers:
+        kw = {"time": time_value} if time_value else {}
+        folium.raster_layers.WmsTileLayer(
+            url=base_url, layers=name, fmt="image/png", transparent=True, version="1.3.0", name=f"WMS · {name}",
+            overlay=True, control=True, show=True, **kw).add_to(m)
+
+
+def _events_section():
+    st.subheader("Suivi évènements climatiques")
+    st.caption("Inondations et incendies en temps quasi réel à partir des services publics Copernicus (EMS, EFFIS, EFAS, GloFAS). "
+               "Aucune clé n'est nécessaire. Les adresses des services n'ont pas pu être testées depuis le serveur de développement : "
+               "chaque onglet fournit un diagnostic des appels.")
+    t_act, t_fire, t_flood, t_area = st.tabs(["Activations Copernicus EMS", "Incendies (EFFIS)", "Crues (EFAS / GloFAS)",
+                                              "Entreprises dans une zone"])
+    with t_act:
+        _ev_activations_tab()
+    with t_fire:
+        _ev_fire_tab()
+    with t_flood:
+        _ev_flood_tab()
+    with t_area:
+        _ev_area_tab()
+
+
+def _ev_activations_tab():
+    st.markdown("**Évènements pour lesquels le service de cartographie rapide Copernicus EMS a été activé** "
+                "(inondations, incendies, etc.), avec lien vers les cartes officielles.")
+    if st.button("Actualiser", key="ev_act_refresh"):
+        _ev_activations.clear()
+    with st.spinner("Lecture des activations Copernicus EMS…"):
+        df, diag = _ev_activations()
+    c1, c2, c3 = st.columns([3, 2, 2])
+    labels = {"flood": "Inondations", "fire": "Incendies", "other": "Autres"}
+    kinds = c1.multiselect("Type d'évènement", list(labels), default=["flood", "fire"],
+                           format_func=lambda k: labels[k], key="ev_act_kinds")
+    periods = {"30 derniers jours": 30, "90 derniers jours": 90, "12 derniers mois": 365, "Tout": 0}
+    per = c2.selectbox("Période (date d'activation)", list(periods), key="ev_act_period")
+    only_open = c3.checkbox("Activations non clôturées", False, key="ev_act_open")
+    if df.empty:
+        st.warning("Aucune activation lue. Consultez le diagnostic ci-dessous (adresse refusée ou format inattendu).")
+        _ev_diag(diag)
+        return
+    view = evt.filter_activations(df, kinds, periods[per] or None, only_open)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Activations affichées", len(view))
+    m2.metric("Inondations", int((view["genre"] == "flood").sum()))
+    m3.metric("Incendies", int((view["genre"] == "fire").sum()))
+    if view.empty:
+        st.caption("Aucune activation pour ces critères : élargissez la période ou les types.")
+    else:
+        import folium
+        geo = view.dropna(subset=["lat", "long"])
+        colors = {"flood": "#1f6fb5", "fire": "#d7191c", "other": "#6b6b6b"}
+        center = (float(geo["lat"].mean()), float(geo["long"].mean())) if len(geo) else (30.0, 10.0)
+        m = _ev_base_map(center, 3 if len(geo) > 1 else 6)
+        for r in geo.itertuples():
+            when = r.activation.strftime("%d/%m/%Y") if pd.notna(r.activation) else "n/d"
+            pop = (f"<b>{html.escape(str(r.nom))}</b><br>{html.escape(evt.KIND_LABEL[r.genre])} · {html.escape(str(r.pays))}"
+                   f"<br>Activé le {when} · {'clôturé' if r.cloture else 'en cours'}<br>"
+                   f"<a href='{html.escape(r.lien, quote=True)}' target='_blank' rel='noopener noreferrer'>{html.escape(r.code)}</a>")
+            folium.CircleMarker([r.lat, r.long], radius=8, color="#222", weight=1, fill=True, fill_color=colors[r.genre],
+                                fill_opacity=0.85, tooltip=f"{r.code} — {r.nom}",
+                                popup=folium.Popup(pop, max_width=320)).add_to(m)
+        _ev_show_map(m, "ev_act_map")
+        shown = view.assign(activation=view["activation"].dt.strftime("%Y-%m-%d"), maj=view["maj"].dt.strftime("%Y-%m-%d"))
+        shown = shown[["code", "nom", "genre", "type", "pays", "activation", "maj", "cloture", "cartes", "lat", "long", "lien"]]
+        _stretch(st.dataframe, shown, hide_index=True,
+                 column_config={"lien": st.column_config.LinkColumn("Cartes", display_text="ouvrir")})
+        st.download_button("Télécharger (CSV)", _csv_bytes(shown), "activations_copernicus_ems.csv", "text/csv", key="ev_act_dl")
+        if len(geo) < len(view):
+            st.caption(f"{len(view) - len(geo)} activation(s) sans position : visibles dans le tableau uniquement.")
+    _ev_diag(diag)
+
+
+def _ev_fire_tab():
+    st.markdown("**Incendies de forêt (EFFIS, Copernicus)** : périmètres de zones brûlées récentes et couches cartographiques "
+                "(foyers actifs, indice météo feu), sur une zone au choix.")
+    zone = st.selectbox("Zone", list(evt.BBOX_PRESETS), key="ev_fire_zone")
+    bbox = evt.BBOX_PRESETS[zone]
+    show_burnt = st.checkbox("Périmètres de zones brûlées", True, key="ev_fire_burnt")
+    url, layers, d_cap = _ev_discover("effis")
+    chosen = []
+    if layers:
+        default = evt.pick_layers(layers, evt.FIRE_LAYER_WORDS)[:3]
+        chosen = st.multiselect("Couches cartographiques EFFIS (WMS)", [n for n, _ in layers], default=default,
+                                format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key="ev_fire_layers",
+                                help="La liste est lue dans le catalogue du service EFFIS ; sélectionnez celles à superposer.")
+    else:
+        st.warning("Catalogue de couches EFFIS indisponible (voir le diagnostic). Les périmètres brûlés restent affichés s'ils répondent.")
+    gj, d_ba = (None, [])
+    if show_burnt:
+        with st.spinner("Lecture des périmètres brûlés…"):
+            gj, d_ba = _ev_burnt(bbox)
+    import folium
+    m = _ev_base_map(((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2), 4 if zone == "Europe" else 6)
+    if url and chosen:
+        _ev_add_wms(m, url, chosen)
+    tbl = evt.burnt_table(gj)
+    if gj and gj.get("features"):
+        cols = [c for c in tbl.columns if c != "geometry"][:4]
+        folium.GeoJson(gj, name="Zones brûlées (EFFIS)", style_function=lambda f: {"color": "#8b1a1a", "weight": 1, "fillColor": "#d7191c", "fillOpacity": 0.55},
+                       tooltip=folium.GeoJsonTooltip(fields=cols) if cols else None).add_to(m)
+    k1, k2 = st.columns(2)
+    k1.metric("Périmètres brûlés lus", len(gj["features"]) if gj else 0)
+    k2.metric("Couches WMS affichées", len(chosen))
+    _ev_show_map(m, "ev_fire_map")
+    if not tbl.empty:
+        _stretch(st.dataframe, tbl.head(1000), hide_index=True)
+        st.download_button("Télécharger les périmètres (CSV)", _csv_bytes(tbl), "effis_zones_brulees.csv", "text/csv", key="ev_fire_dl")
+    st.caption("Les dates ne peuvent pas être filtrées côté service : le tableau contient les attributs fournis par EFFIS.")
+    _ev_diag(d_cap + d_ba)
+
+
+def _ev_flood_tab():
+    st.markdown("**Prévision de crues (Copernicus EMS, EFAS pour l'Europe, GloFAS pour le monde)** : couches de prévision et "
+                "d'alerte. Ce sont des prévisions de débit des cours d'eau, pas la cartographie de l'inondation constatée "
+                "(celle-ci est dans l'onglet « Activations »).")
+    src = st.radio("Service", ["EFAS (Europe)", "GloFAS (monde)"], horizontal=True, key="ev_flood_src")
+    kind = "efas" if src.startswith("EFAS") else "glofas"
+    url, layers, d_cap = _ev_discover(kind)
+    if not layers:
+        st.warning("Catalogue de couches indisponible (voir le diagnostic). L'accès à EFAS peut exiger un compte gratuit sur le site du service.")
+        _ev_diag(d_cap)
+        return
+    default = evt.pick_layers(layers, evt.FLOOD_LAYER_WORDS)[:2]
+    chosen = st.multiselect("Couches", [n for n, _ in layers], default=default,
+                            format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key=f"ev_flood_layers_{kind}")
+    when = st.date_input("Date de prévision (facultatif)", value=None, key=f"ev_flood_date_{kind}",
+                         help="Laissez vide pour la dernière prévision disponible.")
+    tv = None
+    if when:
+        tv = f"{when.isoformat()}T00:00:00" if kind == "glofas" else f"{when.isoformat()}-00-00"
+    m = _ev_base_map((48.0, 8.0) if kind == "efas" else (20.0, 10.0), 4 if kind == "efas" else 2)
+    _ev_add_wms(m, url, chosen, tv)
+    _ev_show_map(m, f"ev_flood_map_{kind}")
+    st.caption(f"Service interrogé : {url}")
+    _ev_diag(d_cap)
+
+
+def _ev_area_tab():
+    st.markdown("**Extraire toutes les entreprises situées dans une zone touchée** (même outil que l'onglet Géolocalisation).")
+    center, zoom = (46.6, 2.5), 5
+    df, _ = _ev_activations()
+    if not df.empty:
+        geo = df.dropna(subset=["lat", "long"])
+        geo = geo[geo["genre"].isin(["flood", "fire"])].head(40)
+        opts = {f"{r.code} — {r.nom}": (r.lat, r.long) for r in geo.itertuples()}
+        pick = st.selectbox("Centrer la carte sur une activation récente", ["—"] + list(opts), key="ev_area_center")
+        if pick in opts:
+            center, zoom = opts[pick], 8
+    _page_area(kp="ev_area_", result_key="ev_area_result", center=center, zoom=zoom)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
