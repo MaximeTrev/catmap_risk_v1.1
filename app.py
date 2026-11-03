@@ -166,6 +166,18 @@ _COLOR_CHOICES = {"Entreprise": "nom_demande", "Pays": "pays", "Secteur NAF": "n
                   "Rôle (client / fournisseurs)": "role"}
 
 
+def _add_basemaps(m):
+    """Fonds de carte communs à toutes les cartes de l'application (même jeu, même ordre, même défaut)."""
+    import folium
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Dark_Gray_Base"), attr="Esri", name="Fond sombre", max_native_zoom=16).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+
+
 def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = "", default_color: str | None = None):
     """Carte interactive des sites du tableau : fonds de carte au choix, regroupement, popups, plein écran."""
     import folium
@@ -191,13 +203,7 @@ def _site_map(df: pd.DataFrame, area: dict | None = None, kp: str = "", default_
 
     m = folium.Map(location=[float(d["lat"].mean()), float(d["long"].mean())], zoom_start=5,
                    control_scale=True, tiles=None)
-    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
-    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
-    folium.TileLayer(tiles=esri.format("World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
-    folium.TileLayer(tiles=esri.format("World_Dark_Gray_Base"), attr="Esri", name="Fond sombre", max_native_zoom=16).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    _add_basemaps(m)
     Fullscreen().add_to(m)
     m.fit_bounds([[float(d["lat"].min()), float(d["long"].min())], [float(d["lat"].max()), float(d["long"].max())]])
 
@@ -1125,9 +1131,9 @@ def _cyclone_section():
 def _cyclone_tau_diagnostic(storms):
     with st.expander("Diagnostic des pas de temps (échéances de prévision)"):
         rows = [{"Tempête": s.name, "Bassin": s.basin, "Bulletin": s.advisory, "Points de prévision": len(s.forecast),
-                 "TAU lus": ", ".join("—" if t is None else str(t) for t in s.tau_raw),
-                 "Échéances utilisées": ", ".join(str(p.tau) for p in s.forecast) if s.tau_ok else "indisponibles",
-                 "Source": s.tau_source} for s in storms]
+                 "TAU lus": ", ".join("—" if t is None else str(t) for t in getattr(s, "tau_raw", [])),
+                 "Échéances utilisées": ", ".join(str(p.tau) for p in s.forecast) if getattr(s, "tau_ok", True) else "indisponibles",
+                 "Source": getattr(s, "tau_source", "?")} for s in storms]
         if rows:
             _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
         st.caption("Si une tempête indique « indisponibles », le service source ne fournit pas d'échéance distincte : "
@@ -1260,9 +1266,7 @@ def _overseas_section():
     view = st.selectbox("Zoom de la carte", list(centers), key="om_view")
     zoom = vg.OM_TERRITORIES[view]["zoom"] if view in vg.OM_TERRITORIES else vg.OM_VIEWS.get(view, (None, 10))[1]
     m = folium.Map(location=list(centers[view]), zoom_start=zoom, tiles=None, control_scale=True)
-    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
-    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
-    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    _add_basemaps(m)
     for terr, mx, w in summary:
         if terr not in centers:
             continue
@@ -1313,10 +1317,7 @@ def _vigilance_section():
                     return vg.COLOR_HEX.get(int(by_code[cand].couleur_id), "#999999")
             return "#cccccc"
         m = folium.Map(location=[46.6, 2.5], zoom_start=6, tiles=None, control_scale=True)
-        esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
-        folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
-        folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
-        folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+        _add_basemaps(m)
         folium.GeoJson(deps.geojson, style_function=lambda f: {
             "fillColor": color_for(str((f.get("properties") or {}).get("code", ""))),
             "color": "#333", "weight": 0.6, "fillOpacity": 0.65},
@@ -1493,10 +1494,7 @@ def _europe_map(alerts, rings):
     import folium
     from streamlit_folium import st_folium
     m = folium.Map(location=[50.0, 10.0], zoom_start=4, tiles=None, control_scale=True)
-    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
-    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
-    folium.TileLayer("OpenStreetMap", name="Plan (OpenStreetMap)").add_to(m)
-    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
+    _add_basemaps(m)
     grp = folium.FeatureGroup(name="Alertes par zone")
     zones: dict = {}
     for i in rings:                                   # une seule géométrie par zone (évite une page énorme)
