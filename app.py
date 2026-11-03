@@ -806,14 +806,9 @@ def _sc_auto_search(client: str):
     ai = st.session_state.get("sc_ai")
     if ai and ai["client"] == client:
         df = ai["df"]
-        try:
-            hrow = st.container(horizontal=True, vertical_alignment="center", gap="small")
-        except TypeError:
-            hrow = st.container()
-        with hrow:
-            st.markdown(f"**Propositions de l'IA : {len(df)} fournisseur(s)** "
-                        f"({int((df['confiance'] == 'C').sum())} avec citation vérifiée, les autres à vérifier).")
-            _help_icon(CONFIDENCE_HELP, wide=True)
+        _help_line(f"<b>Propositions de l'IA : {len(df)} fournisseur(s)</b> "
+                   f"({int((df['confiance'] == 'C').sum())} avec citation vérifiée, les autres à vérifier).",
+                   CONFIDENCE_HELP, wide=True)
         if df.empty:
             st.info("L'IA n'a trouvé aucun fournisseur déclaré publiquement.")
         else:
@@ -860,16 +855,11 @@ def _tab_supply_chain():
     cc1, cc2 = st.columns([3, 1])
     client = cc1.text_input("Nom du client (entreprise dont on cherche les fournisseurs)", placeholder="Ex. IKEA", key="sc_client")
     with cc2:
-        try:
-            lrow = st.container(horizontal=True, vertical_alignment="center", gap="small")
-        except TypeError:
-            lrow = st.container()
-        with lrow:
-            st.markdown("Wikidata du client (facultatif)")
-            _help_icon("**Identifiant Wikidata** : code unique d'une entreprise sur wikidata.org (exemple : Q54078 pour IKEA).\n\n"
-                       "**Renseigné** : il prime sur le nom et cherche, dans OpenStreetMap, les lieux rattachés à cette marque. "
-                       "Recherche très précise, qui évite les homonymes.\n\n"
-                       "**Vide** : recherche du client par son nom, comme pour les fournisseurs.", left=True, wide=True)
+        _help_line("Wikidata du client (facultatif)",
+                   "**Identifiant Wikidata** : code unique d'une entreprise sur wikidata.org (exemple : Q54078 pour IKEA).\n\n"
+                   "**Renseigné** : il prime sur le nom et cherche, dans OpenStreetMap, les lieux rattachés à cette marque. "
+                   "Recherche très précise, qui évite les homonymes.\n\n"
+                   "**Vide** : recherche du client par son nom, comme pour les fournisseurs.", left=True, wide=True)
         client_qid = st.text_input("Wikidata du client", placeholder="Ex. Q54078", key="sc_client_qid", label_visibility="collapsed")
     src = st.radio("Source des noms de fournisseurs",
                    ["Recherche automatique sur internet", "Adresse web (page ou PDF)", "Fichier",
@@ -906,7 +896,8 @@ def _tab_supply_chain():
     if cands is None or cands.empty:
         return
     st.divider()
-    st.markdown(f"**Fournisseurs recensés : {len(cands)}** (doublons fusionnés). Décochez ceux à exclure avant la recherche.")
+    _help_line(f"<b>Fournisseurs recensés : {len(cands)}</b> (doublons fusionnés). Décochez ceux à exclure avant la recherche.",
+               CONFIDENCE_HELP, icon_first=True, wide=True)
     all_on = st.checkbox("Tout sélectionner", True, key="sc_all")
     ed = cands.copy()
     ed.insert(0, "garder", bool(all_on))
@@ -1047,6 +1038,16 @@ def _help_icon(text: str, left: bool = False, wide: bool = False) -> None:
     cls = "cy-help" + (" cy-left" if left else "") + (" cy-wide" if wide else "")
     tip = _help_html(text).replace("$", "&#36;")          # « $ » déclencherait le rendu des formules mathématiques
     st.markdown(f'<span class="{cls}"><span class="cy-tip">{tip}</span></span>', unsafe_allow_html=True)
+
+
+def _help_line(label_html: str, text: str, *, icon_first: bool = False, left: bool = False, wide: bool = False) -> None:
+    """Ligne de texte + « ? » sur une même ligne (HTML en ligne : fonctionne dans une colonne étroite)."""
+    cls = "cy-help" + (" cy-left" if left else "") + (" cy-wide" if wide else "")
+    tip = _help_html(text).replace("$", "&#36;")
+    icon = f'<span class="{cls}"><span class="cy-tip">{tip}</span></span>'
+    label = f"<span>{label_html}</span>"
+    inner = (icon + label) if icon_first else (label + icon)
+    st.markdown(f'<div style="display:flex;align-items:center;gap:.45rem;flex-wrap:nowrap">{inner}</div>', unsafe_allow_html=True)
 
 
 def _checkbox_with_help(label: str, help_text: str, *, key: str, value: bool = False, left: bool = False, wide: bool = False) -> bool:
