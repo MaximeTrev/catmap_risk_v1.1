@@ -11,7 +11,7 @@ import html
 import json
 from typing import Optional
 
-from .cyclones import (ICON_KEYS, Storm, TrackPoint, movement_text, pressure_text, stage_label,
+from .cyclones import (ICON_KEYS, Storm, source_link, TrackPoint, movement_text, pressure_text, stage_label,
                        wind_text)
 
 ICON_COLOR = "#cd2a00"
@@ -62,12 +62,23 @@ def _row(label: str, value: str) -> str:
     return f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
 
 
+def step_label(storm: Storm, p: TrackPoint) -> str:
+    """« +48 h » si l'échéance est fiable ; sinon « prév. n » (rang du point) pour ne pas afficher « +0 h » partout."""
+    if storm.tau_ok:
+        return f"+{p.tau} h"
+    try:
+        return f"prév. {storm.forecast.index(p)}"
+    except ValueError:
+        return "prév."
+
+
 def popup_html(storm: Storm, p: TrackPoint, *, forecast: bool = False) -> str:
     stage = stage_label(p.wind_kt, storm.basin)
     when = p.valid.strftime("%d/%m %H:%M UTC") if p.valid else ""
     head = f"<div class='pn'>{html.escape(storm.name)}</div><div class='ps'>{html.escape(stage)}</div>"
     if forecast:
-        head += f"<div class='pt'>Prévision +{p.tau} h{(' · ' + when) if when else ''}</div>"
+        lab = step_label(storm, p)
+        head += f"<div class='pt'>{'Prévision ' + lab if lab.startswith('+') else lab.capitalize()}{(' · ' + when) if when else ''}</div>"
     elif when:
         head += f"<div class='pt'>Position du {html.escape(when)}</div>"
     rows = [_row("Maximum Sustained Winds", wind_text(p.wind_kt)),
@@ -76,9 +87,16 @@ def popup_html(storm: Storm, p: TrackPoint, *, forecast: bool = False) -> str:
             _row("Movement", movement_text(p.direction_deg, p.speed_kt))]
     if p.precip_mm is not None:
         rows.append(_row("Expected rainfall (24 h)", f"{p.precip_mm:.0f} mm (au centre)"))
+    link = ""
+    try:
+        url, label = source_link(storm, p, step_ok=storm.tau_ok or not forecast)
+        link = (f"<div class='pl'><a href='{html.escape(url, quote=True)}' target='_blank' rel='noopener noreferrer'>"
+                f"{html.escape(label)} ↗</a></div>")
+    except Exception:
+        pass
     foot = f"<div class='pf'>Bassin {html.escape(storm.basin or '?')}" + (
         f" · bulletin n°{html.escape(storm.advisory)}" if storm.advisory else "") + "</div>"
-    return f"<div class='cy-pop'>{head}<table>{''.join(rows)}</table>{foot}</div>"
+    return f"<div class='cy-pop'>{head}<table>{''.join(rows)}</table>{link}{foot}</div>"
 
 
 def _marker_html(name: str, key: str, size: int) -> tuple[str, int, int, int, int]:
@@ -173,18 +191,18 @@ def build_payload(storms: list[Storm], radii: Optional[dict] = None, *, rain_ava
         fc = st.forecast
         for a, b in zip(fc, fc[1:]):
             segments.append({"coords": [[a.lat, a.lon], [b.lat, b.lon]], "color": CAT_COLORS[b.category],
-                             "tip": f"{st.name} — +{b.tau} h : {wind_text(b.wind_kt)}"})
+                             "tip": f"{st.name} — {step_label(st, b)} : {wind_text(b.wind_kt)}"})
         for p in fc[1:]:
             svg = icon_svg(p.icon_key, 30)
             sh = round(30 * VIEWBOX[3] / VIEWBOX[2])
-            tag = f"+{p.tau} h"
+            tag = step_label(st, p)
             fpoints.append({"lat": p.lat, "lon": p.lon, "icon": p.icon_key,
                             "html": f"<div class='cy-ico'>{svg}</div><div class='cy-tau'>{tag}</div>",
                             "w": 44, "h": sh + 14, "ax": 22, "ay": sh // 2, "popup": popup_html(st, p, forecast=True)})
         for p in fc:
             if p.precip_mm is not None:
                 rain.append({"lat": p.lat, "lon": p.lon, "mm": p.precip_mm,
-                             "tip": f"{st.name} — +{p.tau} h : {p.precip_mm:.0f} mm / 24 h (au centre)"})
+                             "tip": f"{st.name} — {step_label(st, p)} : {p.precip_mm:.0f} mm / 24 h (au centre)"})
     return {"storms": out_storms, "segments": segments, "forecast_points": fpoints, "past": past,
             "rain": rain, "radii": radii or {}, "rain_tiles": IMERG_TILES, "rain_available": rain_available,
             "colors": {str(k): v for k, v in CAT_COLORS.items()},
@@ -199,6 +217,7 @@ html,body{margin:0;height:100%;font-family:Arial,Helvetica,sans-serif}
 .cy-name{height:20px;line-height:20px;text-align:center;font-weight:700;font-size:13px;color:#232323;
   text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 4px #fff;white-space:nowrap}
 .cy-ico{text-align:center;line-height:0;filter:drop-shadow(0 0 2px #fff) drop-shadow(0 0 1px #fff)}
+.cy-pop .pl{margin-top:6px;font-size:12px}.cy-pop .pl a{color:#1f6fb5;font-weight:600}
 .cy-tau{text-align:center;font-size:10px;font-weight:700;color:#232323;line-height:14px;
   text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff}
 .cy-pop{min-width:250px;color:#232323}
