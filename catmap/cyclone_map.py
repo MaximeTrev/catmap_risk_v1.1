@@ -11,7 +11,7 @@ import html
 import json
 from typing import Optional
 
-from .cyclones import (ICON_KEYS, Storm, source_link, TrackPoint, movement_text, pressure_text, stage_label,
+from .cyclones import (ICON_KEYS, Storm, map_link, source_link, TrackPoint, movement_text, pressure_text, stage_label,
                        wind_text)
 
 ICON_COLOR = "#cd2a00"
@@ -91,11 +91,15 @@ def popup_html(storm: Storm, p: TrackPoint, *, forecast: bool = False) -> str:
     try:
         url, label = source_link(storm, p, step_ok=storm.tau_ok or not forecast)
         link = (f"<div class='pl'><a href='{html.escape(url, quote=True)}' target='_blank' rel='noopener noreferrer'>"
-                f"{html.escape(label)} ↗</a></div>")
+                f"{html.escape(label)}</a></div>")
+        ml = map_link(storm)
+        if ml:
+            link += (f"<div class='pl'><a href='{html.escape(ml[0], quote=True)}' target='_blank' "
+                     f"rel='noopener noreferrer'>{html.escape(ml[1])}</a></div>")
     except Exception:
         pass
     foot = f"<div class='pf'>Bassin {html.escape(storm.basin or '?')}" + (
-        f" · bulletin n°{html.escape(storm.advisory)}" if storm.advisory else "") + "</div>"
+        f" · bulletin n°{html.escape(str(storm.advisory).strip())}" if str(storm.advisory or "").strip() else "") + "</div>"
     return f"<div class='cy-pop'>{head}<table>{''.join(rows)}</table>{link}{foot}</div>"
 
 
