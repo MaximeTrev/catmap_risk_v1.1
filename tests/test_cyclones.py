@@ -216,3 +216,71 @@ class MapOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _fc_alt(tau, hr, lat, lon, name="ZETA", num=7):
+    r = fc(tau, lat, lon, 80, name=name, num=num)
+    r["attributes"]["FCSTPRD"] = hr
+    return r
+
+
+def _storm(feats, now=NOW):
+    return cy.build_storms(cy.parse_forecast({"features": feats}), {}, now=now)[0]
+
+
+class TauResolution(unittest.TestCase):
+    def test_all_zero_taus_use_alternative_field(self):
+        s = _storm([_fc_alt(0, 0, 16, -75), _fc_alt(0, 12, 17, -76), _fc_alt(0, 24, 18, -77)])
+        self.assertTrue(s.tau_ok)
+        self.assertEqual([p.tau for p in s.forecast], [0, 12, 24])
+        self.assertEqual(s.tau_source, "FCSTPRD")
+
+    def test_all_zero_taus_use_timestamps(self):
+        feats = []
+        for i, h in enumerate((0, 12, 24)):
+            r = fc(0, 16 + i, -75, 80, name="ETA", num=8)
+            r["attributes"]["VALIDTIME"] = ADV + h * 3600_000
+            feats.append(r)
+        s = _storm(feats)
+        self.assertTrue(s.tau_ok)
+        self.assertEqual([p.tau for p in s.forecast], [0, 12, 24])
+        self.assertIn("VALIDTIME", s.tau_source)
+
+    def test_unresolvable_taus_are_flagged_and_labelled(self):
+        s = _storm([fc(0, 16, -75, 80, name="IOTA", num=9), fc(0, 17, -76, 80, name="IOTA", num=9),
+                    fc(0, 18, -77, 80, name="IOTA", num=9)])
+        self.assertFalse(s.tau_ok)
+        self.assertEqual(s.tau_source, "indisponible")
+        self.assertTrue(all(p.valid is None for p in s.forecast))
+        payload = build_payload([s])
+        self.assertNotIn("+0 h", json.dumps(payload["forecast_points"], ensure_ascii=False))
+        self.assertIn("prév. 1", json.dumps(payload["forecast_points"], ensure_ascii=False))
+
+    def test_normal_storm_unchanged(self):
+        s = {x.name: x for x in cy.build_storms(cy.parse_forecast(FORECAST), {}, now=NOW)}["Melissa"]
+        self.assertTrue(s.tau_ok)
+        self.assertEqual([p.tau for p in s.forecast], [0, 12, 24, 48, 72])
+
+
+class SourceLink(unittest.TestCase):
+    def setUp(self):
+        self.s = {x.name: x for x in cy.build_storms(cy.parse_forecast(FORECAST), {}, now=NOW)}
+
+    def test_nhc_link_targets_advisory_and_time(self):
+        s = self.s["Melissa"]
+        url, label = cy.source_link(s, s.forecast[2])
+        self.assertIn("nhc.noaa.gov/archive/2026/al13/al132026.fstadv.012.shtml", url)
+        self.assertIn("#:~:text=29%2F1200Z", url)          # 28/10 12 UTC + 24 h
+        self.assertIn("NHC", label)
+
+    def test_jtwc_link(self):
+        s = self.s["Twenty"]
+        url, label = cy.source_link(s, s.forecast[1])
+        self.assertIn("metoc.navy.mil/jtwc/products/wp0326web.txt", url)
+        self.assertIn("JTWC", label)
+
+    def test_popup_contains_link(self):
+        s = self.s["Melissa"]
+        h = popup_html(s, s.forecast[1], forecast=True)
+        self.assertIn("href='https://www.nhc.noaa.gov/archive/2026/al13/", h)
+        self.assertIn("target='_blank'", h)
