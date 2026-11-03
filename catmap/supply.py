@@ -360,17 +360,21 @@ def parse_assisted_reply(text: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- sortie
-def build_output(client: str, sites: pd.DataFrame, cands: pd.DataFrame) -> pd.DataFrame:
-    """Fichier « suply » : colonne ``client`` en premier, puis les colonnes de la géolocalisation, puis la qualification."""
+def build_output(client: str, sites: pd.DataFrame, cands: pd.DataFrame, include_client: bool = False) -> pd.DataFrame:
+    """Fichier « suply » : colonne ``client`` en premier, puis ``role`` (client / fournisseur), puis les colonnes de la
+    géolocalisation, puis la qualification de la relation (vide pour les lignes du client)."""
     extra = ["type_relation", "rang", "confiance", "source", "source_url", "citation"]
     if sites is None or sites.empty:
-        return pd.DataFrame(columns=["client"] + list(sites.columns if sites is not None else []) + extra)
+        return pd.DataFrame(columns=["client", "role"] + list(sites.columns if sites is not None else []) + extra)
     c = cands.copy()
     c["_k"] = c["fournisseur"].str.casefold()
     c = c.drop_duplicates("_k")
     s = sites.copy()
     s["_k"] = s["nom_demande"].astype(str).str.casefold()
-    s = s.merge(c[["_k"] + extra], on="_k", how="left").drop(columns="_k")
+    s = s.merge(c[["_k"] + extra], on="_k", how="left")
+    is_client = (s["_k"] == str(client).strip().casefold()) & bool(include_client)
+    s = s.drop(columns="_k")
+    s.insert(0, "role", ["client" if x else "fournisseur" for x in is_client])
     s.insert(0, "client", client)
     return s
 
