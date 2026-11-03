@@ -246,18 +246,16 @@ const D = __PAYLOAD__;
 const map = L.map('map', {worldCopyJump: true, minZoom: 2, zoomControl: true}).setView([18, -40], 3);
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
 const base = {
+  'Plan (OpenStreetMap)': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {attribution: '&copy; OpenStreetMap', maxZoom: 18}),
   'Fond clair': L.tileLayer(ESRI + 'Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
       {attribution: 'Tiles &copy; Esri', maxNativeZoom: 16, maxZoom: 18}),
-  'Océans': L.tileLayer(ESRI + 'Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}',
-      {attribution: 'Tiles &copy; Esri', maxNativeZoom: 13, maxZoom: 18}),
-  'Satellite': L.tileLayer(ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      {attribution: 'Tiles &copy; Esri', maxZoom: 18}),
-  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {attribution: '&copy; OpenStreetMap', maxZoom: 18}),
   'Fond sombre': L.tileLayer(ESRI + 'Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-      {attribution: 'Tiles &copy; Esri', maxNativeZoom: 16, maxZoom: 18})
+      {attribution: 'Tiles &copy; Esri', maxNativeZoom: 16, maxZoom: 18}),
+  'Satellite': L.tileLayer(ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {attribution: 'Esri, Maxar, Earthstar Geographics', maxZoom: 18})
 };
-base['Fond clair'].addTo(map);
+base['Plan (OpenStreetMap)'].addTo(map);
 
 function mk(o) {
   return L.marker([o.lat, o.lon], {
