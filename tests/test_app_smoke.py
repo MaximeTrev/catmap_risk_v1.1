@@ -194,10 +194,12 @@ class TestAppSmoke(unittest.TestCase):
         app, st = self.load({"Navigation": "Temps réel", "ev_flood_csv_efas": Up(), "button:Croiser": True,
                              "ev_flood_layers_efas": ["countries"]})
         with self.fake_cyclones(), \
-                mock.patch.object(evt, "sample_layer", return_value=([2.5, float("nan")], {"mailles": 2, "valeurs_lues": 1, "tronque": False})):
+                mock.patch.object(evt, "sample_layer", return_value=([2.5, float("nan")], {
+                    "mailles": 2, "valeurs_lues": 1, "objets": 1, "tronque": False, "hors_emprise": 0,
+                    "presence": __import__("numpy").array([True, False]), "exemples": []})):
             app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
             app.main()
-        _, res, notes = st.session_state["ev_flood_cross_efas"]
+        _, res, notes, _ex = st.session_state["ev_flood_cross_efas"]
         self.assertEqual(list(res["crue_touche"]), ["Oui", "Non"])
         self.assertEqual(res.loc[0, "crue_countries"], 2.5)
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
