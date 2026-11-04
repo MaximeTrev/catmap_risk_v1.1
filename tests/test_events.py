@@ -118,5 +118,92 @@ class Burnt(unittest.TestCase):
         self.assertTrue(ev.burnt_table(None).empty)
 
 
+SQUARE = [[[2.0, 40.0], [2.0, 41.0], [3.0, 41.0], [3.0, 40.0], [2.0, 40.0]]]
+
+
+def _gj():
+    return {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"initialdate": "2026-10-01 00:00:00", "finaldate": "2026-10-05 00:00:00", "area_ha": 100},
+         "geometry": {"type": "Polygon", "coordinates": SQUARE}},
+        {"type": "Feature", "properties": {"initialdate": "2026-11-01 00:00:00", "finaldate": "2026-11-03 00:00:00", "area_ha": 50},
+         "geometry": {"type": "MultiPolygon", "coordinates": [[[[10.0, 10.0], [10.0, 11.0], [11.0, 11.0], [10.0, 10.0]]]]}}]}
+
+
+class FireValues(unittest.TestCase):
+    def test_fwi_classes(self):
+        self.assertEqual(ev.fwi_class(3), (1, "Très faible"))
+        self.assertEqual(ev.fwi_class(21.3)[1], "Élevé")
+        self.assertEqual(ev.fwi_class(80), (6, "Extrême"))
+        self.assertEqual(ev.fwi_class("x"), (0, ""))
+
+    def test_first_number(self):
+        self.assertEqual(ev.first_number("Layer 'mf010.fwi'\n  value_0 = '23.4'"), 23.4)
+        self.assertEqual(ev.first_number('{"p":{"value": 7.5}}'), 7.5)
+        self.assertIsNone(ev.first_number("rien"))
+
+    def test_feature_info_tries_formats_and_reports(self):
+        s = Sess([("wms", FakeResponse(200, text="<ServiceExceptionReport><ServiceException>x</ServiceException>"))])
+        txt, diag = ev.get_feature_info("http://wms.test", "mf010.fwi", 45, 5, 6, s)
+        self.assertEqual(txt, "")
+        self.assertEqual(len(diag), 4)
+        s = Sess([("wms", FakeResponse(200, text="fwi = 12.5"))])
+        txt, _ = ev.get_feature_info("http://wms.test", "mf010.fwi", 45, 5, 6, s)
+        self.assertEqual(ev.first_number(txt), 12.5)
+        p = s.calls[0][1]
+        self.assertEqual(p["request"], "GetFeatureInfo")
+        south, west, north, east = map(float, p["bbox"].split(","))
+        self.assertTrue(south < 45 < north and west < 5 < east)
+
+    def test_sample_layer_groups_points_by_cell(self):
+        s = Sess([("wms", FakeResponse(200, text="value = 30"))])
+        vals, info = ev.sample_layer("http://wms.test", "mf010.fwi", [45.001, 45.002, 10.0], [5.001, 5.002, 10.0], s)
+        self.assertEqual(info["mailles"], 2)
+        self.assertEqual(list(vals), [30.0, 30.0, 30.0])
+
+    def test_legend_url(self):
+        u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
+        self.assertIn("GetLegendGraphic", u)
+        self.assertIn("layer=mf010.fwi", u)
+
+    def test_layer_note_and_details(self):
+        self.assertIn("carré", ev.layer_note("modis.ba"))
+        self.assertIn("polygones", ev.layer_note("modis.ba.poly"))
+        self.assertIn("Forêt-Météo", ev.layer_note("mf010.fwi"))
+        caps = CAPS.replace('<Name>nrt.hotspots</Name>', '<Name>nrt.hotspots</Name><Abstract>Foyers</Abstract><Dimension name="time" units="ISO8601">2026-10-01/2026-11-01</Dimension>')
+        d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
+        self.assertEqual(d["nrt.hotspots"]["abstract"], "Foyers")
+        self.assertIn("2026-11-01", d["nrt.hotspots"]["time"])
+
+
+class FireDates(unittest.TestCase):
+    NOW = pd.Timestamp("2026-11-04", tz="UTC")
+
+    def test_detect_and_defaults(self):
+        t = ev.burnt_table(_gj())
+        cols = ev.detect_date_columns(t)
+        self.assertEqual(cols, ["initialdate", "finaldate"])
+        self.assertEqual(ev.default_date_columns(cols), ("initialdate", "finaldate"))
+
+    def test_filters(self):
+        gj = _gj()
+        n = lambda g: len(g["features"])
+        self.assertEqual(n(ev.filter_burnt(gj, "tout", "initialdate", "finaldate")), 2)
+        self.assertEqual(n(ev.filter_burnt(gj, "en cours", "initialdate", "finaldate", active_days=3, now=self.NOW)), 1)
+        self.assertEqual(n(ev.filter_burnt(gj, "en cours", "initialdate", "finaldate", active_days=0, now=self.NOW)), 0)
+        self.assertEqual(n(ev.filter_burnt(gj, "date", "initialdate", "finaldate", d1=pd.Timestamp("2026-10-03"))), 1)
+        self.assertEqual(n(ev.filter_burnt(gj, "date", "initialdate", "finaldate", d1=pd.Timestamp("2026-10-20"))), 0)
+        self.assertEqual(n(ev.filter_burnt(gj, "période", "initialdate", "finaldate", d1=pd.Timestamp("2026-10-04"),
+                                           d2=pd.Timestamp("2026-11-02"))), 2)
+
+    def test_cross_points(self):
+        df = pd.DataFrame({"name": ["dedans", "pres", "loin"], "lat": ["40.5", "40.5", "50"], "long": ["2.5", "3.1", "20"]})
+        out = ev.cross_with_burnt(df, "lat", "long", _gj(), snap_km=20, date_cols=("initialdate", "finaldate"))
+        self.assertEqual(list(out["incendie_statut"]), ["Dans une zone brûlée", "À moins de 20 km", "Non touché"])
+        self.assertEqual(out.loc[0, "incendie_area_ha"], 100)
+        self.assertTrue(out.loc[1, "incendie_distance_km"] > 0)
+        empty = ev.cross_with_burnt(df, "lat", "long", None)
+        self.assertEqual(set(empty["incendie_statut"]), {"Non touché"})
+
+
 if __name__ == "__main__":
     unittest.main()
