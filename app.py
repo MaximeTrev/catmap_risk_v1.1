@@ -1586,7 +1586,8 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
 def _ev_flood_tab():
     st.markdown("**Prévision de crues (Copernicus EMS, EFAS pour l'Europe, GloFAS pour le monde)** : couches de prévision et "
                 "d'alerte. Ce sont des prévisions de débit des cours d'eau, pas la cartographie de l'inondation constatée "
-                "(celle-ci est dans l'onglet « Activations »).")
+                "(celle-ci est dans l'onglet « Activations »). **Cliquez sur la carte** pour lire la valeur des couches au point cliqué.")
+    import streamlit.components.v1 as components
     src = st.radio("Service", ["EFAS (Europe)", "GloFAS (monde)"], horizontal=True, key="ev_flood_src")
     kind = "efas" if src.startswith("EFAS") else "glofas"
     url, layers, d_cap = _ev_discover(kind)
@@ -1594,19 +1595,137 @@ def _ev_flood_tab():
         st.warning("Catalogue de couches indisponible (voir le diagnostic). L'accès à EFAS peut exiger un compte gratuit sur le site du service.")
         _ev_diag(d_cap)
         return
+    details = {d["name"]: d for d in _ev_details(url)}
+    timed = {n for n, d in details.items() if d.get("time")}
     default = evt.pick_layers(layers, evt.FLOOD_LAYER_WORDS)[:2]
+    _help_line("Couches", "Couches d'images fournies par le service ; la liste est lue dans son catalogue. Le rôle de chaque couche est "
+               "décrit dans « À quoi servent les couches ? » ci-dessous, et sa légende dans « Légendes ».", label_style="font-size:.875rem")
     chosen = st.multiselect("Couches", [n for n, _ in layers], default=default,
-                            format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key=f"ev_flood_layers_{kind}")
+                            format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key=f"ev_flood_layers_{kind}",
+                            label_visibility="collapsed")
     _help_line("Date de prévision (facultatif)", "Laissez vide pour la dernière prévision disponible.", label_style="font-size:.875rem")
     when = st.date_input("Date de prévision (facultatif)", value=None, key=f"ev_flood_date_{kind}", label_visibility="collapsed")
     tv = None
     if when:
         tv = f"{when.isoformat()}T00:00:00" if kind == "glofas" else f"{when.isoformat()}-00-00"
+    simple = st.checkbox("Affichage simplifié (sans lecture au clic)", False, key=f"ev_flood_simple_{kind}")
+    st.caption("À cocher si la carte interactive ne se charge pas (message « trouble loading the streamlit_folium.st_folium component »).")
     m = _ev_base_map((48.0, 8.0) if kind == "efas" else (20.0, 10.0), 4 if kind == "efas" else 2)
-    _ev_add_wms(m, url, chosen, tv)
-    _ev_show_map(m, f"ev_flood_map_{kind}")
+    _ev_add_wms(m, url, chosen, tv, timed)
+    if simple:
+        import folium
+        folium.LayerControl(collapsed=True).add_to(m)
+        components.html(m.get_root().render(), height=580, scrolling=False)
+        out = {}
+    else:
+        out = _ev_show_map(m, f"ev_flood_map_{kind}", track_click=True)
+    click = out.get("last_clicked") if out else None
+    if click and chosen:
+        _ev_click_values(url, chosen, click, out.get("zoom") or 4, tv, timed)
+    elif chosen and not simple:
+        st.caption("Cliquez sur la carte pour lire la valeur des couches sélectionnées à cet endroit.")
+    with st.expander("À quoi servent les couches ?"):
+        rows = [{"Couche": n, "Titre": t, "Rôle (d'après son nom)": evt.layer_note(n, t),
+                 "Description officielle": (details.get(n, {}).get("abstract") or "")[:400],
+                 "Dates disponibles": details.get(n, {}).get("time", "")[:120],
+                 "Interrogeable au clic": "oui" if details.get(n, {}).get("queryable") else "?"} for n, t in layers]
+        _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+    if chosen:
+        with st.expander("Légendes des couches affichées"):
+            for n in chosen:
+                d = details.get(n, {})
+                st.markdown(f"**{dict(layers).get(n, n)}** · `{n}`")
+                note = evt.layer_note(n, dict(layers).get(n, ""))
+                if note:
+                    st.caption(note)
+                if d.get("abstract"):
+                    st.caption("Description officielle : " + d["abstract"][:400])
+                st.image(evt.legend_url(url, n))
+            st.caption("Légendes fournies par le service. Si une image est vide ou cassée, le service ne publie pas de légende pour cette couche.")
+        st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, chosen[0], time_value=tv if chosen[0] in timed else None)})")
+        st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
     st.caption(f"Service interrogé : {url}")
+    _ev_flood_cross(url, chosen, tv, timed, kind)
     _ev_diag(d_cap)
+
+
+def _ev_flood_cross(url, chosen, tv, timed, kind):
+    import numpy as np
+    st.divider()
+    st.subheader("Croiser vos points avec les crues")
+    up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                          type=["csv", "txt", "xlsx"], key=f"ev_flood_csv_{kind}")
+    if up is None:
+        st.caption("Chargez un fichier pour lire, pour chaque point, la valeur des couches sélectionnées ci-dessus et savoir s'il est touché.")
+        return
+    if not chosen:
+        st.info("Sélectionnez au moins une couche ci-dessus.")
+        return
+    try:
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name, reserved_check=False)
+    except InputError as e:
+        st.error(str(e))
+        return
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    c1, c2 = st.columns(2)
+    with c1:
+        _help_line("Seuil de la valeur", "Un point est « touché » si la valeur lue est **strictement supérieure** à ce seuil. Pour une couche "
+                   "d'aléa d'inondation, 0 convient (toute valeur positive = dans la zone). Pour un cumul de pluie, choisissez par exemple 50 (mm).",
+                   label_style="font-size:.875rem")
+        thr = st.slider("Seuil de la valeur", 0.0, 500.0, 0.0, key=f"ev_flood_thr_{kind}", label_visibility="collapsed")
+    prec = {"1 km environ (précis, plus d'appels)": 0.01, "5 km environ": 0.05}
+    pk = c2.selectbox("Regroupement des points", list(prec), key=f"ev_flood_prec_{kind}")
+    sig = (up.name, len(df), tuple(chosen), thr, prec[pk], tv)
+    if st.button("Croiser", type="primary", key=f"ev_flood_go_{kind}"):
+        with st.spinner("Lecture des valeurs aux points…"):
+            lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
+            lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
+            res, notes, hit = df.copy(), [], np.zeros(len(df), dtype=bool)
+            answered = False
+            for n in chosen:
+                vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk], max_cells=500)
+                res[f"crue_{n}"] = [None if v != v else round(float(v), 3) for v in vals]
+                hit |= np.nan_to_num(vals, nan=-np.inf) > thr
+                answered |= info["valeurs_lues"] > 0
+                if info["valeurs_lues"] == 0:
+                    notes.append(f"Couche « {n} » : aucune valeur lue (couche non interrogeable, ou aucun point dans une zone couverte).")
+                if info["tronque"]:
+                    notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
+                                 "les autres points n'ont pas de valeur.")
+            res["crue_touche"] = ["Oui" if h else ("Non" if answered else "n/d") for h in hit]
+            st.session_state[f"ev_flood_cross_{kind}"] = (sig, res, notes)
+    saved = st.session_state.get(f"ev_flood_cross_{kind}")
+    if not saved or saved[0] != sig:
+        return
+    _, res, notes = saved
+    for n in notes:
+        st.warning(n)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Points analysés", len(res))
+    m2.metric("Points touchés", int((res["crue_touche"] == "Oui").sum()))
+    m3.metric("Sans valeur (n/d)", int((res["crue_touche"] == "n/d").sum()))
+    import folium
+    lat = pd.to_numeric(res[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    lon = pd.to_numeric(res[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    ok = lat.notna() & lon.notna()
+    if ok.any():
+        mp = _ev_base_map((float(lat[ok].mean()), float(lon[ok].mean())), 5)
+        colors = {"Oui": "#d7191c", "Non": "#2e9e5b", "n/d": "#9e9e9e"}
+        vcols = [c for c in res.columns if c.startswith("crue_") and c != "crue_touche"]
+        for i in res.index[ok][:5000]:
+            r = res.loc[i]
+            tip = " · ".join(x for x in [str(r.get("name") or r.get("nom_demande") or ""), f"Crue : {r['crue_touche']}"]
+                             + [f"{c[5:]} = {r[c]}" for c in vcols if r[c] is not None and r[c] == r[c]] if x)
+            folium.CircleMarker([lat[i], lon[i]], radius=8, color="#222", weight=1, fill=True, fill_color=colors[r["crue_touche"]],
+                                fill_opacity=0.9, tooltip=tip).add_to(mp)
+        _ev_show_map(mp, f"ev_flood_cross_map_{kind}")
+        st.markdown("<span style='color:#d7191c'>■</span> touché · <span style='color:#2e9e5b'>■</span> non touché · "
+                    "<span style='color:#9e9e9e'>■</span> n/d (aucune valeur lue)", unsafe_allow_html=True)
+    show = [c for c in res.columns if c.startswith("crue_")]
+    first = [c for c in res.columns if c not in show][:6]
+    _stretch(st.dataframe, res[first + show], hide_index=True)
+    st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), f"croisement_crues_{kind}.csv", "text/csv",
+                       key=f"ev_flood_dl_{kind}")
 
 
 def _ev_area_tab():
