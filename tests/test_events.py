@@ -225,6 +225,39 @@ class FireValues(unittest.TestCase):
         self.assertEqual(ev.info_attributes('{"features":[{"properties":{"RP": 100, "name": "x"}}]}')["RP"], 100)
         self.assertEqual(ev.primary_value({"name": "x", "Return_Period": "50", "OBJECTID": 7}), ("Return_Period", 50.0))
 
+    def test_queried_flag_and_exact_step(self):
+        s = Sess([("wms", FakeResponse(200, text="[]"))])
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0001, 45.0002, 46.0], [5.0, 5.0, 6.0], s, step=0.0001, max_cells=2)
+        self.assertEqual(info["mailles"], 2)                       # positions distinctes, pas de regroupement en 1 maille
+        self.assertTrue(info["tronque"])
+        self.assertEqual(list(info["interroge"]), [True, True, False])
+
+    def test_fetch_legend_variants(self):
+        class R(FakeResponse):
+            def __init__(self, status, ctype, content=b"", text=""):
+                super().__init__(status, text=text, headers={"Content-Type": ctype})
+                self.content = content
+        calls = []
+
+        class S:
+            def get(self, url, params=None, timeout=None, headers=None):
+                calls.append(url)
+                return R(200, "image/png", b"PNG") if "version=1.0.0" in url else R(200, "text/xml", text="<ServiceException>x</ServiceException>")
+        data, ctype, diag = ev.fetch_legend("http://wms.test/wms", "mapserver:a", legends=("http://wms.test/legend.png",), session=S())
+        self.assertEqual(data, b"PNG")
+        self.assertTrue(len(calls) >= 3)                           # adresse du catalogue d'abord, puis variantes
+        self.assertEqual(calls[0], "http://wms.test/legend.png")
+        data, _, diag = ev.fetch_legend("http://wms.test/wms", "mapserver:a", session=Sess([]))
+        self.assertIsNone(data)
+        self.assertTrue(diag)
+
+    def test_legend_and_styles_in_capabilities(self):
+        caps = CAPS.replace('<Name>mf010.fwi</Name>', '<Name>mf010.fwi</Name><Style><Name>fwi_style</Name><LegendURL><OnlineResource '
+                            'xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://wms.test/leg.png"/></LegendURL></Style>')
+        d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
+        self.assertEqual(d["mf010.fwi"]["styles"], ["fwi_style"])
+        self.assertEqual(d["mf010.fwi"]["legends"], ["http://wms.test/leg.png"])
+
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
         self.assertIn("GetLegendGraphic", u)
