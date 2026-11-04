@@ -273,6 +273,11 @@ LAYER_NOTES = (
                  "la couleur indique la date ou l'ancienneté de la détection (voir la légende)."),
     ("hotspot", "Foyers actifs : anomalies thermiques détectées par satellite (points chauds), les plus récentes."),
     (".hs", "Foyers actifs : anomalies thermiques détectées par satellite (points chauds)."),
+    ("floodprotection", "Niveau de protection contre les crues : période de retour (en années) de la crue que les ouvrages existants "
+                        "sont censés supporter ; 200 = protégé contre une crue qui revient en moyenne tous les 200 ans. "
+                        "Ce n'est pas une zone inondée."),
+    ("flood_scenarios", "Zones inondables des scénarios de crue : un point situé dans une zone peut être inondé pour un des scénarios "
+                        "de crue modélisés (voir la légende pour leur signification)."),
     ("floodhazard", "Aléa d'inondation : zones susceptibles d'être inondées pour une crue de période de retour donnée (ex. « 100y » = crue "
                     "centennale). Une valeur au-dessus de 0 signifie que le point est dans la zone d'aléa (voir la légende pour la signification exacte)."),
     ("accrain", "Précipitations cumulées prévues (en mm) sur la période indiquée : un fort cumul peut provoquer des crues."),
@@ -325,10 +330,19 @@ def fetch_layer_details(base: str, session=None) -> list[dict]:
     for el in root.iter():
         if el.tag.split("}")[-1] != "Layer":
             continue
-        d = {"name": None, "title": "", "abstract": "", "time": "", "queryable": str(el.get("queryable", "")) == "1", "bbox": None}
+        d = {"name": None, "title": "", "abstract": "", "time": "", "queryable": str(el.get("queryable", "")) == "1", "bbox": None, "legends": [], "styles": []}
         for ch in el:
             t = ch.tag.split("}")[-1]
             txt = (ch.text or "").strip()
+            if t == "Style":
+                for sub in ch.iter():
+                    st_ = sub.tag.split("}")[-1]
+                    if st_ == "Name" and (sub.text or "").strip():
+                        d["styles"].append(sub.text.strip())
+                    elif st_ == "OnlineResource":
+                        href = next((v for k, v in sub.attrib.items() if k.endswith("href")), "")
+                        if href:
+                            d["legends"].append(href.replace("&amp;", "&"))
             if t == "EX_GeographicBoundingBox":
                 v = {c.tag.split("}")[-1]: (c.text or "").strip() for c in ch}
                 try:
@@ -370,6 +384,35 @@ def getmap_url(base: str, layer: str, bbox=(-12.0, 34.0, 32.0, 62.0), time_value
     if time_value:
         params["time"] = time_value
     return base + ("&" if "?" in base else "?") + urlencode(params)
+
+
+def fetch_legend(base: str, layer: str, legends=(), styles=(), session=None) -> tuple[Optional[bytes], str, list[dict]]:
+    """Image de légende d'une couche : (octets, type MIME, diagnostic). Essaie les adresses publiées dans le catalogue du service,
+    puis plusieurs variantes de GetLegendGraphic ; (None, '', diag) si aucune ne renvoie une image."""
+    cands = list(legends)
+    sep = "&" if "?" in base else "?"
+    for ver in ("1.1.0", "1.0.0", "1.3.0"):
+        for sty in (list(styles)[:1] or [None]):
+            p = {"request": "GetLegendGraphic", "version": ver, "format": "image/png", "layer": layer}
+            if ver != "1.0.0":
+                p["service"] = "WMS"
+            if sty:
+                p["style"] = sty
+            cands.append(base + sep + urlencode(p))
+    diag = []
+    for u in dict.fromkeys(cands):
+        try:
+            r = (session or requests).get(u, timeout=TIMEOUT, headers=UA)
+        except requests.RequestException as e:
+            diag.append(_diag(u, "erreur", str(e)[:150]))
+            continue
+        ctype = (getattr(r, "headers", {}) or {}).get("Content-Type", "") or ""
+        content = getattr(r, "content", None)
+        if r.status_code == 200 and content and ctype.lower().startswith("image"):
+            diag.append(_diag(u, 200, "image"))
+            return content, ctype, diag
+        diag.append(_diag(u, r.status_code, (getattr(r, "text", "") or "")[:120].replace("\n", " ") or f"type {ctype or '?'}"))
+    return None, "", diag
 
 
 _NUM = re.compile(r"-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?")
@@ -537,7 +580,7 @@ def primary_value(attrs: dict) -> tuple[Optional[str], Optional[float]]:
 
 
 def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Optional[str] = None, step: float = 0.05,
-                 max_cells: int = 300, workers: int = 8, bbox=None) -> tuple[np.ndarray, dict]:
+                 max_cells: int = 300, workers: int = 12, bbox=None) -> tuple[np.ndarray, dict]:
     """Valeur numérique de la couche pour chaque point (NaN si inconnue). Les points sont regroupés par maille de `step` degrés
     pour limiter les appels ; au plus `max_cells` mailles sont interrogées ; les points hors de `bbox` (ouest, sud, est, nord),
     emprise de la couche, ne sont pas interrogés. Retourne (valeurs, bilan) ; le bilan contient aussi `presence` (un objet existe
@@ -572,6 +615,7 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
     atts = {r[0]: r[5] for r in res}
     vals = np.full(len(lats), np.nan)
     presence = np.zeros(len(lats), dtype=bool)
+    queried = np.zeros(len(lats), dtype=bool)
     attributes: list = [None] * len(lats)
     for i in np.where(ok)[0]:
         key = (float(klat[i]), float(klon[i]))
@@ -579,12 +623,13 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
         if v is not None:
             vals[i] = v
         presence[i] = bool(pres.get(key, False))
+        queried[i] = key in num
         attributes[i] = atts.get(key) or None
     examples = [{"lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
                 for c, _, _, t, dg, _a in res[:3]]
     return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for r in res if r[1] is not None),
                   "objets": sum(1 for r in res if r[2]), "tronque": truncated,
-                  "hors_emprise": int(out_of.sum()), "presence": presence, "attributs": attributes, "exemples": examples}
+                  "hors_emprise": int(out_of.sum()), "presence": presence, "interroge": queried, "attributs": attributes, "exemples": examples}
 
 
 # --------------------------------------------------------------------------- zones brûlées : dates et filtre
