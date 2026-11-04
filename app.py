@@ -1235,6 +1235,24 @@ def _ev_details(url: str):
     return evt.fetch_layer_details(url)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ev_legend(url: str, layer: str, legends: tuple, styles: tuple):
+    return evt.fetch_legend(url, layer, legends, styles)
+
+
+def _ev_show_legend(url, layer, details):
+    """Légende d'une couche : image lue côté serveur (variantes d'adresses essayées) ; sinon lien et diagnostic."""
+    d = details.get(layer, {})
+    data, ctype, diag = _ev_legend(url, layer, tuple(d.get("legends") or ()), tuple(d.get("styles") or ()))
+    if data:
+        st.image(data)
+        return
+    st.caption("Légende non fournie par le service pour cette couche (aucune variante de la requête n'a renvoyé d'image).")
+    st.markdown(f"[Essayer d'ouvrir la légende dans le navigateur]({evt.legend_url(url, layer)})")
+    with st.expander(f"Diagnostic de la légende · {layer}"):
+        _stretch(st.dataframe, pd.DataFrame(diag), hide_index=True)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _ev_info(url: str, layer: str, lat: float, lon: float, zoom: float, time_value):
     return evt.get_feature_info(url, layer, lat, lon, zoom, time_value=time_value)
@@ -1456,7 +1474,7 @@ def _ev_fire_tab():
         with st.expander("Légendes des couches affichées"):
             for n in chosen:
                 st.markdown(f"**{dict(layers).get(n, n)}** · `{n}`")
-                st.image(evt.legend_url(url, n))
+                _ev_show_legend(url, n, details)
             st.caption("Légendes fournies par le service EFFIS. Classes de l'indice Forêt-Météo utilisées pour le croisement : "
                        + " · ".join(f"{lbl} (< {hi:g})" if hi != float("inf") else f"{lbl} (≥ 50)" for hi, lbl in evt.FWI_CLASSES) + ".")
     if not tbl.empty:
@@ -1647,7 +1665,7 @@ def _ev_flood_tab():
                     st.caption(note)
                 if d.get("abstract"):
                     st.caption("Description officielle : " + d["abstract"][:400])
-                st.image(evt.legend_url(url, n))
+                _ev_show_legend(url, n, details)
             st.caption("Légendes fournies par le service. Si une image est vide ou cassée, le service ne publie pas de légende pour cette couche.")
         st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, chosen[0], time_value=tv if chosen[0] in timed else None)})")
         st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
@@ -1680,13 +1698,13 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                    "de pluie en mm, 100 pour une période de retour en années.",
                    label_style="font-size:.875rem")
         thr = st.slider("Seuil de la valeur", 0.0, 500.0, 0.0, key=f"ev_flood_thr_{kind}", label_visibility="collapsed")
-    prec = {"1 km environ (précis, plus d'appels)": 0.01, "5 km environ": 0.05}
+    prec = {"Position exacte (≈ 10 m, recommandé pour les zones inondables)": 0.0001, "1 km environ": 0.01, "5 km environ": 0.05}
     pk = c2.selectbox("Regroupement des points", list(prec), key=f"ev_flood_prec_{kind}")
     with c1:
         _help_line("Mailles interrogées (maximum)", "Les points proches sont regroupés par maille ; chaque maille correspond à un appel au service "
-                   "(environ 0,3 s). Au-delà de ce maximum, les points restants n'ont pas de valeur : augmentez-le, ou choisissez le "
-                   "regroupement « 5 km ».", label_style="font-size:.875rem")
-        max_cells = int(st.slider("Mailles interrogées (maximum)", 100, 3000, 800, step=100, key=f"ev_flood_cells_{kind}",
+                   "(environ 0,3 s, 12 en parallèle). Les points au-delà de ce maximum ne sont pas interrogés et restent « n/d » : "
+                   "augmentez-le, ou choisissez un regroupement plus large (moins précis : une zone inondable étroite peut être manquée).", label_style="font-size:.875rem")
+        max_cells = int(st.slider("Mailles interrogées (maximum)", 100, 5000, 1500, step=100, key=f"ev_flood_cells_{kind}",
                                   label_visibility="collapsed"))
     rules = ["Dans une zone (un objet existe au point)", "Valeur supérieure au seuil", "Valeur inférieure ou égale au seuil (ex. période de retour ≤ N ans)"]
     with c1:
@@ -1708,7 +1726,7 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
             lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
             res, notes, examples = df.copy(), [], []
             hit = np.zeros(len(df), dtype=bool)
-            answered = False
+            covered = np.ones(len(df), dtype=bool)                  # point interrogé pour toutes les couches décisives
             for n in chosen:
                 vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk],
                                               max_cells=max_cells, bbox=details.get(n, {}).get("bbox"))
@@ -1728,7 +1746,8 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                         hit |= np.nan_to_num(vals, nan=-np.inf) > thr
                     else:
                         hit |= np.nan_to_num(vals, nan=np.inf) <= thr
-                answered |= info["mailles"] > 0
+                if n in decide:
+                    covered &= info["interroge"]
                 examples += [{"couche": n, **ex} for ex in info["exemples"]]
                 if info["hors_emprise"]:
                     notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
@@ -1742,7 +1761,9 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                 if info["tronque"]:
                     notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
                                  "augmentez le maximum de mailles ou le regroupement.")
-            res["crue_touche"] = ["Oui" if h else ("Non" if answered else "n/d") for h in hit]
+            if not decide:
+                covered[:] = False
+            res["crue_touche"] = ["Oui" if h else ("Non" if c_ else "n/d") for h, c_ in zip(hit, covered)]
             st.session_state[f"ev_flood_cross_{kind}"] = (sig, res, notes, examples)
     saved = st.session_state.get(f"ev_flood_cross_{kind}")
     if not saved or saved[0] != sig:
@@ -1775,7 +1796,7 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                                 fill_opacity=0.9, tooltip=tip).add_to(mp)
         _ev_show_map(mp, f"ev_flood_cross_map_{kind}")
         st.markdown("<span style='color:#d7191c'>■</span> touché · <span style='color:#2e9e5b'>■</span> non touché · "
-                    "<span style='color:#9e9e9e'>■</span> n/d (aucune valeur lue)", unsafe_allow_html=True)
+                    "<span style='color:#9e9e9e'>■</span> n/d (point non interrogé : hors emprise de la couche ou au-delà du maximum de mailles)", unsafe_allow_html=True)
     show = [c for c in res.columns if c.startswith("crue_")]
     first = [c for c in res.columns if c not in show][:6]
     _stretch(st.dataframe, res[first + show], hide_index=True)
