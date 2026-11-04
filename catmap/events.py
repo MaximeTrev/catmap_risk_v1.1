@@ -273,6 +273,12 @@ LAYER_NOTES = (
                  "la couleur indique la date ou l'ancienneté de la détection (voir la légende)."),
     ("hotspot", "Foyers actifs : anomalies thermiques détectées par satellite (points chauds), les plus récentes."),
     (".hs", "Foyers actifs : anomalies thermiques détectées par satellite (points chauds)."),
+    ("floodhazard", "Aléa d'inondation : zones susceptibles d'être inondées pour une crue de période de retour donnée (ex. « 100y » = crue "
+                    "centennale). Une valeur au-dessus de 0 signifie que le point est dans la zone d'aléa (voir la légende pour la signification exacte)."),
+    ("accrain", "Précipitations cumulées prévues (en mm) sur la période indiquée : un fort cumul peut provoquer des crues."),
+    ("reppoints", "Points de référence (stations) où le débit prévu est comparé aux seuils de crue (périodes de retour 2, 5, 20 ans) ; "
+                  "la couleur donne le niveau d'alerte."),
+    ("countries", "Frontières des pays (fond de repère)."),
     ("fwi", "Indice Forêt-Météo (Fire Weather Index) : danger météorologique d'incendie prévu, de « très faible » à « extrême ». "
             "Ce n'est pas un incendie constaté mais un risque : plus la valeur est haute, plus un départ de feu se propagerait vite."),
     ("ffmc", "Composante de l'indice Forêt-Météo : humidité des litières fines (facilité d'allumage)."),
@@ -340,7 +346,18 @@ def fetch_layer_details(base: str, session=None) -> list[dict]:
 def legend_url(base: str, layer: str) -> str:
     sep = "&" if "?" in base else "?"
     return base + sep + urlencode({"service": "WMS", "request": "GetLegendGraphic", "version": "1.1.1",
-                                   "format": "image/png", "layer": layer})
+                                   "format": "image/png", "layer": layer, "layers": layer})
+
+
+def getmap_url(base: str, layer: str, bbox=(-12.0, 34.0, 32.0, 62.0), time_value: Optional[str] = None) -> str:
+    """Adresse d'une image GetMap de la couche : à ouvrir dans le navigateur pour voir l'éventuelle erreur du service
+    (couche inconnue, jeton exigé, date hors plage…)."""
+    w, s_, e, n = bbox
+    params = {"service": "WMS", "version": "1.3.0", "request": "GetMap", "layers": layer, "styles": "", "crs": "EPSG:4326",
+              "bbox": f"{s_},{w},{n},{e}", "width": 800, "height": 500, "format": "image/png", "transparent": "true"}
+    if time_value:
+        params["time"] = time_value
+    return base + ("&" if "?" in base else "?") + urlencode(params)
 
 
 _NUM = re.compile(r"-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?")
@@ -356,6 +373,8 @@ def first_number(text: str, prefer: tuple[str, ...] = ("value", "fwi", "pixel", 
         return float(body.replace(",", "."))
     pairs = [(m.group(1).lower(), m.group(2)) for m in
              re.finditer(r"([A-Za-z_][\w .-]*?)[\"']?\s*[:=]\s*[\"']?(-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?)", body)]
+    pairs += [(m.group(1).lower(), m.group(2)) for m in
+              re.finditer(r"<([A-Za-z_][\w:.-]*)[^>]*>\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*<", body)]
     pairs.sort(key=lambda kv: 0 if any(p in kv[0] for p in prefer) else 1)
     for _, num in pairs:
         try:
