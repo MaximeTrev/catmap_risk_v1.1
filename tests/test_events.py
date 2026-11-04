@@ -199,6 +199,32 @@ class FireValues(unittest.TestCase):
         d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
         self.assertEqual(d["mf010.fwi"]["bbox"], (-25.0, 30.0, 45.0, 72.0))
 
+    EFAS_TABLE = ('[[{"type": "layer_tab", "tab_name": "Flood Protection Levels"}, {"type": "table", "title": "Flood Protection Levels", '
+                  '"data": {"header": ["cat", "RP_prot_le", "Source", "OBJECTID", "type_en", "geonunit", "MerL_Riv", "RP_Protect"], '
+                  '"rows": [["2913", "150", "Dottori et al 2019", "0", "", "", "0", "150"]]}}]]')
+
+    def test_efas_table_format(self):
+        attrs = ev.info_attributes(self.EFAS_TABLE)
+        self.assertEqual(attrs["RP_Protect"], "150")
+        self.assertEqual(ev.primary_value(attrs), ("RP_Protect", 150.0))
+        self.assertTrue(ev.info_has_feature(self.EFAS_TABLE))
+        self.assertFalse(ev.info_has_feature("[]"))                    # aucun objet à cet endroit
+        self.assertFalse(ev.info_has_feature('[[{"type": "layer_tab", "tab_name": "x"}]]'))
+        self.assertEqual(ev.info_attributes("[]"), {})
+        s = Sess([("wms", FakeResponse(200, text=self.EFAS_TABLE))])
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0], [5.0], s)
+        self.assertEqual(vals[0], 150.0)
+        self.assertEqual(info["attributs"][0]["Source"], "Dottori et al 2019")
+        s = Sess([("wms", FakeResponse(200, text="[]"))])
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0], [5.0], s)
+        self.assertTrue(vals[0] != vals[0])
+        self.assertFalse(info["presence"][0])
+
+    def test_attributes_other_formats(self):
+        self.assertEqual(ev.info_attributes("Layer 'a'\n  value_0 = '23.4'")["value_0"], "23.4")
+        self.assertEqual(ev.info_attributes('{"features":[{"properties":{"RP": 100, "name": "x"}}]}')["RP"], 100)
+        self.assertEqual(ev.primary_value({"name": "x", "Return_Period": "50", "OBJECTID": 7}), ("Return_Period", 50.0))
+
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
         self.assertIn("GetLegendGraphic", u)
