@@ -1227,7 +1227,17 @@ def _ev_discover(kind: str):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _ev_burnt(bbox: tuple):
-    return evt.burnt_areas(bbox)
+    return evt.burnt_areas(bbox, max_features=5000)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ev_details(url: str):
+    return evt.fetch_layer_details(url)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _ev_info(url: str, layer: str, lat: float, lon: float, zoom: float, time_value):
+    return evt.get_feature_info(url, layer, lat, lon, zoom, time_value=time_value)
 
 
 def _ev_diag(diag, title="Diagnostic des appels"):
@@ -1238,14 +1248,17 @@ def _ev_diag(diag, title="Diagnostic des appels"):
             st.caption("Aucun appel effectué.")
 
 
-def _ev_show_map(m, key):
+def _ev_show_map(m, key, track_click=False):
+    """Affiche la carte. Avec track_click, retourne le dernier clic ({'lat','lng'}) et le zoom courant."""
     import folium
     from streamlit_folium import st_folium
     folium.LayerControl(collapsed=True).add_to(m)
+    objs = ["last_clicked", "zoom"] if track_click else []
     try:
-        st_folium(m, height=580, returned_objects=[], key=key, use_container_width=True)
+        out = st_folium(m, height=580, returned_objects=objs, key=key, use_container_width=True)
     except TypeError:
-        st_folium(m, height=580, width=1400, returned_objects=[], key=key)
+        out = st_folium(m, height=580, width=1400, returned_objects=objs, key=key)
+    return out if isinstance(out, dict) else {}
 
 
 def _ev_base_map(center, zoom):
@@ -1255,10 +1268,11 @@ def _ev_base_map(center, zoom):
     return m
 
 
-def _ev_add_wms(m, base_url, layers, time_value=None):
+def _ev_add_wms(m, base_url, layers, time_value=None, timed=None):
+    """Superpose des couches WMS ; `time_value` n'est envoyé qu'aux couches à dimension temporelle (`timed`, None = toutes)."""
     import folium
     for name in layers:
-        kw = {"time": time_value} if time_value else {}
+        kw = {"time": time_value} if (time_value and (timed is None or name in timed)) else {}
         folium.raster_layers.WmsTileLayer(
             url=base_url, layers=name, fmt="image/png", transparent=True, version="1.3.0", name=f"WMS · {name}",
             overlay=True, control=True, show=True, **kw).add_to(m)
@@ -1331,43 +1345,242 @@ def _ev_activations_tab():
     _ev_diag(diag)
 
 
+FWI_COLORS = {0: "#9e9e9e", 1: "#2e9e5b", 2: "#a6d96a", 3: "#fee08b", 4: "#fdae61", 5: "#f46d43", 6: "#a50026"}
+
+
 def _ev_fire_tab():
-    st.markdown("**Incendies de forêt (EFFIS, Copernicus)** : périmètres de zones brûlées récentes et couches cartographiques "
-                "(foyers actifs, indice météo feu), sur une zone au choix.")
-    zone = st.selectbox("Zone", list(evt.BBOX_PRESETS), key="ev_fire_zone")
+    st.markdown("**Incendies de forêt (EFFIS, Copernicus)** : zones brûlées détectées par satellite, danger météo d'incendie "
+                "et foyers, sur une zone et une période au choix. **Cliquez sur la carte** pour lire la valeur des couches au point cliqué.")
+    c1, c2 = st.columns([2, 3])
+    zone = c1.selectbox("Zone", list(evt.BBOX_PRESETS), key="ev_fire_zone")
     bbox = evt.BBOX_PRESETS[zone]
-    show_burnt = st.checkbox("Périmètres de zones brûlées", True, key="ev_fire_burnt")
+    with c2:
+        _help_line("Période", "**Toutes les dates** : toutes les zones brûlées lues.\n\n**En cours** : zones dont la dernière mise à jour "
+                   "date de moins de N jours (on ne peut pas savoir si un feu est réellement éteint : c'est une estimation).\n\n"
+                   "**Une date** : zones actives ce jour-là.\n\n**Période** : zones dont l'activité chevauche la période.",
+                   label_style="font-size:.875rem")
+        mode_lbl = st.radio("Période", ["Toutes les dates", "En cours", "Une date", "Période"], horizontal=True,
+                            key="ev_fire_mode", label_visibility="collapsed")
+    mode = {"Toutes les dates": "tout", "En cours": "en cours", "Une date": "date", "Période": "période"}[mode_lbl]
+    today = pd.Timestamp.now(tz="UTC").date()
+    d1 = d2 = None
+    active_days = 3
+    if mode == "en cours":
+        active_days = int(st.slider("Considérer un feu « en cours » s'il a été mis à jour depuis moins de (jours)", 1, 30, 3, key="ev_fire_active"))
+    elif mode == "date":
+        d1 = st.date_input("Date", value=today, key="ev_fire_d1")
+    elif mode == "période":
+        rng = st.date_input("Période", value=(today - pd.Timedelta(days=30), today), key="ev_fire_rng")
+        if isinstance(rng, (list, tuple)):
+            d1 = rng[0] if rng else None
+            d2 = rng[1] if len(rng) > 1 else rng[0] if rng else None
+        else:
+            d1 = d2 = rng
+        if d1 is None:
+            st.caption("Choisissez la date de début et la date de fin.")
+            mode = "tout"
+
     url, layers, d_cap = _ev_discover("effis")
+    details = {d["name"]: d for d in _ev_details(url)} if url else {}
+    timed = {n for n, d in details.items() if d.get("time")}
+    tv = None
+    if mode == "date" and d1:
+        tv = pd.Timestamp(d1).strftime("%Y-%m-%d")
+    elif mode == "période" and d1:
+        tv = f"{pd.Timestamp(d1):%Y-%m-%d}/{pd.Timestamp(d2 or d1):%Y-%m-%d}"
     chosen = []
     if layers:
+        _help_line("Couches cartographiques EFFIS (WMS)",
+                   "Couches d'images fournies par le service EFFIS, à superposer à la carte. La liste est lue dans le catalogue du service.\n\n"
+                   "**fwi** : danger météo d'incendie (indice Forêt-Météo).\n\n**ba** : zones brûlées détectées par satellite.\n\n"
+                   "**hs / hotspot** : foyers actifs.\n\nLe détail de chaque couche est dans « À quoi servent les couches ? » ci-dessous.",
+                   label_style="font-size:.875rem")
         default = evt.pick_layers(layers, evt.FIRE_LAYER_WORDS)[:3]
         chosen = st.multiselect("Couches cartographiques EFFIS (WMS)", [n for n, _ in layers], default=default,
                                 format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key="ev_fire_layers",
-                                help="La liste est lue dans le catalogue du service EFFIS ; sélectionnez celles à superposer.")
+                                label_visibility="collapsed")
+        with st.expander("À quoi servent les couches ?"):
+            rows = [{"Couche": n, "Titre": t, "Rôle (d'après son nom)": evt.layer_note(n, t),
+                     "Description officielle": (details.get(n, {}).get("abstract") or "")[:300],
+                     "Temporelle": "oui" if n in timed else "non",
+                     "Interrogeable au clic": "oui" if details.get(n, {}).get("queryable") else "?"} for n, t in layers]
+            _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+            st.caption("« Zones brûlées (EFFIS) » sur la carte n'est pas une couche d'image mais les polygones lus directement "
+                       "(service WFS) : ils sont cliquables et filtrables par date. En basse saison, les couches de zones brûlées "
+                       "peuvent être presque vides : élargissez la période.")
     else:
         st.warning("Catalogue de couches EFFIS indisponible (voir le diagnostic). Les périmètres brûlés restent affichés s'ils répondent.")
-    gj, d_ba = (None, [])
+    show_burnt = st.checkbox("Zones brûlées (polygones cliquables)", True, key="ev_fire_burnt")
+
+    gj_all, d_ba = (None, [])
     if show_burnt:
-        with st.spinner("Lecture des périmètres brûlés…"):
-            gj, d_ba = _ev_burnt(bbox)
+        with st.spinner("Lecture des zones brûlées…"):
+            gj_all, d_ba = _ev_burnt(bbox)
+    tbl_all = evt.burnt_table(gj_all)
+    date_cols = evt.detect_date_columns(tbl_all) if not tbl_all.empty else []
+    start_col, end_col = evt.default_date_columns(date_cols)
+    if date_cols:
+        with st.expander("Colonnes de date des zones brûlées (avancé)"):
+            start_col = st.selectbox("Début d'activité", date_cols, index=date_cols.index(start_col) if start_col in date_cols else 0,
+                                     key="ev_fire_c1")
+            opts = ["(aucune)"] + date_cols
+            e = st.selectbox("Fin d'activité / dernière mise à jour", opts, index=opts.index(end_col) if end_col in opts else 0, key="ev_fire_c2")
+            end_col = None if e == "(aucune)" else e
+    elif mode != "tout" and not tbl_all.empty:
+        st.warning("Aucune colonne de date reconnue dans les zones brûlées : le filtre de période ne peut pas s'appliquer.")
+    gj = evt.filter_burnt(gj_all, mode, start_col, end_col, d1, d2, active_days)
+    tbl = evt.burnt_table(gj)
+
     import folium
     m = _ev_base_map(((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2), 4 if zone == "Europe" else 6)
     if url and chosen:
-        _ev_add_wms(m, url, chosen)
-    tbl = evt.burnt_table(gj)
+        _ev_add_wms(m, url, chosen, tv, timed)
     if gj and gj.get("features"):
-        cols = [c for c in tbl.columns if c != "geometry"][:4]
-        folium.GeoJson(gj, name="Zones brûlées (EFFIS)", style_function=lambda f: {"color": "#8b1a1a", "weight": 1, "fillColor": "#d7191c", "fillOpacity": 0.55},
-                       tooltip=folium.GeoJsonTooltip(fields=cols) if cols else None).add_to(m)
-    k1, k2 = st.columns(2)
-    k1.metric("Périmètres brûlés lus", len(gj["features"]) if gj else 0)
-    k2.metric("Couches WMS affichées", len(chosen))
-    _ev_show_map(m, "ev_fire_map")
+        cols = [c for c in tbl.columns if c != "geometry"][:12]
+        folium.GeoJson(
+            gj, name="Zones brûlées (EFFIS)",
+            style_function=lambda f: {"color": "#8b1a1a", "weight": 1.2, "fillColor": "#d7191c", "fillOpacity": 0.5},
+            highlight_function=lambda f: {"weight": 3, "fillOpacity": 0.75},
+            tooltip=folium.GeoJsonTooltip(fields=cols[:4]) if cols else None,
+            popup=folium.GeoJsonPopup(fields=cols, labels=True, max_width=380) if cols else None).add_to(m)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Zones brûlées lues", len(gj_all["features"]) if gj_all else 0)
+    k2.metric("Après filtre de période", len(gj["features"]) if gj else 0)
+    k3.metric("Couches WMS affichées", len(chosen))
+    out = _ev_show_map(m, "ev_fire_map", track_click=True)
+    st.caption("Zones rouges : polygones de zones brûlées EFFIS (clic = tous les attributs). Autres couleurs : voir les légendes ci-dessous.")
+    click = out.get("last_clicked") if out else None
+    if click and url and chosen:
+        _ev_click_values(url, chosen, click, out.get("zoom") or 6, tv, timed)
+    if url and chosen:
+        with st.expander("Légendes des couches affichées"):
+            for n in chosen:
+                st.markdown(f"**{dict(layers).get(n, n)}** · `{n}`")
+                st.image(evt.legend_url(url, n))
+            st.caption("Légendes fournies par le service EFFIS. Classes de l'indice Forêt-Météo utilisées pour le croisement : "
+                       + " · ".join(f"{lbl} (< {hi:g})" if hi != float("inf") else f"{lbl} (≥ 50)" for hi, lbl in evt.FWI_CLASSES) + ".")
     if not tbl.empty:
         _stretch(st.dataframe, tbl.head(1000), hide_index=True)
-        st.download_button("Télécharger les périmètres (CSV)", _csv_bytes(tbl), "effis_zones_brulees.csv", "text/csv", key="ev_fire_dl")
-    st.caption("Les dates ne peuvent pas être filtrées côté service : le tableau contient les attributs fournis par EFFIS.")
+        st.download_button("Télécharger les zones brûlées affichées (CSV)", _csv_bytes(tbl), "effis_zones_brulees.csv", "text/csv",
+                           key="ev_fire_dl")
+    st.caption("Le service ne filtre pas par date : le filtrage est fait ici sur les colonnes de date, parmi les 5 000 zones les plus "
+               "récentes lues dans la zone choisie.")
+    _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, timed)
     _ev_diag(d_cap + d_ba)
+
+
+def _ev_click_values(url, chosen, click, zoom, tv, timed):
+    st.markdown(f"**Valeurs au point cliqué** ({click['lat']:.4f}, {click['lng']:.4f})")
+    rows, raw = [], {}
+    for n in chosen:
+        txt, _ = _ev_info(url, n, float(click["lat"]), float(click["lng"]), float(zoom), tv if n in timed else None)
+        val = evt.first_number(txt)
+        rank, label = evt.fwi_class(val) if "fwi" in n.lower() else (0, "")
+        rows.append({"Couche": n, "Valeur": val if val is not None else "—", "Niveau": label or "—"})
+        raw[n] = txt
+    _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+    with st.expander("Réponse brute du service"):
+        for n, t in raw.items():
+            st.markdown(f"`{n}`")
+            st.code(t or "(réponse vide : couche non interrogeable ou aucune donnée à cet endroit)")
+
+
+def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, timed):
+    st.divider()
+    st.subheader("Croiser vos points avec les incendies")
+    up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                          type=["csv", "txt", "xlsx"], key="ev_fire_csv")
+    if up is None:
+        st.caption("Chargez un fichier pour savoir quels points sont touchés par une zone brûlée (dans la période choisie ci-dessus) "
+                   "et quel est leur niveau de danger météo d'incendie (FWI).")
+        return
+    try:
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name, reserved_check=False)
+    except InputError as e:
+        st.error(str(e))
+        return
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    c1, c2 = st.columns(2)
+    snap = c1.slider("Distance maximale à une zone brûlée (km)", 0, 50, 5, key="ev_fire_snap")
+    fwi_layers = [n for n, _ in layers if "fwi" in n.lower()]
+    use_fwi = False
+    fwi_layer = None
+    if fwi_layers:
+        use_fwi = c2.checkbox("Ajouter le danger météo d'incendie (FWI)", True, key="ev_fire_usefwi")
+        if use_fwi:
+            fwi_layer = c2.selectbox("Couche FWI", fwi_layers, index=fwi_layers.index("mf010.fwi") if "mf010.fwi" in fwi_layers else 0,
+                                     key="ev_fire_fwilayer")
+    else:
+        c2.caption("Aucune couche FWI disponible : seul le croisement avec les zones brûlées est possible.")
+    sig = (up.name, len(df), snap, mode, str(d1), str(d2), active_days, fwi_layer)
+    if st.button("Croiser", type="primary", key="ev_fire_cross_go"):
+        with st.spinner("Croisement en cours…"):
+            lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            ok = lat.notna() & lon.notna()
+            bb = (float(lon[ok].min()) - 0.5, float(lat[ok].min()) - 0.5, float(lon[ok].max()) + 0.5, float(lat[ok].max()) + 0.5) if ok.any() else None
+            notes = []
+            res = df.copy()
+            if bb:
+                gj_pts, _ = _ev_burnt(tuple(round(v, 3) for v in bb))
+                tb = evt.burnt_table(gj_pts)
+                cols_d = evt.detect_date_columns(tb) if not tb.empty else []
+                sc, ec = (start_col, end_col) if start_col in cols_d else evt.default_date_columns(cols_d)
+                gj_f = evt.filter_burnt(gj_pts, mode, sc, ec, d1, d2, active_days)
+                if gj_pts is None:
+                    notes.append("Zones brûlées indisponibles sur l'emprise de vos points (voir le diagnostic).")
+                elif len(gj_pts.get("features", [])) >= 5000:
+                    notes.append("Limite de 5 000 zones atteinte sur l'emprise de vos points : résultat possiblement incomplet.")
+                res = evt.cross_with_burnt(df, lat_c, lon_c, gj_f, snap_km=float(snap), date_cols=tuple(c for c in (sc, ec) if c))
+            if use_fwi and fwi_layer and url:
+                vals, info = evt.sample_layer(url, fwi_layer, lat.to_numpy(), lon.to_numpy(), time_value=tv if fwi_layer in timed else None)
+                res["fwi_valeur"] = [None if v != v else round(float(v), 1) for v in vals]
+                cls = [evt.fwi_class(v) for v in vals]
+                res["fwi_rang"] = [c[0] for c in cls]
+                res["fwi_niveau"] = [c[1] or "n/d" for c in cls]
+                if info["valeurs_lues"] == 0:
+                    notes.append("Aucune valeur FWI lue : la couche n'est pas interrogeable ou le service n'a pas répondu.")
+                if info["tronque"]:
+                    notes.append(f"Seules les {info['mailles']} premières mailles de 5 km ont été interrogées (limite) : les autres points n'ont pas de FWI.")
+            st.session_state["ev_fire_cross"] = (sig, res, notes)
+    saved = st.session_state.get("ev_fire_cross")
+    if not saved or saved[0] != sig:
+        return
+    _, res, notes = saved
+    for n in notes:
+        st.warning(n)
+    touched = res["incendie_statut"].ne("Non touché") if "incendie_statut" in res else pd.Series(False, index=res.index)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Points analysés", len(res))
+    m2.metric("Dans une zone brûlée", int((res.get("incendie_statut") == "Dans une zone brûlée").sum()) if "incendie_statut" in res else 0)
+    m3.metric("À proximité", int(touched.sum() - (res.get("incendie_statut") == "Dans une zone brûlée").sum()) if "incendie_statut" in res else 0)
+    m4.metric("FWI élevé ou plus", int((res["fwi_rang"] >= 4).sum()) if "fwi_rang" in res else 0)
+    import folium
+    lat = pd.to_numeric(res[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    lon = pd.to_numeric(res[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    ok = lat.notna() & lon.notna()
+    if ok.any():
+        m = _ev_base_map((float(lat[ok].mean()), float(lon[ok].mean())), 5)
+        for i in res.index[ok][:5000]:
+            r = res.loc[i]
+            rank = int(r["fwi_rang"]) if "fwi_rang" in res and pd.notna(r.get("fwi_rang")) else 0
+            hit = "incendie_statut" in res and r["incendie_statut"] != "Non touché"
+            lines = [str(r.get("name") or r.get("nom_demande") or "")]
+            if "incendie_statut" in res:
+                lines.append(f"Incendie : {r['incendie_statut']}")
+            if "fwi_niveau" in res:
+                lines.append(f"FWI : {r.get('fwi_valeur')} ({r['fwi_niveau']})")
+            folium.CircleMarker([lat[i], lon[i]], radius=9 if hit else 6, color="#000" if hit else "#555", weight=2 if hit else 1,
+                                fill=True, fill_color=FWI_COLORS.get(rank, "#9e9e9e"), fill_opacity=0.9,
+                                tooltip=" · ".join(x for x in lines if x)).add_to(m)
+        _ev_show_map(m, "ev_fire_cross_map")
+        st.markdown("Couleur : niveau de danger météo (FWI) — "
+                   + " · ".join(f"<span style='color:{FWI_COLORS[i + 1]}'>■</span> {lbl}" for i, (_, lbl) in enumerate(evt.FWI_CLASSES))
+                   + " · <span style='color:#9e9e9e'>■</span> n/d. Contour noir épais : point touché par une zone brûlée.", unsafe_allow_html=True)
+    show = [c for c in res.columns if c.startswith(("incendie_", "fwi_"))]
+    first = [c for c in res.columns if c not in show][:6]
+    _stretch(st.dataframe, res[first + show], hide_index=True)
+    st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), "croisement_incendies.csv", "text/csv", key="ev_fire_cross_dl")
 
 
 def _ev_flood_tab():
@@ -1384,8 +1597,8 @@ def _ev_flood_tab():
     default = evt.pick_layers(layers, evt.FLOOD_LAYER_WORDS)[:2]
     chosen = st.multiselect("Couches", [n for n, _ in layers], default=default,
                             format_func=lambda n: dict(layers).get(n, n) + f"  [{n}]", key=f"ev_flood_layers_{kind}")
-    when = st.date_input("Date de prévision (facultatif)", value=None, key=f"ev_flood_date_{kind}",
-                         help="Laissez vide pour la dernière prévision disponible.")
+    _help_line("Date de prévision (facultatif)", "Laissez vide pour la dernière prévision disponible.", label_style="font-size:.875rem")
+    when = st.date_input("Date de prévision (facultatif)", value=None, key=f"ev_flood_date_{kind}", label_visibility="collapsed")
     tv = None
     if when:
         tv = f"{when.isoformat()}T00:00:00" if kind == "glofas" else f"{when.isoformat()}-00-00"
