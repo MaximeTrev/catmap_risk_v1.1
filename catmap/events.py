@@ -434,26 +434,106 @@ def get_feature_info(base: str, layer: str, lat: float, lon: float, zoom: float 
 _NO_FEATURE = ("no features", "no feature", "returned no results", "no results", "nothing found", "pas de résultat")
 
 
+def _json_nonempty(x) -> bool:
+    if isinstance(x, list):
+        return any(_json_nonempty(i) for i in x)
+    if isinstance(x, dict):
+        if x.get("type") == "layer_tab":
+            return False
+        if x.get("type") == "table":
+            return bool(((x.get("data") or {}).get("rows")))
+        if isinstance(x.get("features"), list):
+            return bool(x["features"])
+        return bool(x)
+    return x not in (None, "", 0)
+
+
 def info_has_feature(text: str) -> bool:
-    """La réponse GetFeatureInfo décrit-elle au moins un objet à cet endroit (même sans valeur numérique) ?"""
+    """La réponse GetFeatureInfo décrit-elle au moins un objet à cet endroit (même sans valeur numérique) ?
+    « [] », une collection vide ou une page vide signifient : rien ici."""
     t = (text or "").strip()
     if not t:
         return False
     low = t.lower()
     if any(w in low for w in _NO_FEATURE):
         return False
-    if low.startswith("{"):
+    if low[0] in "{[":
         try:
             import json
-            d = json.loads(t)
-            f = d.get("features") if isinstance(d, dict) else None
-            return bool(f) if isinstance(f, list) else True
+            return _json_nonempty(json.loads(t))
         except ValueError:
             return True
     if low.startswith("<") and "<body" in low:                       # page HTML vide de GeoServer / MapServer
         body = re.sub(r"<[^>]+>", " ", low[low.index("<body"):])
         return bool(body.strip())
     return True
+
+
+ID_LIKE = ("cat", "objectid", "id", "fid", "gid", "code", "source", "type", "type_en", "geonunit", "name", "nom")
+
+
+def info_attributes(text: str) -> dict:
+    """Attributs de l'objet interrogé (premier objet), quel que soit le format : tableau {header, rows} du service EFAS,
+    GeoJSON (properties), lignes « clé = valeur » ou balises XML. {} si rien."""
+    t = (text or "").strip()
+    if not t:
+        return {}
+    if t[0] in "{[":
+        try:
+            import json
+            found = _find_attrs(json.loads(t))
+            if found:
+                return found
+        except ValueError:
+            pass
+    out = {}
+    for m in re.finditer(r"^\s*([A-Za-z_][\w .-]*?)\s*=\s*(.+?)\s*$", t, re.M):
+        out.setdefault(m.group(1).strip(), m.group(2).strip().strip("'\""))
+    if not out:
+        for m in re.finditer(r"<([A-Za-z_][\w:.-]*)[^>/]*>\s*([^<>\s][^<>]*?)\s*</\1>", t):
+            out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+def _find_attrs(x) -> dict:
+    if isinstance(x, list):
+        for i in x:
+            r = _find_attrs(i)
+            if r:
+                return r
+    elif isinstance(x, dict):
+        data = x.get("data")
+        if x.get("type") == "table" and isinstance(data, dict) and data.get("rows"):
+            header, row = data.get("header") or [], data["rows"][0]
+            return {str(h): v for h, v in zip(header, row)}
+        if isinstance(x.get("features"), list) and x["features"]:
+            return dict((x["features"][0] or {}).get("properties") or {})
+        if x.get("type") not in ("layer_tab", "table", "FeatureCollection") and x:
+            return {str(k): v for k, v in x.items() if not isinstance(v, (dict, list))}
+    return {}
+
+
+def _num(v) -> Optional[float]:
+    try:
+        f = float(str(v).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def primary_value(attrs: dict) -> tuple[Optional[str], Optional[float]]:
+    """(nom de l'attribut, valeur) la plus parlante : période de retour, puis valeur, puis premier numérique hors identifiants."""
+    best, best_score = (None, None), 0
+    for k, v in (attrs or {}).items():
+        n = _num(v)
+        low = str(k).lower()
+        if n is None or low in ID_LIKE:
+            continue
+        score = (4 if "return" in low else 0) + (3 if low.startswith("rp") or "_rp" in low else 0) + (2 if "period" in low else 0) \
+            + (2 if "protect" in low else 0) + (1 if any(w in low for w in ("value", "depth", "level", "val")) else 0) + 0.1
+        if score > best_score:
+            best, best_score = (k, n), score
+    return best
 
 
 def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Optional[str] = None, step: float = 0.05,
@@ -478,25 +558,33 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
 
     def one(c):
         txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value)
-        return c, first_number(txt), info_has_feature(txt), txt, dg
+        attrs = info_attributes(txt)
+        present = info_has_feature(txt)
+        val = primary_value(attrs)[1] if attrs else None
+        if val is None and not attrs:
+            val = first_number(txt)
+        return c, val, present, txt, dg, attrs
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         res = list(ex.map(one, cells))
-    num = {c: v for c, v, _, _, _ in res}
-    pres = {c: p for c, _, p, _, _ in res}
+    num = {r[0]: r[1] for r in res}
+    pres = {r[0]: r[2] for r in res}
+    atts = {r[0]: r[5] for r in res}
     vals = np.full(len(lats), np.nan)
     presence = np.zeros(len(lats), dtype=bool)
+    attributes: list = [None] * len(lats)
     for i in np.where(ok)[0]:
         key = (float(klat[i]), float(klon[i]))
         v = num.get(key)
         if v is not None:
             vals[i] = v
         presence[i] = bool(pres.get(key, False))
+        attributes[i] = atts.get(key) or None
     examples = [{"lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
-                for c, _, _, t, dg in res[:3]]
-    return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for _, v, _, _, _ in res if v is not None),
-                  "objets": sum(1 for _, _, p, _, _ in res if p), "tronque": truncated,
-                  "hors_emprise": int(out_of.sum()), "presence": presence, "exemples": examples}
+                for c, _, _, t, dg, _a in res[:3]]
+    return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for r in res if r[1] is not None),
+                  "objets": sum(1 for r in res if r[2]), "tronque": truncated,
+                  "hors_emprise": int(out_of.sum()), "presence": presence, "attributs": attributes, "exemples": examples}
 
 
 # --------------------------------------------------------------------------- zones brûlées : dates et filtre
