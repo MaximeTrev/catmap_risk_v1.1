@@ -109,3 +109,9 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 .st-key-sc_reply textarea, .st-key-sc_manual textarea {
     color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; caret-color: #ffffff !important;
 }
+
+/* Suivi évènements climatiques : boutons « Croiser » en texte blanc */
+.st-key-ev_fire_cross_go button, .st-key-ev_fire_cross_go button p, .st-key-ev_fire_cross_go button span,
+[class*="st-key-ev_flood_go_"] button, [class*="st-key-ev_flood_go_"] button p, [class*="st-key-ev_flood_go_"] button span {
+    color: #ffffff !important;
+}
