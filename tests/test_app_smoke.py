@@ -114,6 +114,7 @@ class TestAppSmoke(unittest.TestCase):
         stack.enter_context(mock.patch.object(evt, "discover_wms",
                                               return_value=("http://wms.test", evt.parse_capabilities(CAPS), [])))
         stack.enter_context(mock.patch.object(evt, "burnt_areas", return_value=(None, [])))
+        stack.enter_context(mock.patch.object(evt, "fetch_layer_details", return_value=[]))
         return stack
 
     def fake_fetch(self):
@@ -162,6 +163,26 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         self.assertTrue([c for c in st.calls if c[0] == "download"])          # CSV des activations
         self.assertTrue([c for c in st.calls if c[0] == "st_folium"])
+
+    def test_fire_cross_with_csv(self):
+        from catmap import events as evt
+        from tests.test_events import _gj
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long\nA;40,5;2,5\nB;48,0;2,0\n".encode()
+
+        app, st = self.load({"Navigation": "Temps réel", "ev_fire_csv": Up(), "button:Croiser": True})
+        with self.fake_cyclones(), \
+                mock.patch.object(evt, "burnt_areas", return_value=(_gj(), [])), \
+                mock.patch.object(evt, "sample_layer", return_value=([45.0, 3.0], {"mailles": 2, "valeurs_lues": 2, "tronque": False})):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        _, res, notes = st.session_state["ev_fire_cross"]
+        self.assertEqual(list(res["incendie_statut"]), ["Dans une zone brûlée", "Non touché"])
+        self.assertEqual(list(res["fwi_niveau"]), ["Très élevé", "Très faible"])
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertTrue([c for c in st.calls if c[0] == "download"])
 
     def test_cyclone_section_renders_map_and_table(self):
         app, st = self.load({"Navigation": "Temps réel"})
