@@ -325,10 +325,22 @@ def fetch_layer_details(base: str, session=None) -> list[dict]:
     for el in root.iter():
         if el.tag.split("}")[-1] != "Layer":
             continue
-        d = {"name": None, "title": "", "abstract": "", "time": "", "queryable": str(el.get("queryable", "")) == "1"}
+        d = {"name": None, "title": "", "abstract": "", "time": "", "queryable": str(el.get("queryable", "")) == "1", "bbox": None}
         for ch in el:
             t = ch.tag.split("}")[-1]
             txt = (ch.text or "").strip()
+            if t == "EX_GeographicBoundingBox":
+                v = {c.tag.split("}")[-1]: (c.text or "").strip() for c in ch}
+                try:
+                    d["bbox"] = (float(v["westBoundLongitude"]), float(v["southBoundLatitude"]),
+                                 float(v["eastBoundLongitude"]), float(v["northBoundLatitude"]))
+                except (KeyError, ValueError):
+                    pass
+            elif t == "LatLonBoundingBox" and d["bbox"] is None:
+                try:
+                    d["bbox"] = (float(ch.get("minx")), float(ch.get("miny")), float(ch.get("maxx")), float(ch.get("maxy")))
+                except (TypeError, ValueError):
+                    pass
             if t == "Name" and txt:
                 d["name"] = txt
             elif t == "Title":
@@ -414,35 +426,77 @@ def get_feature_info(base: str, layer: str, lat: float, lon: float, zoom: float 
         if "ServiceException" in body[:500]:
             diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "format ou couche non interrogeable"))
             continue
-        diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "ok" if body else "réponse vide"))
-        if body:
-            return body, diag
+        diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "ok" if body else "réponse vide (rien à cet endroit)"))
+        return body, diag                     # réponse valide, même vide : inutile d'essayer les autres formats
     return "", diag
 
 
+_NO_FEATURE = ("no features", "no feature", "returned no results", "no results", "nothing found", "pas de résultat")
+
+
+def info_has_feature(text: str) -> bool:
+    """La réponse GetFeatureInfo décrit-elle au moins un objet à cet endroit (même sans valeur numérique) ?"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if any(w in low for w in _NO_FEATURE):
+        return False
+    if low.startswith("{"):
+        try:
+            import json
+            d = json.loads(t)
+            f = d.get("features") if isinstance(d, dict) else None
+            return bool(f) if isinstance(f, list) else True
+        except ValueError:
+            return True
+    if low.startswith("<") and "<body" in low:                       # page HTML vide de GeoServer / MapServer
+        body = re.sub(r"<[^>]+>", " ", low[low.index("<body"):])
+        return bool(body.strip())
+    return True
+
+
 def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Optional[str] = None, step: float = 0.05,
-                 max_cells: int = 300, workers: int = 8) -> tuple[np.ndarray, dict]:
+                 max_cells: int = 300, workers: int = 8, bbox=None) -> tuple[np.ndarray, dict]:
     """Valeur numérique de la couche pour chaque point (NaN si inconnue). Les points sont regroupés par maille de `step` degrés
-    pour limiter les appels ; au plus `max_cells` mailles sont interrogées. Retourne (valeurs, bilan)."""
+    pour limiter les appels ; au plus `max_cells` mailles sont interrogées ; les points hors de `bbox` (ouest, sud, est, nord),
+    emprise de la couche, ne sont pas interrogés. Retourne (valeurs, bilan) ; le bilan contient aussi `presence` (un objet existe
+    à l'endroit du point, même sans valeur numérique) et quelques `exemples` de réponses brutes pour le diagnostic."""
     lats = np.asarray(lats, dtype=float)
     lons = np.asarray(lons, dtype=float)
     ok = np.isfinite(lats) & np.isfinite(lons)
-    keys = np.where(ok, np.round(lats / step).astype(float) * step, np.nan), np.where(ok, np.round(lons / step).astype(float) * step, np.nan)
-    cells = list(dict.fromkeys(zip(keys[0][ok].round(4), keys[1][ok].round(4))))
+    out_of = np.zeros(len(lats), dtype=bool)
+    if bbox:
+        w, s_, e, n = bbox
+        out_of = ok & ~((lons >= w) & (lons <= e) & (lats >= s_) & (lats <= n))
+        ok = ok & ~out_of
+    klat = np.where(ok, np.round(lats / step) * step, np.nan).round(4)
+    klon = np.where(ok, np.round(lons / step) * step, np.nan).round(4)
+    cells = list(dict.fromkeys(zip(klat[ok], klon[ok])))
     truncated = len(cells) > max_cells
     cells = cells[:max_cells]
 
     def one(c):
-        txt, _ = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value)
-        return c, first_number(txt)
+        txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value)
+        return c, first_number(txt), info_has_feature(txt), txt, dg
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        got = dict(ex.map(one, cells))
+        res = list(ex.map(one, cells))
+    num = {c: v for c, v, _, _, _ in res}
+    pres = {c: p for c, _, p, _, _ in res}
     vals = np.full(len(lats), np.nan)
+    presence = np.zeros(len(lats), dtype=bool)
     for i in np.where(ok)[0]:
-        vals[i] = got.get((round(float(keys[0][i]), 4), round(float(keys[1][i]), 4)), np.nan) or np.nan
-    n_ok = sum(1 for v in got.values() if v is not None)
-    return vals, {"mailles": len(cells), "valeurs_lues": n_ok, "tronque": truncated}
+        key = (float(klat[i]), float(klon[i]))
+        v = num.get(key)
+        if v is not None:
+            vals[i] = v
+        presence[i] = bool(pres.get(key, False))
+    examples = [{"lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
+                for c, _, _, t, dg in res[:3]]
+    return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for _, v, _, _, _ in res if v is not None),
+                  "objets": sum(1 for _, _, p, _, _ in res if p), "tronque": truncated,
+                  "hors_emprise": int(out_of.sum()), "presence": presence, "exemples": examples}
 
 
 # --------------------------------------------------------------------------- zones brûlées : dates et filtre
