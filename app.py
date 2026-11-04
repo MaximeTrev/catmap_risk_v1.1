@@ -1474,9 +1474,16 @@ def _ev_click_values(url, chosen, click, zoom, tv, timed):
     rows, raw = [], {}
     for n in chosen:
         txt, _ = _ev_info(url, n, float(click["lat"]), float(click["lng"]), float(zoom), tv if n in timed else None)
-        val = evt.first_number(txt)
+        attrs = evt.info_attributes(txt)
+        name, val = evt.primary_value(attrs) if attrs else (None, None)
+        if val is None and not attrs:
+            val = evt.first_number(txt)
+        present = evt.info_has_feature(txt)
         rank, label = evt.fwi_class(val) if "fwi" in n.lower() else (0, "")
-        rows.append({"Couche": n, "Valeur": val if val is not None else "—", "Niveau": label or "—"})
+        others = "; ".join(f"{k} = {v}" for k, v in attrs.items() if k != name and v not in ("", None))[:300]
+        rows.append({"Couche": n, "Objet à cet endroit": "oui" if present else "non (hors zone)",
+                     "Valeur": val if val is not None else "—", "Attribut": name or "—", "Niveau": label or "—",
+                     "Autres attributs": others or "—"})
         raw[n] = txt
     _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
     with st.expander("Réponse brute du service"):
@@ -1669,8 +1676,8 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
     st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
     c1, c2 = st.columns(2)
     with c1:
-        _help_line("Seuil de la valeur", "Un point est « touché » si la valeur lue est **strictement supérieure** à ce seuil. Pour une couche "
-                   "d'aléa d'inondation, 0 convient (toute valeur positive = dans la zone). Pour un cumul de pluie, choisissez par exemple 50 (mm).",
+        _help_line("Seuil de la valeur", "Utilisé par les règles « Valeur supérieure… » et « Valeur inférieure ou égale… » (ci-dessous). Exemples : 50 pour un cumul "
+                   "de pluie en mm, 100 pour une période de retour en années.",
                    label_style="font-size:.875rem")
         thr = st.slider("Seuil de la valeur", 0.0, 500.0, 0.0, key=f"ev_flood_thr_{kind}", label_visibility="collapsed")
     prec = {"1 km environ (précis, plus d'appels)": 0.01, "5 km environ": 0.05}
@@ -1681,7 +1688,20 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                    "regroupement « 5 km ».", label_style="font-size:.875rem")
         max_cells = int(st.slider("Mailles interrogées (maximum)", 100, 3000, 800, step=100, key=f"ev_flood_cells_{kind}",
                                   label_visibility="collapsed"))
-    sig = (up.name, len(df), tuple(chosen), thr, prec[pk], tv, max_cells)
+    rules = ["Dans une zone (un objet existe au point)", "Valeur supérieure au seuil", "Valeur inférieure ou égale au seuil (ex. période de retour ≤ N ans)"]
+    with c1:
+        _help_line("Règle « touché »", "**Dans une zone** : le point est touché s'il se trouve sur un objet de la couche (par exemple une zone "
+                   "inondable d'un scénario de crue).\n\n**Valeur supérieure au seuil** : pour un cumul de pluie ou une hauteur d'eau.\n\n"
+                   "**Valeur inférieure ou égale au seuil** : pour une période de retour (une crue rare = grande valeur ; « ≤ 100 » retient les "
+                   "crues au moins centennales).", label_style="font-size:.875rem")
+    rule = c2.selectbox("Règle « touché »", rules, key=f"ev_flood_rule_{kind}", label_visibility="collapsed")
+    decide_default = [n for n in chosen if "protect" not in n.lower()] or chosen
+    with c1:
+        _help_line("Couches qui décident « touché »", "Les autres couches (par exemple les niveaux de protection) ajoutent seulement des colonnes d'information. "
+                   "Un niveau de protection n'indique pas une inondation : il est exclu par défaut.", label_style="font-size:.875rem")
+    decide = st.multiselect("Couches qui décident « touché »", chosen, default=decide_default, key=f"ev_flood_decide_{kind}",
+                            label_visibility="collapsed")
+    sig = (up.name, len(df), tuple(chosen), thr, prec[pk], tv, max_cells, rule, tuple(decide))
     if st.button("Croiser", type="primary", key=f"ev_flood_go_{kind}"):
         with st.spinner("Lecture des valeurs aux points…"):
             lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
@@ -1692,25 +1712,33 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
             for n in chosen:
                 vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk],
                                               max_cells=max_cells, bbox=details.get(n, {}).get("bbox"))
-                pres = info["presence"]
-                above = np.nan_to_num(vals, nan=-np.inf) > thr
-                hit |= above | (np.isnan(vals) & pres)               # objet présent sans valeur numérique : considéré touché
-                col = []
-                for v, p_ in zip(vals, pres):
-                    col.append(round(float(v), 3) if v == v else ("présent" if p_ else None))
-                res[f"crue_{n}"] = col
-                answered |= (info["valeurs_lues"] > 0) or (info["objets"] > 0) or info["mailles"] > 0
+                pres, attrs = info["presence"], info["attributs"]
+                res[f"crue_{n}"] = [round(float(v), 3) if v == v else ("présent" if p_ else None) for v, p_ in zip(vals, pres)]
+                keys = []
+                for a_ in attrs:
+                    for k in (a_ or {}):
+                        if k.lower() not in evt.ID_LIKE and k not in keys:
+                            keys.append(k)
+                for k in keys[:8]:
+                    res[f"crue_{n}.{k}"] = [(a_ or {}).get(k) for a_ in attrs]
+                if n in decide:
+                    if rule == rules[0]:
+                        hit |= pres
+                    elif rule == rules[1]:
+                        hit |= np.nan_to_num(vals, nan=-np.inf) > thr
+                    else:
+                        hit |= np.nan_to_num(vals, nan=np.inf) <= thr
+                answered |= info["mailles"] > 0
                 examples += [{"couche": n, **ex} for ex in info["exemples"]]
                 if info["hors_emprise"]:
                     notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
                 if info["mailles"] == 0:
                     notes.append(f"Couche « {n} » : aucun point dans l'emprise de la couche.")
-                elif info["valeurs_lues"] == 0 and info["objets"] == 0:
-                    notes.append(f"Couche « {n} » : aucun objet ni valeur trouvés aux {info['mailles']} mailles interrogées "
-                                 "(points hors zone couverte, ou couche non interrogeable : voir le diagnostic de lecture).")
+                elif info["objets"] == 0:
+                    notes.append(f"Couche « {n} » : aucun objet trouvé aux {info['mailles']} mailles interrogées (aucun point dans une zone de la "
+                                 "couche, ou couche non interrogeable : voir le diagnostic de lecture).")
                 elif info["valeurs_lues"] == 0:
-                    notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique ; les points concernés sont notés « présent » "
-                                 "et comptés comme touchés.")
+                    notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique (colonnes d'attributs ajoutées).")
                 if info["tronque"]:
                     notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
                                  "augmentez le maximum de mailles ou le regroupement.")
