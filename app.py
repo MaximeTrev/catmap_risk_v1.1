@@ -1645,11 +1645,11 @@ def _ev_flood_tab():
         st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, chosen[0], time_value=tv if chosen[0] in timed else None)})")
         st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
     st.caption(f"Service interrogé : {url}")
-    _ev_flood_cross(url, chosen, tv, timed, kind)
+    _ev_flood_cross(url, chosen, tv, timed, kind, details)
     _ev_diag(d_cap)
 
 
-def _ev_flood_cross(url, chosen, tv, timed, kind):
+def _ev_flood_cross(url, chosen, tv, timed, kind, details):
     import numpy as np
     st.divider()
     st.subheader("Croiser vos points avec les crues")
@@ -1675,31 +1675,58 @@ def _ev_flood_cross(url, chosen, tv, timed, kind):
         thr = st.slider("Seuil de la valeur", 0.0, 500.0, 0.0, key=f"ev_flood_thr_{kind}", label_visibility="collapsed")
     prec = {"1 km environ (précis, plus d'appels)": 0.01, "5 km environ": 0.05}
     pk = c2.selectbox("Regroupement des points", list(prec), key=f"ev_flood_prec_{kind}")
-    sig = (up.name, len(df), tuple(chosen), thr, prec[pk], tv)
+    with c1:
+        _help_line("Mailles interrogées (maximum)", "Les points proches sont regroupés par maille ; chaque maille correspond à un appel au service "
+                   "(environ 0,3 s). Au-delà de ce maximum, les points restants n'ont pas de valeur : augmentez-le, ou choisissez le "
+                   "regroupement « 5 km ».", label_style="font-size:.875rem")
+        max_cells = int(st.slider("Mailles interrogées (maximum)", 100, 3000, 800, step=100, key=f"ev_flood_cells_{kind}",
+                                  label_visibility="collapsed"))
+    sig = (up.name, len(df), tuple(chosen), thr, prec[pk], tv, max_cells)
     if st.button("Croiser", type="primary", key=f"ev_flood_go_{kind}"):
         with st.spinner("Lecture des valeurs aux points…"):
             lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
             lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
-            res, notes, hit = df.copy(), [], np.zeros(len(df), dtype=bool)
+            res, notes, examples = df.copy(), [], []
+            hit = np.zeros(len(df), dtype=bool)
             answered = False
             for n in chosen:
-                vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk], max_cells=500)
-                res[f"crue_{n}"] = [None if v != v else round(float(v), 3) for v in vals]
-                hit |= np.nan_to_num(vals, nan=-np.inf) > thr
-                answered |= info["valeurs_lues"] > 0
-                if info["valeurs_lues"] == 0:
-                    notes.append(f"Couche « {n} » : aucune valeur lue (couche non interrogeable, ou aucun point dans une zone couverte).")
+                vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk],
+                                              max_cells=max_cells, bbox=details.get(n, {}).get("bbox"))
+                pres = info["presence"]
+                above = np.nan_to_num(vals, nan=-np.inf) > thr
+                hit |= above | (np.isnan(vals) & pres)               # objet présent sans valeur numérique : considéré touché
+                col = []
+                for v, p_ in zip(vals, pres):
+                    col.append(round(float(v), 3) if v == v else ("présent" if p_ else None))
+                res[f"crue_{n}"] = col
+                answered |= (info["valeurs_lues"] > 0) or (info["objets"] > 0) or info["mailles"] > 0
+                examples += [{"couche": n, **ex} for ex in info["exemples"]]
+                if info["hors_emprise"]:
+                    notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
+                if info["mailles"] == 0:
+                    notes.append(f"Couche « {n} » : aucun point dans l'emprise de la couche.")
+                elif info["valeurs_lues"] == 0 and info["objets"] == 0:
+                    notes.append(f"Couche « {n} » : aucun objet ni valeur trouvés aux {info['mailles']} mailles interrogées "
+                                 "(points hors zone couverte, ou couche non interrogeable : voir le diagnostic de lecture).")
+                elif info["valeurs_lues"] == 0:
+                    notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique ; les points concernés sont notés « présent » "
+                                 "et comptés comme touchés.")
                 if info["tronque"]:
                     notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
-                                 "les autres points n'ont pas de valeur.")
+                                 "augmentez le maximum de mailles ou le regroupement.")
             res["crue_touche"] = ["Oui" if h else ("Non" if answered else "n/d") for h in hit]
-            st.session_state[f"ev_flood_cross_{kind}"] = (sig, res, notes)
+            st.session_state[f"ev_flood_cross_{kind}"] = (sig, res, notes, examples)
     saved = st.session_state.get(f"ev_flood_cross_{kind}")
     if not saved or saved[0] != sig:
         return
-    _, res, notes = saved
+    _, res, notes, examples = saved
     for n in notes:
         st.warning(n)
+    with st.expander("Diagnostic de lecture (réponses brutes du service sur quelques mailles)"):
+        if examples:
+            _stretch(st.dataframe, pd.DataFrame(examples), hide_index=True)
+        else:
+            st.caption("Aucune maille interrogée.")
     m1, m2, m3 = st.columns(3)
     m1.metric("Points analysés", len(res))
     m2.metric("Points touchés", int((res["crue_touche"] == "Oui").sum()))
