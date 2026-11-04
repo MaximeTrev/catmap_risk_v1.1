@@ -160,6 +160,14 @@ class FireValues(unittest.TestCase):
         self.assertEqual(info["mailles"], 2)
         self.assertEqual(list(vals), [30.0, 30.0, 30.0])
 
+    def test_xml_value_and_getmap(self):
+        self.assertEqual(ev.first_number("<FeatureInfo><time>2026</time><value>12.5</value></FeatureInfo>"), 12.5)
+        u = ev.getmap_url("http://wms.test/api/wms/", "mapserver:RepPoints_High", time_value="2026-11-01-00-00")
+        self.assertIn("request=GetMap", u)
+        self.assertIn("time=2026-11-01-00-00", u)
+        self.assertIn("layers=mapserver%3ARepPoints_High", u)
+        self.assertIn("Aléa", ev.layer_note("FloodHazard100y"))
+
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
         self.assertIn("GetLegendGraphic", u)
