@@ -184,6 +184,24 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         self.assertTrue([c for c in st.calls if c[0] == "download"])
 
+    def test_flood_cross_with_csv(self):
+        from catmap import events as evt
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long\nA;40,5;2,5\nB;48,0;2,0\n".encode()
+
+        app, st = self.load({"Navigation": "Temps réel", "ev_flood_csv_efas": Up(), "button:Croiser": True,
+                             "ev_flood_layers_efas": ["countries"]})
+        with self.fake_cyclones(), \
+                mock.patch.object(evt, "sample_layer", return_value=([2.5, float("nan")], {"mailles": 2, "valeurs_lues": 1, "tronque": False})):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        _, res, notes = st.session_state["ev_flood_cross_efas"]
+        self.assertEqual(list(res["crue_touche"]), ["Oui", "Non"])
+        self.assertEqual(res.loc[0, "crue_countries"], 2.5)
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
     def test_cyclone_section_renders_map_and_table(self):
         app, st = self.load({"Navigation": "Temps réel"})
         with self.fake_cyclones(), mock.patch.dict("os.environ", {}, clear=False):
