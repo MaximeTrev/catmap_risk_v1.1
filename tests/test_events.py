@@ -168,6 +168,37 @@ class FireValues(unittest.TestCase):
         self.assertIn("layers=mapserver%3ARepPoints_High", u)
         self.assertIn("Aléa", ev.layer_note("FloodHazard100y"))
 
+    def test_presence_without_number_and_zero_value(self):
+        self.assertTrue(ev.info_has_feature("Results for FeatureType 'x':\nname = Rhine"))
+        self.assertFalse(ev.info_has_feature(""))
+        self.assertFalse(ev.info_has_feature('{"type":"FeatureCollection","features":[]}'))
+        self.assertTrue(ev.info_has_feature('{"features":[{"properties":{"name":"a"}}]}'))
+        self.assertFalse(ev.info_has_feature("no features were found"))
+        s = Sess([("wms", FakeResponse(200, text="name = Rhine"))])
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0], [5.0], s)
+        self.assertTrue(vals[0] != vals[0])                      # pas de valeur numérique
+        self.assertTrue(info["presence"][0])
+        s = Sess([("wms", FakeResponse(200, text="value = 0"))])
+        vals, _ = ev.sample_layer("http://wms.test", "x", [45.0], [5.0], s)
+        self.assertEqual(vals[0], 0.0)                           # 0 est une valeur valide
+
+    def test_empty_answer_is_final_and_bbox_filters(self):
+        s = Sess([("wms", FakeResponse(200, text=""))])
+        txt, diag = ev.get_feature_info("http://wms.test", "x", 45, 5, 6, s)
+        self.assertEqual(len(diag), 1)                           # pas de 2e essai sur une réponse vide valide
+        s = Sess([("wms", FakeResponse(200, text="value = 3"))])
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0, -10.0], [5.0, 120.0], s, bbox=(-25, 30, 45, 72))
+        self.assertEqual(info["hors_emprise"], 1)
+        self.assertEqual(info["mailles"], 1)
+        self.assertEqual(vals[0], 3.0)
+
+    def test_layer_bbox_in_details(self):
+        caps = CAPS.replace('<Name>mf010.fwi</Name>', '<Name>mf010.fwi</Name><EX_GeographicBoundingBox><westBoundLongitude>-25</westBoundLongitude>'
+                            '<eastBoundLongitude>45</eastBoundLongitude><southBoundLatitude>30</southBoundLatitude>'
+                            '<northBoundLatitude>72</northBoundLatitude></EX_GeographicBoundingBox>')
+        d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
+        self.assertEqual(d["mf010.fwi"]["bbox"], (-25.0, 30.0, 45.0, 72.0))
+
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
         self.assertIn("GetLegendGraphic", u)
