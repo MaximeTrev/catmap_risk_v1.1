@@ -1766,7 +1766,7 @@ def _ev_sample_cross(url, chosen, decide, rule_mode, thr, times, details, lat, l
         elif info["objets"] == 0 and not info.get("erreurs"):
             notes.append(f"Couche « {n} » : aucun objet trouvé aux {info['mailles']} mailles interrogées (aucun point dans une zone de la "
                          "couche, ou couche non interrogeable : voir le diagnostic de lecture).")
-        elif info["valeurs_lues"] == 0:
+        elif info["objets"] > 0 and info["valeurs_lues"] == 0:
             notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique (colonnes d'attributs ajoutées).")
         if info["tronque"]:
             notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
