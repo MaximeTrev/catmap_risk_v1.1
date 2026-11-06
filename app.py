@@ -1272,7 +1272,12 @@ def _ev_style_legend(url: str, layer: str):
 def _ev_preview_html(url, chosen, times, details, center, zoom):
     """Page HTML autonome : fond OpenStreetMap, couches WMS choisies et légendes du service (images chargées par le navigateur)."""
     import folium
-    m = folium.Map(location=list(center), zoom_start=zoom, tiles="OpenStreetMap", control_scale=True)
+    # OpenStreetMap refuse les tuiles aux pages ouvertes depuis un fichier local (pas de « Referer » : erreur 403) : fonds Esri à la place.
+    m = folium.Map(location=list(center), zoom_start=zoom, tiles=None, control_scale=True)
+    esri = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+    folium.TileLayer(tiles=esri.format("World_Street_Map"), attr="Esri, HERE, Garmin, OpenStreetMap contributors", name="Plan").add_to(m)
+    folium.TileLayer(tiles=esri.format("Canvas/World_Light_Gray_Base"), attr="Esri", name="Fond clair", max_native_zoom=16).add_to(m)
+    folium.TileLayer(tiles=esri.format("World_Imagery"), attr="Esri, Maxar, Earthstar Geographics", name="Satellite").add_to(m)
     for n in chosen:
         t = times.get(n)
         kw = {"time": t} if t else {}
