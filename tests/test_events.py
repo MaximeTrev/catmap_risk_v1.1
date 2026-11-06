@@ -303,5 +303,61 @@ class FireDates(unittest.TestCase):
         self.assertEqual(set(empty["incendie_statut"]), {"Non touché"})
 
 
+SLD = """<?xml version="1.0"?><StyledLayerDescriptor xmlns="http://www.opengis.net/sld" xmlns:ogc="http://www.opengis.net/ogc"><NamedLayer><UserStyle>
+<FeatureTypeStyle>
+<Rule><Title>Flooded area</Title><ogc:Filter><ogc:PropertyIsEqualTo><ogc:PropertyName>obj_desc</ogc:PropertyName><ogc:Literal>Flooded area</ogc:Literal></ogc:PropertyIsEqualTo></ogc:Filter>
+<PolygonSymbolizer><Fill><CssParameter name="fill">#0000ff</CssParameter><CssParameter name="fill-opacity">0.6</CssParameter></Fill>
+<Stroke><CssParameter name="stroke">#000080</CssParameter><CssParameter name="stroke-width">2</CssParameter></Stroke></PolygonSymbolizer></Rule>
+<Rule><Title>Other</Title><PolygonSymbolizer><Fill><CssParameter name="fill">#cccccc</CssParameter></Fill></PolygonSymbolizer></Rule>
+</FeatureTypeStyle></UserStyle></NamedLayer></StyledLayerDescriptor>"""
+
+DETAIL = {"code": "EMSR935", "aois": [{"number": 1, "name": "Valencia", "products": [
+    {"type": "DEL", "number": 1, "monitoringNumber": 0, "layers": [
+        {"name": "observedEventA", "geojson_url": "https://s3.test/a.json", "style_url": "https://s3.test/a.sld"},
+        {"name": "builtUpP", "geojson_url": "https://s3.test/b.json"}, {"name": "sans fichier"}]}]}]}
+
+
+class Contours(unittest.TestCase):
+    def test_iter_layers(self):
+        L = ev.iter_layers(DETAIL)
+        self.assertEqual([l["nom"] for l in L], ["observedEventA", "builtUpP"])
+        self.assertEqual(L[0]["aoi"], "Valencia")
+        self.assertEqual(L[0]["type"], "DEL")
+        self.assertEqual(L[0]["sld"], "https://s3.test/a.sld")
+        self.assertEqual(L[1]["sld"], "")
+        self.assertEqual(ev.iter_layers({}), [])
+
+    def test_sld_rules_and_style(self):
+        rules = ev.parse_sld(SLD)
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(rules[0]["champ"], "obj_desc")
+        self.assertEqual(rules[0]["fill"], "#0000ff")
+        st = ev.style_for({"obj_desc": "Flooded area"}, rules)
+        self.assertEqual((st["fillColor"], st["color"], st["weight"], st["fillOpacity"]), ("#0000ff", "#000080", 2.0, 0.6))
+        self.assertEqual(ev.style_for({"obj_desc": "x"}, rules)["fillColor"], "#cccccc")       # règle par défaut
+        self.assertEqual(ev.parse_sld("<oups"), [])
+        self.assertEqual(ev.style_for({}, [])["color"], "#d7191c")
+        items = ev.legend_items(rules, "obs")
+        self.assertEqual([i["titre"] for i in items], ["Flooded area", "Other"])
+        self.assertEqual(ev.legend_items([], "observedEventA")[0]["contour"], "#1f6fb5")
+
+    def test_fetch_detail_and_geojson(self):
+        s = Sess([("public-activations", FakeResponse(200, {"results": [DETAIL]}))])
+        item, diag = ev.fetch_activation_detail("EMSR935", s)
+        self.assertEqual(item["code"], "EMSR935")
+        self.assertEqual(s.calls[0][1], {"code": "EMSR935"})
+        item, diag = ev.fetch_activation_detail("X", Sess([]))
+        self.assertIsNone(item)
+        self.assertEqual(diag[0]["statut"], 404)
+        gj = {"type": "FeatureCollection", "features": _gj()["features"]}
+        data, err = ev.fetch_geojson("https://s3.test/a.json", Sess([("s3.test", FakeResponse(200, gj))]))
+        self.assertEqual(err, "")
+        self.assertEqual(ev.geojson_bounds(data), (10.0, 2.0, 41.0, 11.0))
+        data, err = ev.fetch_geojson("https://s3.test/a.json", Sess([("s3.test", FakeResponse(200, text="<html>"))]))
+        self.assertIsNone(data)
+        self.assertIn("JSON", err)
+        self.assertIsNone(ev.geojson_bounds(None))
+
+
 if __name__ == "__main__":
     unittest.main()
