@@ -621,31 +621,21 @@ def _run_area(area: AreaQuery, options: AreaOptions, result_key="result"):
 
 def page_geolocalisation():
     st.title("Géolocalisation")
-    t_ent, t_sc = st.tabs(["Géolocalisation des entreprises", "Géolocalisation supply chain"])
+    t_ent, t_sc, t_zone = st.tabs(["Géolocalisation des entreprises", "Géolocalisation supply chain", "Entreprises dans une zone"])
     with t_ent:
         _tab_entreprises()
     with t_sc:
         _tab_supply_chain()
+    with t_zone:
+        st.markdown("**Toutes les entreprises situées dans une zone** : cliquez sur la carte pour fixer le centre, déplacez la souris pour "
+                    "régler le rayon, cliquez de nouveau pour valider, puis lancez la recherche. Les objets portant un tag *shop*, "
+                    "*amenity* ou *brand* sont retenus.")
+        _page_area()
 
 
 def _tab_entreprises():
-    c_mode, c_area = st.columns([3, 2])
-    with c_area:
-        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
-        area_mode = _checkbox_with_help(
-            "Entreprises sur un périmètre géographique",
-            "**Principe** : au lieu de chercher une entreprise par son nom, on délimite un cercle sur la carte et on "
-            "récupère tous les établissements situés dedans.\n\n"
-            "**Coché** : cliquez pour fixer le centre, déplacez la souris pour régler le rayon, cliquez de nouveau pour "
-            "valider, puis lancez la recherche. Les objets portant un tag *shop*, *amenity* ou *brand* sont retenus.\n\n"
-            "**Décoché** : recherche par nom d'entreprise (saisie, liste ou fichier).",
-            key="area_mode", left=True, wide=True)
-    with c_mode:
-        mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"],
-                        horizontal=True, disabled=area_mode)
-    if area_mode:
-        _page_area()
-        return
+    mode = st.radio("Mode de saisie", ["Un nom d'entreprise", "Liste (une entreprise par ligne)", "Fichier CSV / Excel"],
+                    horizontal=True)
     queries, warns = _collect_queries(mode)
     for w in warns[:5]:
         st.warning(w)
@@ -1235,6 +1225,21 @@ def _ev_details(url: str):
     return evt.fetch_layer_details(url)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _ev_ems_detail(code: str):
+    return evt.fetch_activation_detail(code)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ev_ems_geojson(url: str):
+    return evt.fetch_geojson(url)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ev_ems_rules(url: str):
+    return evt.parse_sld(evt.fetch_text(url)) if url else []
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _ev_legend(url: str, layer: str, legends: tuple, styles: tuple):
     return evt.fetch_legend(url, layer, legends, styles)
@@ -1301,16 +1306,13 @@ def _events_section():
     st.caption("Inondations et incendies en temps quasi réel à partir des services publics Copernicus (EMS, EFFIS, EFAS, GloFAS). "
                "Aucune clé n'est nécessaire. Les adresses des services n'ont pas pu être testées depuis le serveur de développement : "
                "chaque onglet fournit un diagnostic des appels.")
-    t_act, t_fire, t_flood, t_area = st.tabs(["Activations Copernicus EMS", "Incendies (EFFIS)", "Crues (EFAS / GloFAS)",
-                                              "Entreprises dans une zone"])
+    t_act, t_fire, t_flood = st.tabs(["Activations Copernicus EMS", "Incendies (EFFIS)", "Crues (EFAS / GloFAS)"])
     with t_act:
         _ev_activations_tab()
     with t_fire:
         _ev_fire_tab()
     with t_flood:
         _ev_flood_tab()
-    with t_area:
-        _ev_area_tab()
 
 
 def _ev_activations_tab():
@@ -1360,7 +1362,81 @@ def _ev_activations_tab():
         st.download_button("Télécharger (CSV)", _csv_bytes(shown), "activations_copernicus_ems.csv", "text/csv", key="ev_act_dl")
         if len(geo) < len(view):
             st.caption(f"{len(view) - len(geo)} activation(s) sans position : visibles dans le tableau uniquement.")
+        _ev_contours_section(view)
     _ev_diag(diag)
+
+
+def _ev_contours_section(view):
+    st.divider()
+    st.subheader("Contours d'une activation")
+    st.caption("Zones cartographiées par Copernicus EMS (étendue de l'évènement, bâti, dégâts…), avec les couleurs du service. "
+               "Cliquez sur un contour pour lire ses attributs.")
+    opts = {f"{r.code} — {r.nom}": r.code for r in view.head(200).itertuples()}
+    pick = st.selectbox("Activation", list(opts), key="ev_ct_pick")
+    code = opts[pick]
+    with st.spinner("Lecture du détail de l'activation…"):
+        detail, d_det = _ev_ems_detail(code)
+    page = evt.EMS_PAGE.format(code=code)
+    layers = evt.iter_layers(detail) if detail else []
+    if not layers:
+        st.warning("Aucune couche vectorielle exploitable pour cette activation (cartes non encore publiées, ou structure de réponse "
+                   "inattendue : voir le diagnostic).")
+        st.markdown(f"[Ouvrir l'activation sur le site Copernicus EMS]({page})")
+        _ev_diag(d_det, "Diagnostic du détail de l'activation")
+        return
+    labels = {i: f"{l['aoi'] or 'AOI'} · {evt.PRODUCT_LABEL.get(l['type'], l['type'] or 'produit')}"
+                 f"{'' if l['numero'] is None else ' n°' + str(l['numero'])} · {l['nom']}" for i, l in enumerate(layers)}
+    with st.expander(f"{len(layers)} couche(s) disponible(s)"):
+        _stretch(st.dataframe, pd.DataFrame([{"Zone (AOI)": l["aoi"], "Produit": evt.PRODUCT_LABEL.get(l["type"], l["type"]),
+                                              "N°": l["numero"], "Suivi": l["suivi"], "Couche": l["nom"],
+                                              "Style fourni": "oui" if l["sld"] else "non"} for l in layers]), hide_index=True)
+    keys = ("observed", "event", "flood", "burnt", "fire", "aoi")
+    default = [i for i, l in enumerate(layers) if any(k in l["nom"].lower() for k in keys)][:3] or list(range(min(3, len(layers))))
+    sel = st.multiselect("Couches à afficher", list(labels), default=default, format_func=lambda i: labels[i], key=f"ev_ct_layers_{code}")
+    if not sel:
+        st.caption("Sélectionnez au moins une couche.")
+        return
+    import folium
+    m = _ev_base_map((30.0, 10.0), 3)
+    bounds, legend, problems, total = None, [], [], 0
+    for i in sel:
+        l = layers[i]
+        with st.spinner(f"Lecture de « {l['nom']} »…"):
+            gj, err = _ev_ems_geojson(l["geojson"])
+        if gj is None:
+            problems.append(f"{l['nom']} : {err}")
+            continue
+        rules = _ev_ems_rules(l["sld"])
+        if not rules:
+            rules = [evt.default_rule(l["nom"])]
+            styled = False
+        else:
+            styled = True
+        total += len(gj["features"])
+        b = evt.geojson_bounds(gj)
+        if b:
+            bounds = b if bounds is None else (min(bounds[0], b[0]), min(bounds[1], b[1]), max(bounds[2], b[2]), max(bounds[3], b[3]))
+        props = [k for k in ((gj["features"][0].get("properties") or {}) if gj["features"] else {})][:10]
+        folium.GeoJson(gj, name=l["nom"], style_function=lambda f, r=rules: evt.style_for(f.get("properties") or {}, r),
+                       highlight_function=lambda f: {"weight": 3, "fillOpacity": 0.7},
+                       tooltip=folium.GeoJsonTooltip(fields=props[:3]) if props else None,
+                       popup=folium.GeoJsonPopup(fields=props, labels=True, max_width=360) if props else None).add_to(m)
+        legend.append((l["nom"], evt.legend_items(rules, l["nom"]), styled, len(gj["features"])))
+    for pbm in problems:
+        st.warning(f"Couche non lue : {pbm}")
+    if bounds:
+        m.fit_bounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]])
+        _ev_show_map(m, f"ev_ct_map_{code}")
+        st.markdown("**Légende**")
+        for name, items, styled, n in legend:
+            sw = " &nbsp; ".join(
+                f"<span style='display:inline-block;width:14px;height:14px;background:{it['couleur']};border:2px solid {it['contour']};"
+                f"vertical-align:middle;margin-right:4px'></span>{html.escape(it['titre'])}" for it in items)
+            st.markdown(f"**{html.escape(name)}** ({n} objet(s)){'' if styled else ' — style par défaut (fichier de style du service non lu)'}<br>{sw}",
+                        unsafe_allow_html=True)
+        st.caption(f"{total} objet(s) affichés. Couleurs lues dans les fichiers de style (SLD) du service lorsqu'ils sont fournis.")
+    st.markdown(f"[Ouvrir l'activation sur le site Copernicus EMS]({page})")
+    _ev_diag(d_det, "Diagnostic du détail de l'activation")
 
 
 FWI_COLORS = {0: "#9e9e9e", 1: "#2e9e5b", 2: "#a6d96a", 3: "#fee08b", 4: "#fdae61", 5: "#f46d43", 6: "#a50026"}
@@ -1802,20 +1878,6 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
     _stretch(st.dataframe, res[first + show], hide_index=True)
     st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), f"croisement_crues_{kind}.csv", "text/csv",
                        key=f"ev_flood_dl_{kind}")
-
-
-def _ev_area_tab():
-    st.markdown("**Extraire toutes les entreprises situées dans une zone touchée** (même outil que l'onglet Géolocalisation).")
-    center, zoom = (46.6, 2.5), 5
-    df, _ = _ev_activations()
-    if not df.empty:
-        geo = df.dropna(subset=["lat", "long"])
-        geo = geo[geo["genre"].isin(["flood", "fire"])].head(40)
-        opts = {f"{r.code} — {r.nom}": (r.lat, r.long) for r in geo.itertuples()}
-        pick = st.selectbox("Centrer la carte sur une activation récente", ["—"] + list(opts), key="ev_area_center")
-        if pick in opts:
-            center, zoom = opts[pick], 8
-    _page_area(kp="ev_area_", result_key="ev_area_result", center=center, zoom=zoom)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
