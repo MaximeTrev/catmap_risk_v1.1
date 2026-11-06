@@ -392,5 +392,33 @@ class Contours(unittest.TestCase):
         self.assertIsNone(ev.geojson_bounds(None))
 
 
+class LayerCross(unittest.TestCase):
+    def test_cross_with_layer_columns_follow_layer(self):
+        df = pd.DataFrame({"n": ["a", "b", "c"], "lat": ["40.5", "40.5", "50"], "long": ["2.5", "3.1", "20"]})
+        cols = ev.cross_with_layer(df, "lat", "long", _gj(), "observedEventA", snap_km=20)
+        self.assertEqual(cols["observedEventA.statut"], ["Dans la zone", "À moins de 20 km", "Hors zone"])
+        self.assertEqual(cols["observedEventA.area_ha"][0], 100)
+        self.assertIn("observedEventA.initialdate", cols)
+        self.assertEqual(cols["observedEventA.distance_km"][0], 0.0)
+        empty = ev.cross_with_layer(df, "lat", "long", None, "x")
+        self.assertEqual(empty["x.statut"], ["Hors zone"] * 3)
+
+    def test_style_legend_fallback_and_more_legend_variants(self):
+        items, diag = ev.fetch_style_legend("http://wms.test/wms", "mapserver:a", Sess([("wms", FakeResponse(200, text=SLD))]))
+        self.assertEqual([i["titre"] for i in items], ["Flooded area", "Other"])
+        items, diag = ev.fetch_style_legend("http://wms.test/wms", "mapserver:a", Sess([]))
+        self.assertEqual(items, [])
+        self.assertEqual(diag[0]["statut"], 404)
+        calls = []
+
+        class S:
+            def get(self, url, params=None, timeout=None, headers=None):
+                calls.append(url)
+                return FakeResponse(404)
+        ev.fetch_legend("http://wms.test/api/wms/", "mapserver:a", session=S())
+        self.assertTrue(any("sld_version" in u for u in calls))
+        self.assertTrue(any(u.startswith("http://wms.test/api/wms?") for u in calls))     # variante sans « / » final
+
+
 if __name__ == "__main__":
     unittest.main()
