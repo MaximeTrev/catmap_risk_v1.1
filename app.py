@@ -1264,6 +1264,43 @@ def _ev_legend(url: str, layer: str, legends: tuple, styles: tuple):
     return evt.fetch_legend(url, layer, legends, styles)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ev_style_legend(url: str, layer: str):
+    return evt.fetch_style_legend(url, layer)
+
+
+def _ev_preview_html(url, chosen, times, details, center, zoom):
+    """Page HTML autonome : fond OpenStreetMap, couches WMS choisies et légendes du service (images chargées par le navigateur)."""
+    import folium
+    m = folium.Map(location=list(center), zoom_start=zoom, tiles="OpenStreetMap", control_scale=True)
+    for n in chosen:
+        t = times.get(n)
+        kw = {"time": t} if t else {}
+        folium.raster_layers.WmsTileLayer(url=url, layers=n, fmt="image/png", transparent=True, version="1.3.0", name=n,
+                                          overlay=True, control=True, **kw).add_to(m)
+    imgs = "".join(f"<div style='margin-bottom:6px'><b style='font-size:11px'>{html.escape(n)}</b><br>"
+                   f"<img src='{html.escape(evt.legend_url(url, n), quote=True)}' alt='légende' style='max-width:260px'></div>" for n in chosen)
+    box = ("<div style='position:fixed;bottom:20px;left:10px;z-index:9999;background:rgba(255,255,255,.92);padding:8px 10px;"
+           f"border:1px solid #888;border-radius:6px;max-height:50vh;overflow:auto;font-family:sans-serif'>{imgs}</div>")
+    m.get_root().html.add_child(folium.Element(box))
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m.get_root().render().encode("utf-8")
+
+
+def _ev_test_links(url, chosen, tv, times, details, viewer, center, zoom, key):
+    """Liens de test d'une couche : image brute, visionneuse officielle du service, prévisualisation autonome (fond + légende)."""
+    if not chosen:
+        return
+    first = chosen[0]
+    st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, first, time_value=times.get(first) or tv)})")
+    st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
+    st.markdown(f"[Ouvrir la visionneuse officielle du service]({viewer})")
+    st.caption("Je ne connais pas d'adresse qui ouvre directement la visionneuse sur une couche donnée : choisissez-la dans son menu.")
+    st.download_button("Télécharger une prévisualisation (page HTML : fond de carte, couches et légendes)",
+                       _ev_preview_html(url, chosen, times, details, center, zoom), f"previsualisation_{key}.html", "text/html", key=f"{key}_preview")
+    st.caption("Ouvrez le fichier téléchargé dans votre navigateur : les couches et leurs légendes sont chargées directement depuis le service.")
+
+
 def _ev_show_legend(url, layer, details):
     """Légende d'une couche : image lue côté serveur (variantes d'adresses essayées) ; sinon lien et diagnostic."""
     d = details.get(layer, {})
@@ -1271,10 +1308,17 @@ def _ev_show_legend(url, layer, details):
     if data:
         st.image(data)
         return
-    st.caption("Légende non fournie par le service pour cette couche (aucune variante de la requête n'a renvoyé d'image).")
+    items, d_style = _ev_style_legend(url, layer)
+    if items:
+        st.caption("Le service ne publie pas d'image de légende (404) : légende reconstituée à partir du style de la couche.")
+        st.markdown(" &nbsp; ".join(
+            f"<span style='display:inline-block;width:14px;height:14px;background:{it['couleur']};border:2px solid {it['contour']};"
+            f"vertical-align:middle;margin-right:4px'></span>{html.escape(it['titre'])}" for it in items), unsafe_allow_html=True)
+    else:
+        st.caption("Légende non fournie par le service pour cette couche (ni image, ni style exploitable).")
     st.markdown(f"[Essayer d'ouvrir la légende dans le navigateur]({evt.legend_url(url, layer)})")
     with st.expander(f"Diagnostic de la légende · {layer}"):
-        _stretch(st.dataframe, pd.DataFrame(diag), hide_index=True)
+        _stretch(st.dataframe, pd.DataFrame(diag + d_style), hide_index=True)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -1431,7 +1475,7 @@ def _ev_contours_section(view):
         return
     import folium
     m = _ev_base_map((30.0, 10.0), 3)
-    bounds, legend, problems, total = None, [], [], 0
+    bounds, legend, problems, total, loaded = None, [], [], 0, {}
     for i in sel:
         l = layers[i]
         with st.spinner(f"Lecture de « {l['nom']} »…"):
@@ -1455,6 +1499,8 @@ def _ev_contours_section(view):
                        tooltip=folium.GeoJsonTooltip(fields=props[:3]) if props else None,
                        popup=folium.GeoJsonPopup(fields=props, labels=True, max_width=360) if props else None).add_to(m)
         legend.append((l["nom"], evt.legend_items(rules, l["nom"]), styled, len(gj["features"])))
+        lname = l["nom"] if sum(1 for x in layers if x["nom"] == l["nom"]) == 1 else f"{l['nom']} ({l['aoi']})"
+        loaded[lname] = gj
     for pbm in problems:
         st.warning(f"Couche non lue : {pbm}")
     if bounds:
@@ -1469,7 +1515,49 @@ def _ev_contours_section(view):
                         unsafe_allow_html=True)
         st.caption(f"{total} objet(s) affichés. Couleurs lues dans les fichiers de style (SLD) du service lorsqu'ils sont fournis.")
     st.markdown(f"[Ouvrir l'activation sur le site Copernicus EMS]({page})")
+    _ev_contours_cross(code, loaded)
     _ev_diag(d_det, "Diagnostic du détail de l'activation")
+
+
+def _ev_contours_cross(code, loaded):
+    """Croise un CSV de points avec les contours des couches affichées : les colonnes ajoutées suivent les couches sélectionnées."""
+    if not loaded:
+        return
+    st.divider()
+    st.subheader("Croiser vos points avec ces contours")
+    up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                          type=["csv", "txt", "xlsx"], key=f"ev_ct_csv_{code}")
+    if up is None:
+        st.caption("Chargez un fichier pour savoir quels points sont dans les contours des couches affichées ci-dessus.")
+        return
+    try:
+        df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name, reserved_check=False)
+    except InputError as e:
+        st.error(str(e))
+        return
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    snap = st.slider("Distance maximale à un contour (km)", 0, 50, 0, key=f"ev_ct_snap_{code}")
+    sig = (up.name, len(df), snap, tuple(loaded))
+    if st.button("Croiser", type="primary", key=f"ev_ct_go_{code}"):
+        with st.spinner("Croisement en cours…"):
+            res = df.copy()
+            for name, gj in loaded.items():
+                for col, vals in evt.cross_with_layer(df, lat_c, lon_c, gj, name, snap_km=float(snap)).items():
+                    res[col] = vals
+            st.session_state[f"ev_ct_cross_{code}"] = (sig, res)
+    saved = st.session_state.get(f"ev_ct_cross_{code}")
+    if not saved or saved[0] != sig:
+        return
+    res = saved[1]
+    stat_cols = [c for c in res.columns if c.endswith(".statut")]
+    touched = res[stat_cols].apply(lambda col: col != "Hors zone").any(axis=1) if stat_cols else pd.Series(False, index=res.index)
+    cols = st.columns(min(4, len(stat_cols) + 1))
+    cols[0].metric("Points touchés (au moins une couche)", int(touched.sum()))
+    for c_, sc in zip(cols[1:], stat_cols):
+        c_.metric(sc[:-7][:28], int((res[sc] != "Hors zone").sum()))
+    new_cols = [c for c in res.columns if any(c.startswith(n + ".") for n in loaded)]
+    _cross_table(res, new_cols, touched, f"ev_ct_tbl_{code}")
+    st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), f"croisement_{code}.csv", "text/csv", key=f"ev_ct_dl_{code}")
 
 
 FWI_COLORS = {0: "#9e9e9e", 1: "#2e9e5b", 2: "#a6d96a", 3: "#fee08b", 4: "#fdae61", 5: "#f46d43", 6: "#a50026"}
@@ -1593,7 +1681,7 @@ def _ev_fire_tab():
                            key="ev_fire_dl")
     st.caption("Le service ne filtre pas par date : le filtrage est fait ici sur les colonnes de date, parmi les 5 000 zones les plus "
                "récentes lues dans la zone choisie.")
-    _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times)
+    _ev_fire_cross(url, chosen, details, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times)
     _ev_diag(d_cap + d_ba)
 
 
@@ -1620,7 +1708,53 @@ def _ev_click_values(url, chosen, click, zoom, tv, timed):
             st.code(t or "(réponse vide : couche non interrogeable ou aucune donnée à cet endroit)")
 
 
-def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times):
+def _ev_sample_cross(url, chosen, decide, rule_mode, thr, times, details, lat, lon, step, max_cells, prefix, res):
+    """Lit chaque couche WMS choisie aux points et ajoute à `res` ses colonnes (valeur, statut de lecture, attributs) ; les colonnes
+    dépendent donc des couches sélectionnées. rule_mode : 0 = « dans une zone », 1 = valeur > seuil, 2 = valeur <= seuil.
+    Retourne (touché, interrogé, remarques, exemples de réponses brutes)."""
+    import numpy as np
+    hit = np.zeros(len(res), dtype=bool)
+    covered = np.ones(len(res), dtype=bool)
+    notes, examples = [], []
+    for n in chosen:
+        vals, info = evt.sample_layer(url, n, lat, lon, time_value=times.get(n), step=step, max_cells=max_cells,
+                                      bbox=details.get(n, {}).get("bbox"))
+        pres, attrs = info["presence"], info["attributs"]
+        interroge = info.get("interroge", np.ones(len(res), dtype=bool))
+        res[f"{prefix}{n}"] = [round(float(v), 3) if v == v else ("présent" if p_ else None) for v, p_ in zip(vals, pres)]
+        res[f"{prefix}{n}.statut"] = list(info.get("statut", ["n/d"] * len(res)))
+        keys = []
+        for a_ in attrs:
+            for k in (a_ or {}):
+                if k.lower() not in evt.ID_LIKE and k not in keys:
+                    keys.append(k)
+        for k in keys[:8]:
+            res[f"{prefix}{n}.{k}"] = [(a_ or {}).get(k) for a_ in attrs]
+        if n in decide:
+            covered &= interroge
+            if rule_mode == 0:
+                hit |= pres
+            elif rule_mode == 1:
+                hit |= np.nan_to_num(vals, nan=-np.inf) > thr
+            else:
+                hit |= np.nan_to_num(vals, nan=np.inf) <= thr
+        examples += [{"couche": n, **ex} for ex in info.get("exemples", [])]
+        if info["hors_emprise"]:
+            notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
+        if info["mailles"] == 0:
+            notes.append(f"Couche « {n} » : aucun point dans l'emprise de la couche.")
+        elif info["objets"] == 0:
+            notes.append(f"Couche « {n} » : aucun objet trouvé aux {info['mailles']} mailles interrogées (aucun point dans une zone de la "
+                         "couche, ou couche non interrogeable : voir le diagnostic de lecture).")
+        elif info["valeurs_lues"] == 0:
+            notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique (colonnes d'attributs ajoutées).")
+        if info["tronque"]:
+            notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
+                         "augmentez le maximum de mailles ou le regroupement.")
+    return hit, covered, notes, examples
+
+
+def _ev_fire_cross(url, chosen, details, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times):
     st.divider()
     st.subheader("Croiser vos points avec les incendies")
     up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
@@ -1635,19 +1769,10 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
         st.error(str(e))
         return
     st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
-    c1, c2 = st.columns(2)
-    snap = c1.slider("Distance maximale à une zone brûlée (km)", 0, 50, 5, key="ev_fire_snap")
-    fwi_layers = [n for n, _ in layers if "fwi" in n.lower()]
-    use_fwi = False
-    fwi_layer = None
-    if fwi_layers:
-        use_fwi = c2.checkbox("Ajouter le danger météo d'incendie (FWI)", True, key="ev_fire_usefwi")
-        if use_fwi:
-            fwi_layer = c2.selectbox("Couche FWI", fwi_layers, index=fwi_layers.index("mf010.fwi") if "mf010.fwi" in fwi_layers else 0,
-                                     key="ev_fire_fwilayer")
-    else:
-        c2.caption("Aucune couche FWI disponible : seul le croisement avec les zones brûlées est possible.")
-    sig = (up.name, len(df), snap, mode, str(d1), str(d2), active_days, fwi_layer)
+    snap = st.slider("Distance maximale à une zone brûlée (km)", 0, 50, 5, key="ev_fire_snap")
+    st.caption("Les colonnes ajoutées dépendent des couches sélectionnées plus haut : chaque couche WMS cochée est lue à la position des "
+               "points (valeur, statut de lecture, attributs) ; si une couche FWI est cochée, son niveau de danger est ajouté.")
+    sig = (up.name, len(df), snap, mode, str(d1), str(d2), active_days, tuple(chosen))
     if st.button("Croiser", type="primary", key="ev_fire_cross_go"):
         with st.spinner("Croisement en cours…"):
             lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
@@ -1667,16 +1792,20 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
                 elif len(gj_pts.get("features", [])) >= 5000:
                     notes.append("Limite de 5 000 zones atteinte sur l'emprise de vos points : résultat possiblement incomplet.")
                 res = evt.cross_with_burnt(df, lat_c, lon_c, gj_f, snap_km=float(snap), date_cols=tuple(c for c in (sc, ec) if c))
-            if use_fwi and fwi_layer and url:
-                vals, info = evt.sample_layer(url, fwi_layer, lat.to_numpy(), lon.to_numpy(), time_value=times.get(fwi_layer))
-                res["fwi_valeur"] = [None if v != v else round(float(v), 1) for v in vals]
-                cls = [evt.fwi_class(v) for v in vals]
-                res["fwi_rang"] = [c[0] for c in cls]
-                res["fwi_niveau"] = [c[1] or "n/d" for c in cls]
-                if info["valeurs_lues"] == 0:
-                    notes.append("Aucune valeur FWI lue : la couche n'est pas interrogeable ou le service n'a pas répondu.")
-                if info["tronque"]:
-                    notes.append(f"Seules les {info['mailles']} premières mailles de 5 km ont été interrogées (limite) : les autres points n'ont pas de FWI.")
+            if chosen and url:
+                latv, lonv = lat.to_numpy(), lon.to_numpy()
+                decide = [n for n in chosen if "fwi" not in n.lower()]
+                hit, _cov, more, examples = _ev_sample_cross(url, chosen, decide, 0, 0.0, times, details, latv, lonv, 0.01, 1500, "feu_", res)
+                notes += more
+                res["feu_touche"] = ["Oui" if h else "Non" for h in hit]
+                fwi_cols = [f"feu_{n}" for n in chosen if "fwi" in n.lower()]
+                if fwi_cols:
+                    v = pd.to_numeric(res[fwi_cols[0]], errors="coerce")
+                    cls = [evt.fwi_class(x) for x in v]
+                    res["fwi_valeur"] = [None if x != x else round(float(x), 1) for x in v]
+                    res["fwi_rang"] = [c[0] for c in cls]
+                    res["fwi_niveau"] = [c[1] or "n/d" for c in cls]
+                st.session_state["ev_fire_examples"] = examples
             st.session_state["ev_fire_cross"] = (sig, res, notes)
     saved = st.session_state.get("ev_fire_cross")
     if not saved or saved[0] != sig:
@@ -1712,9 +1841,10 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
         st.markdown("Couleur : niveau de danger météo (FWI) — "
                    + " · ".join(f"<span style='color:{FWI_COLORS[i + 1]}'>■</span> {lbl}" for i, (_, lbl) in enumerate(evt.FWI_CLASSES))
                    + " · <span style='color:#9e9e9e'>■</span> n/d. Contour noir épais : point touché par une zone brûlée.", unsafe_allow_html=True)
-    show = [c for c in res.columns if c.startswith(("incendie_", "fwi_"))]
+    show = [c for c in res.columns if c.startswith(("incendie_", "fwi_", "feu_"))]
     mask = ((res["incendie_statut"] != "Non touché") if "incendie_statut" in res else pd.Series(False, index=res.index)) | \
-           ((res["fwi_rang"] >= 4) if "fwi_rang" in res else pd.Series(False, index=res.index))
+           ((res["fwi_rang"] >= 4) if "fwi_rang" in res else pd.Series(False, index=res.index)) | \
+           ((res["feu_touche"] == "Oui") if "feu_touche" in res else pd.Series(False, index=res.index))
     _cross_table(res, show, mask, "ev_fire_tbl", "Seulement les points touchés ou à danger élevé (FWI ≥ Élevé)")
     st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), "croisement_incendies.csv", "text/csv", key="ev_fire_cross_dl")
 
@@ -1779,8 +1909,9 @@ def _ev_flood_tab():
                     st.caption("Description officielle : " + d["abstract"][:400])
                 _ev_show_legend(url, n, details)
             st.caption("Légendes fournies par le service. Si une image est vide ou cassée, le service ne publie pas de légende pour cette couche.")
-        st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, chosen[0], time_value=tv if chosen[0] in timed else None)})")
-        st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
+        _ev_test_links(url, chosen, tv, times, details,
+                       "https://european-flood.emergency.copernicus.eu/" if kind == "efas" else "https://global-flood.emergency.copernicus.eu/",
+                       (48.0, 8.0) if kind == "efas" else (20.0, 10.0), 4 if kind == "efas" else 2, f"crues_{kind}")
     st.caption(f"Service interrogé : {url}")
     _ev_flood_cross(url, chosen, tv, times, kind, details)
     _ev_diag(d_cap)
@@ -1836,44 +1967,10 @@ def _ev_flood_cross(url, chosen, tv, times, kind, details):
         with st.spinner("Lecture des valeurs aux points…"):
             lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
             lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
-            res, notes, examples = df.copy(), [], []
-            hit = np.zeros(len(df), dtype=bool)
-            covered = np.ones(len(df), dtype=bool)                  # point interrogé pour toutes les couches décisives
-            for n in chosen:
-                vals, info = evt.sample_layer(url, n, lat, lon, time_value=times.get(n), step=prec[pk],
-                                              max_cells=max_cells, bbox=details.get(n, {}).get("bbox"))
-                pres, attrs = info["presence"], info["attributs"]
-                res[f"crue_{n}"] = [round(float(v), 3) if v == v else ("présent" if p_ else None) for v, p_ in zip(vals, pres)]
-                keys = []
-                for a_ in attrs:
-                    for k in (a_ or {}):
-                        if k.lower() not in evt.ID_LIKE and k not in keys:
-                            keys.append(k)
-                res[f"crue_{n}.statut"] = list(info["statut"])
-                for k in keys[:8]:
-                    res[f"crue_{n}.{k}"] = [(a_ or {}).get(k) for a_ in attrs]
-                if n in decide:
-                    if rule == rules[0]:
-                        hit |= pres
-                    elif rule == rules[1]:
-                        hit |= np.nan_to_num(vals, nan=-np.inf) > thr
-                    else:
-                        hit |= np.nan_to_num(vals, nan=np.inf) <= thr
-                if n in decide:
-                    covered &= info["interroge"]
-                examples += [{"couche": n, **ex} for ex in info["exemples"]]
-                if info["hors_emprise"]:
-                    notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
-                if info["mailles"] == 0:
-                    notes.append(f"Couche « {n} » : aucun point dans l'emprise de la couche.")
-                elif info["objets"] == 0:
-                    notes.append(f"Couche « {n} » : aucun objet trouvé aux {info['mailles']} mailles interrogées (aucun point dans une zone de la "
-                                 "couche, ou couche non interrogeable : voir le diagnostic de lecture).")
-                elif info["valeurs_lues"] == 0:
-                    notes.append(f"Couche « {n} » : objets trouvés mais sans valeur numérique (colonnes d'attributs ajoutées).")
-                if info["tronque"]:
-                    notes.append(f"Couche « {n} » : seules les {info['mailles']} premières mailles ont été interrogées (limite) ; "
-                                 "augmentez le maximum de mailles ou le regroupement.")
+            res = df.copy()
+            rule_mode = rules.index(rule)
+            hit, covered, notes, examples = _ev_sample_cross(url, chosen, decide, rule_mode, thr, times, details, lat, lon,
+                                                             prec[pk], max_cells, "crue_", res)
             if not decide:
                 covered[:] = False
             res["crue_touche"] = ["Oui" if h else ("Non" if c_ else "n/d") for h, c_ in zip(hit, covered)]
