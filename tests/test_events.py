@@ -145,7 +145,7 @@ class FireValues(unittest.TestCase):
         s = Sess([("wms", FakeResponse(200, text="<ServiceExceptionReport><ServiceException>x</ServiceException>"))])
         txt, diag = ev.get_feature_info("http://wms.test", "mf010.fwi", 45, 5, 6, s)
         self.assertEqual(txt, "")
-        self.assertEqual(len(diag), 4)
+        self.assertEqual(len(diag), 6)
         s = Sess([("wms", FakeResponse(200, text="fwi = 12.5"))])
         txt, _ = ev.get_feature_info("http://wms.test", "mf010.fwi", 45, 5, 6, s)
         self.assertEqual(ev.first_number(txt), 12.5)
@@ -257,6 +257,39 @@ class FireValues(unittest.TestCase):
         d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
         self.assertEqual(d["mf010.fwi"]["styles"], ["fwi_style"])
         self.assertEqual(d["mf010.fwi"]["legends"], ["http://wms.test/leg.png"])
+
+    def test_format_probe_and_status(self):
+        class S:
+            def __init__(self): self.fmts = []
+            def get(self, url, params=None, timeout=None, headers=None):
+                self.fmts.append(params["info_format"])
+                f = params["info_format"]
+                if f == "application/json" and abs(float(params["bbox"].split(",")[1]) - 5.0) < 1:
+                    return FakeResponse(200, text='{"features":[{"properties":{"value": 7}}]}')
+                return FakeResponse(200, text="")
+        s = S()
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0, 46.0, 10.0], [5.0, 5.0, 100.0], s, step=0.0001, bbox=(-25, 30, 45, 72) if False else None)
+        self.assertEqual(info["format"], "application/json")             # le format qui renvoie des données est retenu
+        self.assertEqual(vals[0], 7.0)
+        self.assertEqual(list(info["statut"][:2]), ["valeur", "valeur"])
+        self.assertEqual(info["statut"][2], "aucun objet")
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0, 10.0], [5.0, 100.0], Sess([("wms", FakeResponse(200, text=""))]),
+                                     bbox=(0, 40, 10, 50), max_cells=1)
+        self.assertEqual(info["statut"][1], "hors emprise")
+
+    def test_exhaustive_click_and_time_default(self):
+        calls = []
+
+        class S:
+            def get(self, url, params=None, timeout=None, headers=None):
+                calls.append(params["info_format"])
+                return FakeResponse(200, text="value = 4" if params["info_format"] == "text/html" else "")
+        txt, _ = ev.get_feature_info("http://wms.test", "x", 45, 5, 6, S(), exhaustive=True)
+        self.assertEqual(txt, "value = 4")
+        self.assertEqual(calls, ["text/plain", "application/json", "text/html"])
+        caps = CAPS.replace('<Name>mf010.fwi</Name>', '<Name>mf010.fwi</Name><Dimension name="time" default="2026-11-06T00:00:00Z">2026-11-01/2026-11-10</Dimension>')
+        d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
+        self.assertEqual(d["mf010.fwi"]["time_default"], "2026-11-06T00:00:00Z")
 
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
