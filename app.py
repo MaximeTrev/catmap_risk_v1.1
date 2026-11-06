@@ -1283,8 +1283,19 @@ def _ev_preview_html(url, chosen, times, details, center, zoom):
         kw = {"time": t} if t else {}
         folium.raster_layers.WmsTileLayer(url=url, layers=n, fmt="image/png", transparent=True, version="1.3.0", name=n,
                                           overlay=True, control=True, **kw).add_to(m)
-    imgs = "".join(f"<div style='margin-bottom:6px'><b style='font-size:11px'>{html.escape(n)}</b><br>"
-                   f"<img src='{html.escape(evt.legend_url(url, n), quote=True)}' alt='légende' style='max-width:260px'></div>" for n in chosen)
+    parts = []
+    for n in chosen:
+        data, ctype, _d = _ev_legend(url, n, tuple(details.get(n, {}).get("legends") or ()), tuple(details.get(n, {}).get("styles") or ()))
+        if data:                                              # image intégrée au fichier : ne dépend plus du service
+            import base64
+            body = f"<img src='data:{ctype or 'image/png'};base64,{base64.b64encode(data).decode()}' alt='légende' style='max-width:260px'>"
+        else:
+            items, _s = _ev_style_legend(url, n)
+            body = "<br>".join(f"<span style='display:inline-block;width:12px;height:12px;background:{it['couleur']};"
+                               f"border:2px solid {it['contour']};margin-right:4px'></span>{html.escape(it['titre'])}" for it in items) \
+                or "<i style='font-size:11px'>légende non fournie par le service</i>"
+        parts.append(f"<div style='margin-bottom:6px'><b style='font-size:11px'>{html.escape(n)}</b><br>{body}</div>")
+    imgs = "".join(parts)
     box = ("<div style='position:fixed;bottom:20px;left:10px;z-index:9999;background:rgba(255,255,255,.92);padding:8px 10px;"
            f"border:1px solid #888;border-radius:6px;max-height:50vh;overflow:auto;font-family:sans-serif'>{imgs}</div>")
     m.get_root().html.add_child(folium.Element(box))
@@ -1746,9 +1757,13 @@ def _ev_sample_cross(url, chosen, decide, rule_mode, thr, times, details, lat, l
         examples += [{"couche": n, **ex} for ex in info.get("exemples", [])]
         if info["hors_emprise"]:
             notes.append(f"Couche « {n} » : {info['hors_emprise']} point(s) hors de l'emprise de la couche, non interrogés.")
+        if info.get("erreurs"):
+            notes.append(f"Couche « {n} » : {info['erreurs']} des {info['mailles']} mailles ont reçu une erreur du service "
+                         f"(« {str(info.get('erreur_exemple', ''))[:160]} »). Le service ne sait pas répondre à cette requête pour cette couche "
+                         "(couche non interrogeable, ou date invalide) : les valeurs ne peuvent pas être lues point par point.")
         if info["mailles"] == 0:
             notes.append(f"Couche « {n} » : aucun point dans l'emprise de la couche.")
-        elif info["objets"] == 0:
+        elif info["objets"] == 0 and not info.get("erreurs"):
             notes.append(f"Couche « {n} » : aucun objet trouvé aux {info['mailles']} mailles interrogées (aucun point dans une zone de la "
                          "couche, ou couche non interrogeable : voir le diagnostic de lecture).")
         elif info["valeurs_lues"] == 0:
