@@ -455,34 +455,56 @@ def _fi_bbox(lat: float, lon: float, zoom: float, size: int = 101):
 FI_FORMATS = ("text/plain", "application/json", "text/html", "application/vnd.ogc.gml", "text/xml", "application/geojson")
 
 
+def _fi_params(layer, lat, lon, zoom, fmt, time_value, variant):
+    south, west, north, east = _fi_bbox(lat, lon, zoom)
+    if variant.startswith("v111"):
+        p = {"service": "WMS", "version": "1.1.1", "request": "GetFeatureInfo", "layers": layer, "query_layers": layer,
+             "styles": "", "srs": "EPSG:4326", "bbox": f"{west},{south},{east},{north}", "width": 101, "height": 101,
+             "x": 50, "y": 50, "info_format": fmt}
+    else:
+        p = {"service": "WMS", "version": "1.3.0", "request": "GetFeatureInfo", "layers": layer, "query_layers": layer,
+             "styles": "", "crs": "EPSG:4326", "bbox": f"{south},{west},{north},{east}", "width": 101, "height": 101,
+             "i": 50, "j": 50, "info_format": fmt, "feature_count": 5}
+    if time_value and not variant.endswith("notime"):
+        p["time"] = time_value
+    return p
+
+
+def fi_variants(time_value) -> tuple:
+    """Variantes de requête essayées quand le service répond par une erreur serveur (5xx) : avec / sans date, WMS 1.3.0 puis 1.1.1."""
+    return ("v13",) + (("v13notime",) if time_value else ()) + ("v111",) + (("v111notime",) if time_value else ())
+
+
 def get_feature_info(base: str, layer: str, lat: float, lon: float, zoom: float = 6, session=None,
-                     time_value: Optional[str] = None, formats=None, exhaustive: bool = False) -> tuple[str, list[dict]]:
+                     time_value: Optional[str] = None, formats=None, exhaustive: bool = False, variants=None) -> tuple[str, list[dict]]:
     """Valeur d'une couche WMS au point (lat, lon) : (texte brut de la réponse, diagnostic). Texte vide si rien.
     Par défaut une réponse valide mais vide est définitive ; avec `exhaustive`, on essaie les autres formats tant que la réponse
-    est vide (utile pour un clic isolé). `formats` impose la liste des formats essayés."""
+    est vide (utile pour un clic isolé). `formats` impose la liste des formats essayés. Une erreur serveur (5xx) déclenche les autres
+    variantes de la requête ; le diagnostic reprend le début du message d'erreur du service."""
     diag = []
-    south, west, north, east = _fi_bbox(lat, lon, zoom)
     for fmt in (formats or FI_FORMATS):
-        params = {"service": "WMS", "version": "1.3.0", "request": "GetFeatureInfo", "layers": layer, "query_layers": layer,
-                  "styles": "", "crs": "EPSG:4326", "bbox": f"{south},{west},{north},{east}", "width": 101, "height": 101,
-                  "i": 50, "j": 50, "info_format": fmt, "feature_count": 5}
-        if time_value:
-            params["time"] = time_value
-        try:
-            r = _get(session, base, params)
-        except requests.RequestException as e:
-            diag.append(_diag(f"{base} [{layer}] {fmt}", "erreur", str(e)[:150]))
-            return "", diag
-        body = (getattr(r, "text", "") or "").strip()
-        if r.status_code != 200:
-            diag.append(_diag(f"{base} [{layer}] {fmt}", r.status_code, "refusé"))
-            continue
-        if "ServiceException" in body[:500]:
-            diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "format ou couche non interrogeable"))
-            continue
-        diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "ok" if body else "réponse vide (rien à cet endroit)"))
-        if body or not exhaustive:
-            return body, diag                 # réponse valide, même vide : inutile d'essayer les autres formats
+        for variant in (variants or fi_variants(time_value)):
+            params = _fi_params(layer, lat, lon, zoom, fmt, time_value, variant)
+            label = f"{base} [{layer}] {fmt} {variant}"
+            try:
+                r = _get(session, base, params)
+            except requests.RequestException as e:
+                diag.append(_diag(label, "erreur", str(e)[:150]))
+                return "", diag
+            body = (getattr(r, "text", "") or "").strip()
+            if r.status_code >= 500:
+                diag.append(_diag(label, r.status_code, "erreur du service : " + body[:200].replace("\n", " ")))
+                continue                                   # autre variante de la requête
+            if r.status_code != 200:
+                diag.append(_diag(label, r.status_code, "refusé : " + body[:120].replace("\n", " ")))
+                break
+            if "ServiceException" in body[:500]:
+                diag.append(_diag(label, 200, "format ou couche non interrogeable : " + re.sub(r"<[^>]+>", " ", body[:300]).strip()[:150]))
+                break
+            diag.append(_diag(label, 200, "ok" if body else "réponse vide (rien à cet endroit)"))
+            if body or not exhaustive:
+                return body, diag             # réponse valide, même vide : inutile d'essayer les autres formats
+            break
     return "", diag
 
 
@@ -591,18 +613,23 @@ def primary_value(attrs: dict) -> tuple[Optional[str], Optional[float]]:
     return best
 
 
-def _probe_format(base, layer, cells, session, time_value) -> str:
-    """Format GetFeatureInfo qui renvoie réellement des données : essayé sur quelques mailles ; à défaut, celui qui répond sans erreur."""
+def _probe_format(base, layer, cells, session, time_value) -> tuple[str, Optional[str]]:
+    """(format, variante de requête) qui renvoie réellement des données, essayés sur quelques mailles ; à défaut ceux qui répondent
+    sans erreur ; à défaut le format par défaut (variante None = toutes)."""
     answered = None
     for c in cells:
         for fmt in FI_FORMATS:
-            txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value,
-                                       formats=(fmt,))
-            if info_has_feature(txt):
-                return fmt
-            if answered is None and txt.strip():
-                answered = fmt
-    return answered or FI_FORMATS[0]
+            for variant in fi_variants(time_value):
+                txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value,
+                                           formats=(fmt,), variants=(variant,))
+                ok200 = any(d["statut"] == 200 for d in dg)
+                if info_has_feature(txt):
+                    return fmt, variant
+                if ok200 and answered is None:
+                    answered = (fmt, variant)
+                if ok200:
+                    break                                   # cette variante répond : inutile d'essayer les autres
+    return answered or (FI_FORMATS[0], None)
 
 
 def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Optional[str] = None, step: float = 0.05,
@@ -625,11 +652,11 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
     truncated = len(cells) > max_cells
     cells = cells[:max_cells]
 
-    fmt = _probe_format(base, layer, cells[:6], session, time_value)
+    fmt, variant = _probe_format(base, layer, cells[:6], session, time_value)
 
     def one(c):
         txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value,
-                                   formats=(fmt,))
+                                   formats=(fmt,), variants=(variant,) if variant else None)
         attrs = info_attributes(txt)
         present = info_has_feature(txt)
         val = primary_value(attrs)[1] if attrs else None
@@ -658,11 +685,13 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
                                                         ("valeur" if vals[i] == vals[i] else ("objet sans valeur" if presence[i] else "aucun objet")))
                        for i in range(len(lats))], dtype=object)
     statut[~np.isfinite(lats) | ~np.isfinite(lons)] = "coordonnées invalides"
-    examples = [{"format": fmt, "lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
+    examples = [{"format": f"{fmt} {variant or ''}".strip(), "lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
                 for c, _, _, t, dg, _a in res[:3]]
     return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for r in res if r[1] is not None),
                   "objets": sum(1 for r in res if r[2]), "tronque": truncated,
-                  "hors_emprise": int(out_of.sum()), "presence": presence, "interroge": queried, "statut": statut, "format": fmt, "attributs": attributes, "exemples": examples}
+                  "hors_emprise": int(out_of.sum()),
+                  "erreurs": sum(1 for r in res if not any(d["statut"] == 200 for d in r[4])),
+                  "erreur_exemple": next((d["remarque"] for r in res for d in r[4] if d["statut"] != 200), ""), "presence": presence, "interroge": queried, "statut": statut, "format": f"{fmt} {variant or ''}".strip(), "attributs": attributes, "exemples": examples}
 
 
 # --------------------------------------------------------------------------- zones brûlées : dates et filtre
