@@ -22,7 +22,7 @@ from typing import Any, Optional
 import pandas as pd
 import requests
 
-VERSION = 3   # incrémenté à chaque évolution (v3 : contours des activations)
+VERSION = 4   # incrémenté à chaque évolution (v3 : contours des activations ; v4 : croisements par couche, légendes de secours)
 
 EMS_API = "https://mapping.emergency.copernicus.eu/activations/api/activations/"
 EMS_PAGE = "https://mapping.emergency.copernicus.eu/activations/{code}/"
@@ -393,15 +393,18 @@ def fetch_legend(base: str, layer: str, legends=(), styles=(), session=None) -> 
     """Image de légende d'une couche : (octets, type MIME, diagnostic). Essaie les adresses publiées dans le catalogue du service,
     puis plusieurs variantes de GetLegendGraphic ; (None, '', diag) si aucune ne renvoie une image."""
     cands = list(legends)
-    sep = "&" if "?" in base else "?"
-    for ver in ("1.1.0", "1.0.0", "1.3.0"):
-        for sty in (list(styles)[:1] or [None]):
-            p = {"request": "GetLegendGraphic", "version": ver, "format": "image/png", "layer": layer}
-            if ver != "1.0.0":
-                p["service"] = "WMS"
-            if sty:
-                p["style"] = sty
-            cands.append(base + sep + urlencode(p))
+    bases = [base] + ([base.rstrip("/")] if base.endswith("/") else [])
+    for b in bases:
+        sep = "&" if "?" in b else "?"
+        for ver in ("1.1.0", "1.0.0", "1.3.0"):
+            for sty in (list(styles)[:1] or [None]):
+                for extra in ({}, {"sld_version": "1.1.0"}, {"layers": layer, "sld_version": "1.1.0"}):
+                    p = {"request": "GetLegendGraphic", "version": ver, "format": "image/png", "layer": layer, **extra}
+                    if ver != "1.0.0":
+                        p["service"] = "WMS"
+                    if sty:
+                        p["style"] = sty
+                    cands.append(b + sep + urlencode(p))
     diag = []
     for u in dict.fromkeys(cands):
         try:
@@ -973,3 +976,64 @@ def legend_items(rules: list[dict], layer_name: str) -> list[dict]:
         t = r["titre"] or (f"{r['champ']} = {r['valeur']}" if r["champ"] else layer_name)
         out.append({"titre": t, "couleur": r["fill"] or "transparent", "contour": r["stroke"] or r["fill"] or "#555555"})
     return out
+
+
+def fetch_style_legend(base: str, layer: str, session=None) -> tuple[list[dict], list[dict]]:
+    """Légende de secours quand le service ne publie pas d'image : style (SLD) de la couche demandé par GetStyles, converti en
+    éléments de légende [{titre, couleur, contour}]. Retourne (éléments, diagnostic)."""
+    diag = []
+    for ver in ("1.1.0", "1.3.0"):
+        sep = "&" if "?" in base else "?"
+        u = base + sep + urlencode({"service": "WMS", "version": ver, "request": "GetStyles", "layers": layer})
+        try:
+            r = _get(session, u)
+        except requests.RequestException as e:
+            diag.append(_diag(u, "erreur", str(e)[:150]))
+            continue
+        if r.status_code != 200:
+            diag.append(_diag(u, r.status_code, "GetStyles refusé"))
+            continue
+        rules = parse_sld(r.text)
+        diag.append(_diag(u, 200, f"{len(rules)} règle(s) de style"))
+        if rules:
+            return legend_items(rules, layer), diag
+    return [], diag
+
+
+def cross_with_layer(df: pd.DataFrame, lat_c: str, lon_c: str, gj: Optional[dict], name: str, snap_km: float = 0.0,
+                     max_props: int = 8) -> dict:
+    """Croise des points avec les polygones d'une couche : colonnes `<name>.statut` (« Dans la zone » / « À moins de X km » /
+    « Hors zone »), `<name>.distance_km` et les attributs de l'objet qui contient (ou est le plus proche du) point."""
+    from .polygon_index import PolygonIndex
+    lat = pd.to_numeric(df[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
+    lon = pd.to_numeric(df[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy()
+    n = len(df)
+    cols: dict = {f"{name}.statut": ["Hors zone"] * n, f"{name}.distance_km": [None] * n}
+    feats = (gj or {}).get("features") or []
+    polys = [rings_from_feature(f) for f in feats]
+    keep = [i for i, r in enumerate(polys) if r]
+    if not keep:
+        return cols
+    idx = PolygonIndex([polys[i] for i in keep])
+    ids, methods, dist = idx.locate(lon, lat, snap_km=snap_km)
+    props = [feats[keep[i]].get("properties") or {} for i in range(len(keep))]
+    keys = []
+    for p_ in props:
+        for k in p_:
+            if k not in keys and not isinstance(p_[k], (dict, list)):
+                keys.append(k)
+    for k in keys[:max_props]:
+        cols[f"{name}.{k}"] = [props[i].get(k) if i >= 0 else None for i in ids]
+    st_, dk = [], []
+    for m, d in zip(methods, dist):
+        if m == "within":
+            st_.append("Dans la zone")
+            dk.append(0.0)
+        elif m == "nearest":
+            st_.append(f"À moins de {snap_km:g} km")
+            dk.append(round(float(d), 2))
+        else:
+            st_.append("Hors zone")
+            dk.append(None)
+    cols[f"{name}.statut"], cols[f"{name}.distance_km"] = st_, dk
+    return cols
