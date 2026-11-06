@@ -180,6 +180,27 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("Flooded area", md)                       # légende issue du SLD
         self.assertIn("#0000ff", md)
 
+    def test_activation_contours_cross_follows_selected_layers(self):
+        from catmap import events as evt
+        from tests.test_events import DETAIL, SLD, _gj
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long\nA;40,5;2,5\nB;48,0;2,0\n".encode()
+
+        app, st = self.load({"Navigation": "Temps réel", "ev_ct_csv_EMSR900": Up(), "button:Croiser": True})
+        with self.fake_cyclones(), \
+                mock.patch.object(evt, "fetch_activation_detail", return_value=(DETAIL, [])), \
+                mock.patch.object(evt, "fetch_geojson", return_value=(_gj(), "")), \
+                mock.patch.object(evt, "fetch_text", return_value=SLD):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        _, res = st.session_state["ev_ct_cross_EMSR900"]
+        self.assertIn("observedEventA.statut", res.columns)          # colonnes nommées d'après la couche
+        self.assertEqual(list(res["observedEventA.statut"]), ["Dans la zone", "Hors zone"])
+        self.assertIn("observedEventA.area_ha", res.columns)
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
     def test_zone_tab_is_in_geolocalisation(self):
         app, st = self.load({"Navigation": "Géolocalisation"})
         with self.fake_cyclones():
@@ -199,12 +220,17 @@ class TestAppSmoke(unittest.TestCase):
         app, st = self.load({"Navigation": "Temps réel", "ev_fire_csv": Up(), "button:Croiser": True})
         with self.fake_cyclones(), \
                 mock.patch.object(evt, "burnt_areas", return_value=(_gj(), [])), \
-                mock.patch.object(evt, "sample_layer", return_value=([45.0, 3.0], {"mailles": 2, "valeurs_lues": 2, "tronque": False})):
+                mock.patch.object(evt, "sample_layer", return_value=([45.0, 3.0], {
+                    "mailles": 2, "valeurs_lues": 2, "objets": 2, "tronque": False, "hors_emprise": 0,
+                    "presence": __import__("numpy").array([True, True]), "interroge": __import__("numpy").array([True, True]),
+                    "statut": __import__("numpy").array(["valeur", "valeur"], dtype=object), "attributs": [None, None], "exemples": []})):
             app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
             app.main()
         _, res, notes = st.session_state["ev_fire_cross"]
         self.assertEqual(list(res["incendie_statut"]), ["Dans une zone brûlée", "Non touché"])
         self.assertEqual(list(res["fwi_niveau"]), ["Très élevé", "Très faible"])
+        self.assertIn("feu_mf010.fwi", res.columns)                       # colonnes liées aux couches sélectionnées
+        self.assertIn("feu_mf010.fwi.statut", res.columns)
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         self.assertTrue([c for c in st.calls if c[0] == "download"])
 
