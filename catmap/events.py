@@ -742,3 +742,204 @@ def cross_with_burnt(df: pd.DataFrame, lat_c: str, lon_c: str, gj: Optional[dict
     out.loc[near, "incendie_statut"] = [f"À moins de {snap_km:g} km" for _ in range(int(near.sum()))]
     out["incendie_distance_km"] = np.where(inside | near, np.round(np.nan_to_num(dist, nan=0.0), 2), np.nan)
     return out
+
+
+# =========================================================================== v3 : contours d'une activation Copernicus EMS
+EMS_DETAIL = "https://rapidmapping.emergency.copernicus.eu/backend/dashboard-api/public-activations/"
+MAX_GEOJSON_BYTES = 20_000_000
+PRODUCT_LABEL = {"REF": "Référence", "FEP": "Première estimation", "DEL": "Délimitation", "GRA": "Évaluation des dégâts",
+                 "GRM": "Évaluation des dégâts (suivi)"}
+
+
+def _find_urls(d: dict) -> dict:
+    """URL de GeoJSON et de style SLD d'une couche, quel que soit le nom exact des clés."""
+    out = {"geojson": "", "sld": ""}
+    for k, v in d.items():
+        if not isinstance(v, str) or not v.lower().startswith("http"):
+            continue
+        low = v.lower().split("?")[0]
+        if low.endswith((".geojson", ".json")) and not out["geojson"]:
+            out["geojson"] = v
+        elif low.endswith(".sld") and not out["sld"]:
+            out["sld"] = v
+        elif "geojson" in str(k).lower() and not out["geojson"]:
+            out["geojson"] = v
+        elif ("sld" in str(k).lower() or "style" in str(k).lower()) and not out["sld"]:
+            out["sld"] = v
+    return out
+
+
+def iter_layers(detail) -> list[dict]:
+    """Couches vectorielles d'une activation (réponse de public-activations/?code=…), en parcourant toute la structure
+    (AOI > produits > couches) : [{aoi, produit, type, numero, suivi, nom, geojson, sld}]."""
+    out: list[dict] = []
+
+    def walk(x, ctx):
+        if isinstance(x, list):
+            for i in x:
+                walk(i, ctx)
+        elif isinstance(x, dict):
+            c = dict(ctx)
+            if "number" in x and ("products" in x or "aoi" in str(x.get("name", "")).lower() or x.get("name")):
+                c["aoi"] = str(x.get("name") or f"AOI {x.get('number')}")
+            if x.get("type") in PRODUCT_LABEL or "monitoringNumber" in x:
+                c.update({"type": str(x.get("type") or ""), "numero": x.get("number"),
+                          "suivi": x.get("monitoringNumber")})
+            urls = _find_urls(x)
+            if urls["geojson"]:
+                out.append({"aoi": c.get("aoi", ""), "type": c.get("type", ""), "numero": c.get("numero"), "suivi": c.get("suivi"),
+                            "nom": str(x.get("name") or x.get("title") or x.get("layer") or x.get("fileName")
+                                       or urls["geojson"].rsplit("/", 1)[-1]),
+                            "geojson": urls["geojson"], "sld": urls["sld"]})
+                return
+            for v in x.values():
+                if isinstance(v, (list, dict)):
+                    walk(v, c)
+
+    walk(detail, {})
+    seen, uniq = set(), []
+    for l in out:
+        if l["geojson"] not in seen:
+            seen.add(l["geojson"])
+            uniq.append(l)
+    return uniq
+
+
+def fetch_activation_detail(code: str, session=None) -> tuple[Optional[dict], list[dict]]:
+    diag = []
+    try:
+        r = _get(session, EMS_DETAIL, {"code": code})
+    except requests.RequestException as e:
+        return None, [_diag(EMS_DETAIL, "erreur", str(e)[:150])]
+    if r.status_code != 200:
+        return None, [_diag(EMS_DETAIL, r.status_code, "réponse inattendue")]
+    try:
+        data = r.json()
+    except ValueError:
+        return None, [_diag(EMS_DETAIL, 200, "réponse non JSON")]
+    res = data.get("results") if isinstance(data, dict) else data
+    item = res[0] if isinstance(res, list) and res else (data if isinstance(data, dict) else None)
+    diag.append(_diag(EMS_DETAIL, 200, "activation lue" if item else "activation introuvable"))
+    return item, diag
+
+
+def fetch_geojson(url: str, session=None) -> tuple[Optional[dict], str]:
+    """GeoJSON d'une couche (taille limitée). Retourne (données, message d'erreur éventuel)."""
+    try:
+        r = _get(session, url)
+    except requests.RequestException as e:
+        return None, f"erreur réseau : {str(e)[:120]}"
+    if r.status_code != 200:
+        return None, f"statut {r.status_code}"
+    size = len(getattr(r, "content", b"") or b"") or len(getattr(r, "text", "") or "")
+    if size > MAX_GEOJSON_BYTES:
+        return None, f"fichier trop volumineux ({size / 1e6:.0f} Mo, limite {MAX_GEOJSON_BYTES / 1e6:.0f} Mo)"
+    try:
+        data = r.json()
+    except ValueError:
+        return None, "réponse non JSON"
+    if not isinstance(data, dict) or not isinstance(data.get("features"), list):
+        return None, "pas de « features »"
+    return data, ""
+
+
+# --------------------------------------------------------------------------- styles SLD
+def parse_sld(xml_text: str) -> list[dict]:
+    """Règles de style d'un fichier SLD : [{titre, champ, valeur, fill, stroke, fill_opacity, stroke_width}] (champ/valeur : filtre
+    d'égalité éventuel, None pour la règle par défaut)."""
+    try:
+        root = ET.fromstring(xml_text.encode("utf-8") if isinstance(xml_text, str) else xml_text)
+    except ET.ParseError:
+        return []
+    tag = lambda e: e.tag.split("}")[-1]
+    rules = []
+    for rule in (e for e in root.iter() if tag(e) == "Rule"):
+        r = {"titre": "", "champ": None, "valeur": None, "fill": None, "stroke": None, "fill_opacity": None, "stroke_width": None}
+        for ch in rule:
+            if tag(ch) in ("Title", "Name") and (ch.text or "").strip() and not r["titre"]:
+                r["titre"] = ch.text.strip()
+        for f in rule.iter():
+            if tag(f) == "PropertyIsEqualTo":
+                pn = next((x.text for x in f.iter() if tag(x) == "PropertyName"), None)
+                lit = next((x.text for x in f.iter() if tag(x) == "Literal"), None)
+                if pn and lit is not None:
+                    r["champ"], r["valeur"] = pn.strip(), lit.strip()
+                break
+        for sym in (e for e in rule.iter() if tag(e).endswith("Symbolizer")):
+            for part in sym.iter():
+                if tag(part) not in ("Fill", "Stroke"):
+                    continue
+                params = {p.get("name"): (p.text or "").strip() for p in part.iter() if tag(p) in ("CssParameter", "SvgParameter")}
+                if tag(part) == "Fill":
+                    r["fill"] = r["fill"] or params.get("fill")
+                    r["fill_opacity"] = r["fill_opacity"] if r["fill_opacity"] is not None else _num(params.get("fill-opacity"))
+                else:
+                    r["stroke"] = r["stroke"] or params.get("stroke")
+                    r["stroke_width"] = r["stroke_width"] if r["stroke_width"] is not None else _num(params.get("stroke-width"))
+        if r["fill"] or r["stroke"]:
+            rules.append(r)
+    return rules
+
+
+DEFAULT_COLORS = (("observed", "#1f6fb5"), ("flood", "#1f6fb5"), ("water", "#1f6fb5"), ("burnt", "#d7191c"), ("fire", "#d7191c"),
+                  ("aoi", "#555555"), ("built", "#8c6d31"), ("damage", "#e08214"), ("grade", "#e08214"))
+
+
+def default_rule(name: str) -> dict:
+    low = name.lower()
+    color = next((c for k, c in DEFAULT_COLORS if k in low), "#d7191c")
+    return {"titre": name, "champ": None, "valeur": None, "fill": color if "aoi" not in low else None, "stroke": color,
+            "fill_opacity": 0.45, "stroke_width": 1.5}
+
+
+def style_for(props: dict, rules: list[dict]) -> dict:
+    """Style Leaflet d'une entité : première règle dont le filtre correspond, sinon règle par défaut, sinon rouge."""
+    chosen = None
+    for r in rules:
+        if r["champ"] is None:
+            chosen = chosen or r
+        elif str((props or {}).get(r["champ"])) == str(r["valeur"]):
+            chosen = r
+            break
+    r = chosen or (rules[0] if rules else default_rule(""))
+    return {"color": r["stroke"] or r["fill"] or "#d7191c", "weight": r["stroke_width"] or 1.2,
+            "fillColor": r["fill"] or "#000000", "fillOpacity": (r["fill_opacity"] if r["fill_opacity"] is not None else 0.5) if r["fill"] else 0.0}
+
+
+def fetch_text(url: str, session=None) -> str:
+    """Texte d'un fichier (style SLD…) ; chaîne vide en cas d'échec."""
+    try:
+        r = _get(session, url)
+        return r.text if r.status_code == 200 else ""
+    except requests.RequestException:
+        return ""
+
+
+def geojson_bounds(gj: Optional[dict]) -> Optional[tuple[float, float, float, float]]:
+    """(sud, ouest, nord, est) de toutes les coordonnées d'un GeoJSON ; None s'il n'y en a pas."""
+    pts: list = []
+
+    def walk(c):
+        if isinstance(c, (list, tuple)) and c:
+            if isinstance(c[0], (int, float)) and len(c) >= 2:
+                pts.append((float(c[1]), float(c[0])))
+            else:
+                for i in c:
+                    walk(i)
+
+    for f in (gj or {}).get("features") or []:
+        walk((f.get("geometry") or {}).get("coordinates"))
+    if not pts:
+        return None
+    lats, lons = [p[0] for p in pts], [p[1] for p in pts]
+    return min(lats), min(lons), max(lats), max(lons)
+
+
+def legend_items(rules: list[dict], layer_name: str) -> list[dict]:
+    """Éléments de légende [{titre, couleur, contour}] d'une couche à partir de ses règles de style (style par défaut sinon)."""
+    rules = rules or [default_rule(layer_name)]
+    out = []
+    for r in rules:
+        t = r["titre"] or (f"{r['champ']} = {r['valeur']}" if r["champ"] else layer_name)
+        out.append({"titre": t, "couleur": r["fill"] or "transparent", "contour": r["stroke"] or r["fill"] or "#555555"})
+    return out
