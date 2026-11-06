@@ -220,7 +220,8 @@ class TestAppSmoke(unittest.TestCase):
         with self.fake_cyclones(), \
                 mock.patch.object(evt, "sample_layer", return_value=([2.5, float("nan")], {
                     "mailles": 2, "valeurs_lues": 1, "objets": 1, "tronque": False, "hors_emprise": 0,
-                    "presence": __import__("numpy").array([True, False]), "interroge": __import__("numpy").array([True, True]), "attributs": [{"RP": "10"}, None], "exemples": []})):
+                    "presence": __import__("numpy").array([True, False]), "interroge": __import__("numpy").array([True, True]),
+                    "statut": __import__("numpy").array(["valeur", "aucun objet"], dtype=object), "attributs": [{"RP": "10"}, None], "exemples": []})):
             app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
             app.main()
         _, res, notes, _ex = st.session_state["ev_flood_cross_efas"]
