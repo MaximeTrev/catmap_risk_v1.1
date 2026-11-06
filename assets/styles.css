@@ -112,6 +112,7 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 
 /* Suivi évènements climatiques : boutons « Croiser » en texte blanc */
 .st-key-ev_fire_cross_go button, .st-key-ev_fire_cross_go button p, .st-key-ev_fire_cross_go button span,
-[class*="st-key-ev_flood_go_"] button, [class*="st-key-ev_flood_go_"] button p, [class*="st-key-ev_flood_go_"] button span {
+[class*="st-key-ev_flood_go_"] button, [class*="st-key-ev_flood_go_"] button p, [class*="st-key-ev_flood_go_"] button span,
+[class*="st-key-ev_ct_go_"] button, [class*="st-key-ev_ct_go_"] button p, [class*="st-key-ev_ct_go_"] button span {
     color: #ffffff !important;
 }
