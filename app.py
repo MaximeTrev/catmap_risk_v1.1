@@ -1194,13 +1194,13 @@ def page_temps_reel():
     t_cy, t_vg, t_eu, t_ev = st.tabs(["Cyclones tropicaux", "Vigilance Météo-France", "Vigilance Europe",
                                       "Suivi évènements climatiques"])
     with t_ev:
-        _events_section()
+        _safe_tab(_events_section, "Suivi évènements climatiques")
     with t_cy:
-        _cyclone_section()
+        _safe_tab(_cyclone_section, "Cyclones tropicaux")
     with t_vg:
-        _vigilance_section()
+        _safe_tab(_vigilance_section, "Vigilance Météo-France")
     with t_eu:
-        _europe_section()
+        _safe_tab(_europe_section, "Vigilance Europe")
 
 
 # --------------------------------------------------------------------------- Suivi évènements climatiques
@@ -1301,18 +1301,32 @@ def _ev_add_wms(m, base_url, layers, time_value=None, timed=None):
             overlay=True, control=True, show=True, **kw).add_to(m)
 
 
+def _safe_tab(fn, label, *args):
+    """Exécute un onglet ; une erreur s'affiche dans cet onglet sans empêcher les autres de fonctionner."""
+    try:
+        fn(*args)
+    except Exception as e:                                       # noqa: BLE001 - l'affichage de l'erreur est le but
+        st.error(f"{label} : {type(e).__name__} — {str(e)[:300]}")
+        if isinstance(e, AttributeError):
+            st.caption("Cette erreur indique en général que le serveur utilise d'anciens fichiers en mémoire : redémarrez l'application "
+                       "(« Manage app » > menu ⋮ > « Reboot app ») après avoir remplacé tous les fichiers mis à jour.")
+
+
 def _events_section():
     st.subheader("Suivi évènements climatiques")
     st.caption("Inondations et incendies en temps quasi réel à partir des services publics Copernicus (EMS, EFFIS, EFAS, GloFAS). "
                "Aucune clé n'est nécessaire. Les adresses des services n'ont pas pu être testées depuis le serveur de développement : "
                "chaque onglet fournit un diagnostic des appels.")
     t_act, t_fire, t_flood = st.tabs(["Activations Copernicus EMS", "Incendies (EFFIS)", "Crues (EFAS / GloFAS)"])
+    if getattr(evt, "VERSION", 1) < 3:
+        st.error("Le module `catmap/events.py` en mémoire est ancien. Remplacez le fichier dans GitHub puis redémarrez l'application "
+                 "(« Manage app » > menu ⋮ > « Reboot app »).")
     with t_act:
-        _ev_activations_tab()
+        _safe_tab(_ev_activations_tab, "Activations Copernicus EMS")
     with t_fire:
-        _ev_fire_tab()
+        _safe_tab(_ev_fire_tab, "Incendies")
     with t_flood:
-        _ev_flood_tab()
+        _safe_tab(_ev_flood_tab, "Crues")
 
 
 def _ev_activations_tab():
