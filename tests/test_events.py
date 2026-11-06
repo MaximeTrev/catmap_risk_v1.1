@@ -269,7 +269,7 @@ class FireValues(unittest.TestCase):
                 return FakeResponse(200, text="")
         s = S()
         vals, info = ev.sample_layer("http://wms.test", "x", [45.0, 46.0, 10.0], [5.0, 5.0, 100.0], s, step=0.0001, bbox=(-25, 30, 45, 72) if False else None)
-        self.assertEqual(info["format"], "application/json")             # le format qui renvoie des données est retenu
+        self.assertTrue(info["format"].startswith("application/json"))             # le format qui renvoie des données est retenu
         self.assertEqual(vals[0], 7.0)
         self.assertEqual(list(info["statut"][:2]), ["valeur", "valeur"])
         self.assertEqual(info["statut"][2], "aucun objet")
@@ -290,6 +290,28 @@ class FireValues(unittest.TestCase):
         caps = CAPS.replace('<Name>mf010.fwi</Name>', '<Name>mf010.fwi</Name><Dimension name="time" default="2026-11-06T00:00:00Z">2026-11-01/2026-11-10</Dimension>')
         d = {x["name"]: x for x in ev.fetch_layer_details("http://wms.test", Sess([("wms", FakeResponse(200, text=caps))]))}
         self.assertEqual(d["mf010.fwi"]["time_default"], "2026-11-06T00:00:00Z")
+
+    def test_server_error_triggers_other_variants_and_reports_body(self):
+        class S:
+            def __init__(self): self.n = []
+            def get(self, url, params=None, timeout=None, headers=None):
+                self.n.append(params.get("version") + ("+time" if "time" in params else ""))
+                if params.get("version") == "1.3.0":
+                    return FakeResponse(500, text="msGetFeatureInfo(): invalid TIME value")
+                return FakeResponse(200, text="value = 12")
+        s = S()
+        txt, diag = ev.get_feature_info("http://wms.test", "x", 45, 5, 6, s, time_value="2026-11-06T00:00:00Z", formats=("text/plain",))
+        self.assertEqual(txt, "value = 12")
+        self.assertEqual(s.n[:3], ["1.3.0+time", "1.3.0", "1.1.1+time"])
+        self.assertIn("invalid TIME", diag[0]["remarque"])                       # message d'erreur du service conservé
+        s = S()
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0, 45.1], [5.0, 5.1], s, time_value="2026-11-06T00:00:00Z", step=0.01)
+        self.assertEqual(list(vals), [12.0, 12.0])
+        self.assertIn("v111", info["format"])
+        self.assertEqual(info["erreurs"], 0)
+        vals, info = ev.sample_layer("http://wms.test", "x", [45.0], [5.0], Sess([("wms", FakeResponse(500, text="boom"))]))
+        self.assertEqual(info["erreurs"], 1)
+        self.assertIn("boom", info["erreur_exemple"])
 
     def test_legend_url(self):
         u = ev.legend_url("http://wms.test/effis", "mf010.fwi")
