@@ -332,7 +332,7 @@ def fetch_layer_details(base: str, session=None) -> list[dict]:
     for el in root.iter():
         if el.tag.split("}")[-1] != "Layer":
             continue
-        d = {"name": None, "title": "", "abstract": "", "time": "", "queryable": str(el.get("queryable", "")) == "1", "bbox": None, "legends": [], "styles": []}
+        d = {"name": None, "title": "", "abstract": "", "time": "", "time_default": "", "queryable": str(el.get("queryable", "")) == "1", "bbox": None, "legends": [], "styles": []}
         for ch in el:
             t = ch.tag.split("}")[-1]
             txt = (ch.text or "").strip()
@@ -365,6 +365,7 @@ def fetch_layer_details(base: str, session=None) -> list[dict]:
                 d["abstract"] = txt
             elif t in ("Dimension", "Extent") and (ch.get("name") or "").lower() == "time":
                 d["time"] = txt or str(ch.get("default", ""))
+                d["time_default"] = str(ch.get("default", "") or "")
         if d["name"] and d["name"] not in seen:
             seen.add(d["name"])
             out.append(d)
@@ -448,12 +449,17 @@ def _fi_bbox(lat: float, lon: float, zoom: float, size: int = 101):
     return lat - half_lat, lon - half, lat + half_lat, lon + half
 
 
+FI_FORMATS = ("text/plain", "application/json", "text/html", "application/vnd.ogc.gml", "text/xml", "application/geojson")
+
+
 def get_feature_info(base: str, layer: str, lat: float, lon: float, zoom: float = 6, session=None,
-                     time_value: Optional[str] = None) -> tuple[str, list[dict]]:
-    """Valeur d'une couche WMS au point (lat, lon) : (texte brut de la réponse, diagnostic). Texte vide si rien."""
+                     time_value: Optional[str] = None, formats=None, exhaustive: bool = False) -> tuple[str, list[dict]]:
+    """Valeur d'une couche WMS au point (lat, lon) : (texte brut de la réponse, diagnostic). Texte vide si rien.
+    Par défaut une réponse valide mais vide est définitive ; avec `exhaustive`, on essaie les autres formats tant que la réponse
+    est vide (utile pour un clic isolé). `formats` impose la liste des formats essayés."""
     diag = []
     south, west, north, east = _fi_bbox(lat, lon, zoom)
-    for fmt in ("text/plain", "application/json", "text/html", "application/vnd.ogc.gml"):
+    for fmt in (formats or FI_FORMATS):
         params = {"service": "WMS", "version": "1.3.0", "request": "GetFeatureInfo", "layers": layer, "query_layers": layer,
                   "styles": "", "crs": "EPSG:4326", "bbox": f"{south},{west},{north},{east}", "width": 101, "height": 101,
                   "i": 50, "j": 50, "info_format": fmt, "feature_count": 5}
@@ -472,7 +478,8 @@ def get_feature_info(base: str, layer: str, lat: float, lon: float, zoom: float 
             diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "format ou couche non interrogeable"))
             continue
         diag.append(_diag(f"{base} [{layer}] {fmt}", 200, "ok" if body else "réponse vide (rien à cet endroit)"))
-        return body, diag                     # réponse valide, même vide : inutile d'essayer les autres formats
+        if body or not exhaustive:
+            return body, diag                 # réponse valide, même vide : inutile d'essayer les autres formats
     return "", diag
 
 
@@ -581,6 +588,20 @@ def primary_value(attrs: dict) -> tuple[Optional[str], Optional[float]]:
     return best
 
 
+def _probe_format(base, layer, cells, session, time_value) -> str:
+    """Format GetFeatureInfo qui renvoie réellement des données : essayé sur quelques mailles ; à défaut, celui qui répond sans erreur."""
+    answered = None
+    for c in cells:
+        for fmt in FI_FORMATS:
+            txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value,
+                                       formats=(fmt,))
+            if info_has_feature(txt):
+                return fmt
+            if answered is None and txt.strip():
+                answered = fmt
+    return answered or FI_FORMATS[0]
+
+
 def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Optional[str] = None, step: float = 0.05,
                  max_cells: int = 300, workers: int = 12, bbox=None) -> tuple[np.ndarray, dict]:
     """Valeur numérique de la couche pour chaque point (NaN si inconnue). Les points sont regroupés par maille de `step` degrés
@@ -601,8 +622,11 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
     truncated = len(cells) > max_cells
     cells = cells[:max_cells]
 
+    fmt = _probe_format(base, layer, cells[:6], session, time_value)
+
     def one(c):
-        txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value)
+        txt, dg = get_feature_info(base, layer, float(c[0]), float(c[1]), zoom=10, session=session, time_value=time_value,
+                                   formats=(fmt,))
         attrs = info_attributes(txt)
         present = info_has_feature(txt)
         val = primary_value(attrs)[1] if attrs else None
@@ -627,11 +651,15 @@ def sample_layer(base: str, layer: str, lats, lons, session=None, time_value: Op
         presence[i] = bool(pres.get(key, False))
         queried[i] = key in num
         attributes[i] = atts.get(key) or None
-    examples = [{"lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
+    statut = np.array(["hors emprise" if out_of[i] else ("non interrogé (limite)" if not queried[i] else
+                                                        ("valeur" if vals[i] == vals[i] else ("objet sans valeur" if presence[i] else "aucun objet")))
+                       for i in range(len(lats))], dtype=object)
+    statut[~np.isfinite(lats) | ~np.isfinite(lons)] = "coordonnées invalides"
+    examples = [{"format": fmt, "lat": c[0], "long": c[1], "réponse": (t or "")[:300], "appels": "; ".join(f"{d['statut']} {d['remarque']}" for d in dg)}
                 for c, _, _, t, dg, _a in res[:3]]
     return vals, {"mailles": len(cells), "valeurs_lues": sum(1 for r in res if r[1] is not None),
                   "objets": sum(1 for r in res if r[2]), "tronque": truncated,
-                  "hors_emprise": int(out_of.sum()), "presence": presence, "interroge": queried, "attributs": attributes, "exemples": examples}
+                  "hors_emprise": int(out_of.sum()), "presence": presence, "interroge": queried, "statut": statut, "format": fmt, "attributs": attributes, "exemples": examples}
 
 
 # --------------------------------------------------------------------------- zones brûlées : dates et filtre
