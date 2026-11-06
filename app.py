@@ -1151,6 +1151,25 @@ def _cyclone_area_section(storms):
     _page_area(kp="cy_area_", result_key="cy_area_result", center=center, zoom=zoom)
 
 
+def _cross_table(res, new_cols, mask, key, mask_label="Seulement les points touchés", default_only=False, max_base=8):
+    """Tableau d'un croisement : colonnes d'origine (au choix) + TOUTES les colonnes ajoutées par le croisement, avec option de
+    ne garder que les points touchés. Le CSV téléchargé par l'appelant reste complet."""
+    new_cols = [c for c in new_cols if c in res.columns]
+    base_cols = [c for c in res.columns if c not in new_cols]
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        shown_base = st.multiselect("Colonnes d'origine affichées", base_cols, default=base_cols[:max_base], key=f"{key}_basecols")
+    with c2:
+        only = st.checkbox(mask_label, default_only, key=f"{key}_only")
+    view = res[mask.fillna(False).to_numpy(bool)] if (only and mask is not None) else res
+    st.caption(f"{len(view)} ligne(s) · {len(new_cols)} colonne(s) ajoutée(s) par le croisement : " + (", ".join(new_cols) or "aucune"))
+    if view.empty:
+        st.caption("Aucune ligne ne correspond.")
+        return view
+    _stretch(st.dataframe, view[shown_base + new_cols], hide_index=True)
+    return view
+
+
 def _cyclone_risk_section(storms):
     st.subheader("Croiser vos points avec les cyclones")
     up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
@@ -1181,7 +1200,7 @@ def _cyclone_risk_section(storms):
     m[0].metric("Points analysés", len(res))
     m[1].metric("Points sur la trajectoire", len(hit))
     m[2].metric("Impact le plus proche", f"{int(hit['impact'].min())} h" if len(hit) else "—")
-    _stretch(st.dataframe, res, hide_index=True)
+    _cross_table(res, cr.NEW_COLUMNS, res["impact"] > 0, "cy_risk_tbl", "Seulement les points sur la trajectoire")
     st.caption("impact : 0 = hors trajectoire, sinon échéance (12, 24… h) à laquelle le cyclone atteint le point. "
                "max_sustained_winds et max_wind_gusts en km/h, total_precipitation en mm (cumul prévu au point jusqu'à 12 h après l'impact). "
                "None = hors trajectoire ou donnée indisponible.")
@@ -1260,7 +1279,7 @@ def _ev_show_legend(url, layer, details):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _ev_info(url: str, layer: str, lat: float, lon: float, zoom: float, time_value):
-    return evt.get_feature_info(url, layer, lat, lon, zoom, time_value=time_value)
+    return evt.get_feature_info(url, layer, lat, lon, zoom, time_value=time_value, exhaustive=True)
 
 
 def _ev_diag(diag, title="Diagnostic des appels"):
@@ -1543,6 +1562,7 @@ def _ev_fire_tab():
     m = _ev_base_map(((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2), 4 if zone == "Europe" else 6)
     if url and chosen:
         _ev_add_wms(m, url, chosen, tv, timed)
+    times = {n: (tv or details.get(n, {}).get("time_default") or None) for n in timed}       # date par défaut si aucune choisie
     if gj and gj.get("features"):
         cols = [c for c in tbl.columns if c != "geometry"][:12]
         folium.GeoJson(
@@ -1559,7 +1579,7 @@ def _ev_fire_tab():
     st.caption("Zones rouges : polygones de zones brûlées EFFIS (clic = tous les attributs). Autres couleurs : voir les légendes ci-dessous.")
     click = out.get("last_clicked") if out else None
     if click and url and chosen:
-        _ev_click_values(url, chosen, click, out.get("zoom") or 6, tv, timed)
+        _ev_click_values(url, chosen, click, out.get("zoom") or 6, tv, times)
     if url and chosen:
         with st.expander("Légendes des couches affichées"):
             for n in chosen:
@@ -1573,7 +1593,7 @@ def _ev_fire_tab():
                            key="ev_fire_dl")
     st.caption("Le service ne filtre pas par date : le filtrage est fait ici sur les colonnes de date, parmi les 5 000 zones les plus "
                "récentes lues dans la zone choisie.")
-    _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, timed)
+    _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times)
     _ev_diag(d_cap + d_ba)
 
 
@@ -1581,7 +1601,7 @@ def _ev_click_values(url, chosen, click, zoom, tv, timed):
     st.markdown(f"**Valeurs au point cliqué** ({click['lat']:.4f}, {click['lng']:.4f})")
     rows, raw = [], {}
     for n in chosen:
-        txt, _ = _ev_info(url, n, float(click["lat"]), float(click["lng"]), float(zoom), tv if n in timed else None)
+        txt, _ = _ev_info(url, n, float(click["lat"]), float(click["lng"]), float(zoom), timed.get(n))
         attrs = evt.info_attributes(txt)
         name, val = evt.primary_value(attrs) if attrs else (None, None)
         if val is None and not attrs:
@@ -1600,7 +1620,7 @@ def _ev_click_values(url, chosen, click, zoom, tv, timed):
             st.code(t or "(réponse vide : couche non interrogeable ou aucune donnée à cet endroit)")
 
 
-def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, timed):
+def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active_days, tv, times):
     st.divider()
     st.subheader("Croiser vos points avec les incendies")
     up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
@@ -1648,7 +1668,7 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
                     notes.append("Limite de 5 000 zones atteinte sur l'emprise de vos points : résultat possiblement incomplet.")
                 res = evt.cross_with_burnt(df, lat_c, lon_c, gj_f, snap_km=float(snap), date_cols=tuple(c for c in (sc, ec) if c))
             if use_fwi and fwi_layer and url:
-                vals, info = evt.sample_layer(url, fwi_layer, lat.to_numpy(), lon.to_numpy(), time_value=tv if fwi_layer in timed else None)
+                vals, info = evt.sample_layer(url, fwi_layer, lat.to_numpy(), lon.to_numpy(), time_value=times.get(fwi_layer))
                 res["fwi_valeur"] = [None if v != v else round(float(v), 1) for v in vals]
                 cls = [evt.fwi_class(v) for v in vals]
                 res["fwi_rang"] = [c[0] for c in cls]
@@ -1693,8 +1713,9 @@ def _ev_fire_cross(url, layers, gj_all, start_col, end_col, mode, d1, d2, active
                    + " · ".join(f"<span style='color:{FWI_COLORS[i + 1]}'>■</span> {lbl}" for i, (_, lbl) in enumerate(evt.FWI_CLASSES))
                    + " · <span style='color:#9e9e9e'>■</span> n/d. Contour noir épais : point touché par une zone brûlée.", unsafe_allow_html=True)
     show = [c for c in res.columns if c.startswith(("incendie_", "fwi_"))]
-    first = [c for c in res.columns if c not in show][:6]
-    _stretch(st.dataframe, res[first + show], hide_index=True)
+    mask = ((res["incendie_statut"] != "Non touché") if "incendie_statut" in res else pd.Series(False, index=res.index)) | \
+           ((res["fwi_rang"] >= 4) if "fwi_rang" in res else pd.Series(False, index=res.index))
+    _cross_table(res, show, mask, "ev_fire_tbl", "Seulement les points touchés ou à danger élevé (FWI ≥ Élevé)")
     st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), "croisement_incendies.csv", "text/csv", key="ev_fire_cross_dl")
 
 
@@ -1727,6 +1748,7 @@ def _ev_flood_tab():
     st.caption("À cocher si la carte interactive ne se charge pas (message « trouble loading the streamlit_folium.st_folium component »).")
     m = _ev_base_map((48.0, 8.0) if kind == "efas" else (20.0, 10.0), 4 if kind == "efas" else 2)
     _ev_add_wms(m, url, chosen, tv, timed)
+    times = {n: (tv or details.get(n, {}).get("time_default") or None) for n in timed}       # date par défaut si aucune choisie
     if simple:
         import folium
         folium.LayerControl(collapsed=True).add_to(m)
@@ -1736,7 +1758,7 @@ def _ev_flood_tab():
         out = _ev_show_map(m, f"ev_flood_map_{kind}", track_click=True)
     click = out.get("last_clicked") if out else None
     if click and chosen:
-        _ev_click_values(url, chosen, click, out.get("zoom") or 4, tv, timed)
+        _ev_click_values(url, chosen, click, out.get("zoom") or 4, tv, times)
     elif chosen and not simple:
         st.caption("Cliquez sur la carte pour lire la valeur des couches sélectionnées à cet endroit.")
     with st.expander("À quoi servent les couches ?"):
@@ -1760,11 +1782,11 @@ def _ev_flood_tab():
         st.markdown(f"[Tester la première couche dans le navigateur (image brute du service)]({evt.getmap_url(url, chosen[0], time_value=tv if chosen[0] in timed else None)})")
         st.caption("Si ce lien affiche une erreur XML (jeton exigé, date hors plage, couche inconnue), elle explique pourquoi la carte reste vide.")
     st.caption(f"Service interrogé : {url}")
-    _ev_flood_cross(url, chosen, tv, timed, kind, details)
+    _ev_flood_cross(url, chosen, tv, times, kind, details)
     _ev_diag(d_cap)
 
 
-def _ev_flood_cross(url, chosen, tv, timed, kind, details):
+def _ev_flood_cross(url, chosen, tv, times, kind, details):
     import numpy as np
     st.divider()
     st.subheader("Croiser vos points avec les crues")
@@ -1818,7 +1840,7 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
             hit = np.zeros(len(df), dtype=bool)
             covered = np.ones(len(df), dtype=bool)                  # point interrogé pour toutes les couches décisives
             for n in chosen:
-                vals, info = evt.sample_layer(url, n, lat, lon, time_value=tv if n in timed else None, step=prec[pk],
+                vals, info = evt.sample_layer(url, n, lat, lon, time_value=times.get(n), step=prec[pk],
                                               max_cells=max_cells, bbox=details.get(n, {}).get("bbox"))
                 pres, attrs = info["presence"], info["attributs"]
                 res[f"crue_{n}"] = [round(float(v), 3) if v == v else ("présent" if p_ else None) for v, p_ in zip(vals, pres)]
@@ -1827,6 +1849,7 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
                     for k in (a_ or {}):
                         if k.lower() not in evt.ID_LIKE and k not in keys:
                             keys.append(k)
+                res[f"crue_{n}.statut"] = list(info["statut"])
                 for k in keys[:8]:
                     res[f"crue_{n}.{k}"] = [(a_ or {}).get(k) for a_ in attrs]
                 if n in decide:
@@ -1888,8 +1911,7 @@ def _ev_flood_cross(url, chosen, tv, timed, kind, details):
         st.markdown("<span style='color:#d7191c'>■</span> touché · <span style='color:#2e9e5b'>■</span> non touché · "
                     "<span style='color:#9e9e9e'>■</span> n/d (point non interrogé : hors emprise de la couche ou au-delà du maximum de mailles)", unsafe_allow_html=True)
     show = [c for c in res.columns if c.startswith("crue_")]
-    first = [c for c in res.columns if c not in show][:6]
-    _stretch(st.dataframe, res[first + show], hide_index=True)
+    _cross_table(res, show, res["crue_touche"] == "Oui", f"ev_flood_tbl_{kind}")
     st.download_button("Télécharger le croisement (CSV)", _csv_bytes(res), f"croisement_crues_{kind}.csv", "text/csv",
                        key=f"ev_flood_dl_{kind}")
 
@@ -2102,8 +2124,10 @@ def _vigilance_sites_section(df):
         cols = ["nom_demande", "name", "departement", "vigilance_couleur", "vigilance_phenomenes", "naf_section", "surface_m2", "osm_url"]
     if alert.empty:
         st.success("Aucun site en vigilance orange ou rouge.")
-    else:
-        _stretch(st.dataframe, alert[cols].sort_values("vigilance_couleur"), hide_index=True)
+    fr_s = fr.sort_values("vigilance_couleur_id", ascending=False, na_position="last")
+    _cross_table(fr_s[full_cols], vcols, fr_s["vigilance_couleur_id"].fillna(0) >= 3, "vg_tbl",
+                 "Seulement les vigilances orange ou rouge", default_only=True)
+    if not alert.empty:
         _site_map(alert, kp="vg_")
         st.download_button("Télécharger les sites en vigilance orange ou rouge (CSV)", _csv_bytes(alert[cols]),
                            "catmap_sites_vigilance.csv", "text/csv")
@@ -2334,8 +2358,10 @@ def _europe_sites_section(alerts, rings, active=None):
     cols = base + ecols
     if orange.empty:
         st.success("Aucun site en alerte orange ou rouge.")
-    else:
-        _stretch(st.dataframe, orange[cols].sort_values("europe_niveau_id", ascending=False), hide_index=True)
+    exp_s = exp.sort_values("europe_niveau_id", ascending=False, na_position="last")
+    _cross_table(exp_s[cols], ecols, exp_s["europe_niveau_id"].fillna(0) >= 3, "eu_tbl",
+                 "Seulement les alertes orange ou rouge", default_only=True)
+    if not orange.empty:
         _site_map(orange, kp="eu_")
     st.download_button("Télécharger tous les sites avec leurs alertes (CSV)", _csv_bytes(exp[cols]),
                        "catmap_sites_vigilance_europe.csv", "text/csv", key="eu_dl_sites")
