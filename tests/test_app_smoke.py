@@ -60,7 +60,7 @@ def make_fakes(script):
     st.button = lambda label, **k: script.get("button:" + label, False) and not k.get("disabled")
     st.download_button = lambda *a, **k: (st.calls.append(("download", a[0], a[1].__len__() if hasattr(a[1], "__len__") else 0)), False)[1]
     st.columns = lambda n, **k: [Container(st) for _ in range(n if isinstance(n, int) else len(n))]
-    st.tabs = lambda labels: [Container(st) for _ in labels]
+    st.tabs = lambda labels: (st.calls.append(("tabs", list(labels))), [Container(st) for _ in labels])[1]
     st.empty = lambda: M()
     st.expander = lambda *a, **k: Container(st)
     st.sidebar = Container(st)
@@ -115,6 +115,7 @@ class TestAppSmoke(unittest.TestCase):
                                               return_value=("http://wms.test", evt.parse_capabilities(CAPS), [])))
         stack.enter_context(mock.patch.object(evt, "burnt_areas", return_value=(None, [])))
         stack.enter_context(mock.patch.object(evt, "fetch_layer_details", return_value=[]))
+        stack.enter_context(mock.patch.object(evt, "fetch_activation_detail", return_value=(None, [])))
         return stack
 
     def fake_fetch(self):
@@ -163,6 +164,29 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         self.assertTrue([c for c in st.calls if c[0] == "download"])          # CSV des activations
         self.assertTrue([c for c in st.calls if c[0] == "st_folium"])
+
+    def test_activation_contours_and_legend(self):
+        from catmap import events as evt
+        from tests.test_events import DETAIL, SLD, _gj
+        app, st = self.load({"Navigation": "Temps réel"})
+        with self.fake_cyclones(), \
+                mock.patch.object(evt, "fetch_activation_detail", return_value=(DETAIL, [])), \
+                mock.patch.object(evt, "fetch_geojson", return_value=(_gj(), "")), \
+                mock.patch.object(evt, "fetch_text", return_value=SLD):
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        md = " ".join(str(c[1]) for c in st.calls if c[0] == "markdown")
+        self.assertIn("Flooded area", md)                       # légende issue du SLD
+        self.assertIn("#0000ff", md)
+
+    def test_zone_tab_is_in_geolocalisation(self):
+        app, st = self.load({"Navigation": "Géolocalisation"})
+        with self.fake_cyclones():
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        tabs = [c for c in st.calls if c[0] == "tabs"]
+        self.assertTrue(any("Entreprises dans une zone" in str(t) for t in tabs), tabs)
 
     def test_fire_cross_with_csv(self):
         from catmap import events as evt
