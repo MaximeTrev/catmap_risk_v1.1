@@ -22,6 +22,8 @@ from typing import Any, Optional
 import pandas as pd
 import requests
 
+VERSION = 3   # incrémenté à chaque évolution (v3 : contours des activations)
+
 EMS_API = "https://mapping.emergency.copernicus.eu/activations/api/activations/"
 EMS_PAGE = "https://mapping.emergency.copernicus.eu/activations/{code}/"
 
