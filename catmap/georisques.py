@@ -20,8 +20,9 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-BASE_URL = "https://georisques.gouv.fr/api/v1/"
-MAX_PER_MINUTE = 850          # marge sous la limite annoncée de 1000/min
+BASE_URL = "https://www.georisques.gouv.fr/api/v1/"
+# Quotas annoncés : 1 appel/s sur resultats_rapport_risque, 5 appels/s sur les autres routes /api/v1, 1000/min au total.
+RATE_PER_MINUTE = {"rapport": 55, "default": 270}
 
 
 @dataclass(frozen=True)
@@ -33,19 +34,21 @@ class Dataset:
     kind: str = "count"               # count | scalar | report | labels
     fields: tuple[str, ...] = ()      # champs candidats pour ``scalar``
     default: bool = True
+    by_insee: bool = False            # demandé par code INSEE de la commune (radon) ; rapport : INSEE + coordonnées
 
 
 DATASETS: tuple[Dataset, ...] = (
-    Dataset("rapport", "Rapport de risques (synthèse par risque)", ("resultats_rapport_risque",), kind="report"),
+    Dataset("rapport", "Rapport de risques (synthèse par risque ; lent et instable côté API)", ("resultats_rapport_risque",),
+            kind="report", by_insee=True, default=False),
     Dataset("commune", "Risques recensés dans la commune (GASPAR)", ("gaspar/risques",), kind="labels"),
     Dataset("sismique", "Zonage sismique", ("zonage_sismique",), kind="scalar", fields=("zone_sismicite", "code_zone")),
-    Dataset("radon", "Potentiel radon", ("radon",), kind="scalar", fields=("classe_potentiel",)),
-    Dataset("argiles", "Retrait-gonflement des argiles", ("rga", "argiles"), kind="scalar",
+    Dataset("radon", "Potentiel radon (commune)", ("radon",), kind="scalar", fields=("classe_potentiel",), by_insee=True),
+    Dataset("argiles", "Retrait-gonflement des argiles", ("argiles",), kind="scalar",
             fields=("exposition", "codeExposition", "code_exposition")),
     Dataset("catnat", "Arrêtés de catastrophe naturelle (commune)", ("gaspar/catnat",), radius=True),
     Dataset("mvt", "Mouvements de terrain", ("mvt",), radius=True),
     Dataset("cavites", "Cavités souterraines", ("cavites",), radius=True),
-    Dataset("sis", "Secteurs d'information sur les sols (SIS)", ("sis",), radius=True),
+    Dataset("sis", "Secteurs d'information sur les sols (SIS)", ("ssp/sis", "sis"), radius=True),
     Dataset("casias", "Anciens sites industriels (CASIAS)", ("ssp/casias",), radius=True, default=False),
     Dataset("icpe", "Installations classées (ICPE)", ("installations_classees",), radius=True),
     Dataset("tri", "Territoires à risque important d'inondation (TRI)", ("gaspar/tri",), radius=True, default=False),
@@ -58,7 +61,7 @@ _LABEL_KEYS = ("libelle_risque_jo", "libelle_risque_long", "libelle", "nom", "no
 
 
 def new_columns(selected: list[str]) -> list[str]:
-    cols = ["gr_statut", "gr_erreurs"]
+    cols = ["gr_statut", "gr_erreurs", "gr_code_insee"]
     for k in selected:
         d = BY_KEY[k]
         if d.kind == "report":
@@ -85,6 +88,10 @@ class _RateLimiter:
             self.next = t + self.gap
         if t > now:
             time.sleep(t - now)
+
+
+def make_limiters() -> dict:
+    return {k: _RateLimiter(v) for k, v in RATE_PER_MINUTE.items()}
 
 
 def _get(url: str, params: dict, session, limiter: Optional[_RateLimiter], timeout: float = 25.0, retries: int = 3):
@@ -136,14 +143,27 @@ def _label(item) -> str:
 
 
 def _count(payload) -> int:
+    """Nombre total d'objets : le champ ``results`` (l'API pagine par 10) ; à défaut, la longueur de la liste."""
     items = _items(payload)
-    n = 0
+    nested = 0
     for it in items:                                   # GASPAR catnat : une ligne par commune avec une liste d'arrêtés
-        sub = next((it[k] for k in ("liste_catnat", "listCatnat", "catnat", "arretes") if isinstance(it, dict) and isinstance(it.get(k), list)), None)
-        n += len(sub) if sub is not None else 1
-    if not items and isinstance(payload, dict) and isinstance(payload.get("results"), int):
+        if isinstance(it, dict):
+            sub = next((it[k] for k in ("liste_catnat", "listCatnat", "catnat", "arretes") if isinstance(it.get(k), list)), None)
+            nested += len(sub) if sub is not None else 0
+    if nested:
+        return nested
+    if isinstance(payload, dict) and isinstance(payload.get("results"), int):
         return payload["results"]
-    return n
+    return len(items)
+
+
+def insee_from(payload) -> Optional[str]:
+    for it in _items(payload) or ([payload] if isinstance(payload, dict) else []):
+        if isinstance(it, dict):
+            for k in ("code_insee", "codeInsee", "insee", "code_commune"):
+                if it.get(k):
+                    return str(it[k]).strip()
+    return None
 
 
 def _detail(payload, limit: int = 3) -> str:
@@ -209,9 +229,14 @@ def _latlon(lat: float, lon: float) -> str:
     return f"{lon:.6f},{lat:.6f}"          # l'API attend « longitude,latitude »
 
 
-def query_dataset(ds: Dataset, lat: float, lon: float, radius_m: int, session=None, limiter=None, path_hint: Optional[dict] = None):
+def query_dataset(ds: Dataset, lat: float, lon: float, radius_m: int, session=None, limiter=None,
+                  path_hint: Optional[dict] = None, insee: Optional[str] = None):
     """Interroge un jeu de données pour un point. Retourne (valeurs, erreur, payload brut)."""
     params = {"latlon": _latlon(lat, lon)}
+    if ds.by_insee:
+        if not insee:
+            return {}, "code INSEE de la commune introuvable", None
+        params = {"code_insee": insee} if ds.kind != "report" else {"code_insee": insee, "latlon": params["latlon"]}
     if ds.radius:
         params["rayon"] = int(radius_m)
     paths = ds.paths
@@ -220,7 +245,7 @@ def query_dataset(ds: Dataset, lat: float, lon: float, radius_m: int, session=No
     payload, err, code = None, "", 0
     for p in paths:
         payload, err, code = _get(BASE_URL + p, params, session, limiter)
-        if code != 404:
+        if code != 404 and err != "réponse non JSON":
             if code == 200 and path_hint is not None:
                 path_hint[ds.key] = p
             break
@@ -255,23 +280,39 @@ def enrich_points(df: pd.DataFrame, lat_col: str, lon_col: str, selected: list[s
     uniq = list(dict.fromkeys(k for k in keys if k))
     skipped = max(0, len(uniq) - max_points)
     uniq = uniq[:max_points]
-    limiter, hints = _RateLimiter(MAX_PER_MINUTE), {}
+    limiters, hints = make_limiters(), {}
     results: dict = {}
     raw_errors: dict[str, int] = {}
     lock = threading.Lock()
     done = [0]
+    need_insee = any(BY_KEY[k].by_insee for k in selected)
 
     def work(pt):
-        vals, errs = {}, []
+        vals, errs, insee = {}, [], None
+        if need_insee or "commune" in selected:      # la commune (GASPAR) donne aussi le code INSEE exigé par rapport et radon
+            v, e, payload = query_dataset(BY_KEY["commune"], pt[0], pt[1], radius_m, session, limiters["default"], hints)
+            insee = insee_from(payload)
+            if "commune" in selected:
+                vals.update(v)
+                if e:
+                    errs.append(f"commune: {e}")
+            elif e:
+                errs.append(f"commune (code INSEE): {e}")
+        vals["gr_code_insee"] = insee
         for k in selected:
-            v, e, _ = query_dataset(BY_KEY[k], pt[0], pt[1], radius_m, session, limiter, hints)
+            if k == "commune":
+                continue
+            ds = BY_KEY[k]
+            v, e, _ = query_dataset(ds, pt[0], pt[1], radius_m, session, limiters["rapport" if k == "rapport" else "default"],
+                                    hints, insee)
             vals.update(v)
             if e:
                 errs.append(f"{k}: {e}")
-                with lock:
-                    raw_errors[f"{k}: {e}"] = raw_errors.get(f"{k}: {e}", 0) + 1
+        with lock:
+            for e in errs:
+                raw_errors[e] = raw_errors.get(e, 0) + 1
         vals["gr_erreurs"] = " ; ".join(errs) or None
-        vals["gr_statut"] = "ok" if not errs else ("échec" if len(errs) == len(selected) else "partiel")
+        vals["gr_statut"] = "ok" if not errs else ("échec" if len(errs) >= len(selected) else "partiel")
         with lock:
             results[pt] = vals
 
@@ -300,12 +341,16 @@ def probe(lat: float, lon: float, selected: list[str], radius_m: int = 1000, ses
     """Diagnostic : pour chaque jeu de données, chemin retenu, statut, nombre d'objets, extrait brut de la réponse."""
     import json
     rows = []
+    _, _, cp = query_dataset(BY_KEY["commune"], lat, lon, radius_m, session, None, {})
+    insee = insee_from(cp)
     for k in selected:
         ds = BY_KEY[k]
         hints: dict = {}
-        vals, err, payload = query_dataset(ds, lat, lon, radius_m, session, None, hints)
+        vals, err, payload = query_dataset(ds, lat, lon, radius_m, session, None, hints, insee)
         rows.append({"jeu de données": ds.label, "chemin": hints.get(k, ds.paths[0]), "statut": err or "ok",
                      "objets": _count(payload) if payload is not None and ds.kind == "count" else None,
                      "valeurs lues": json.dumps(vals, ensure_ascii=False)[:200] if vals else "",
                      "réponse brute (extrait)": (json.dumps(payload, ensure_ascii=False)[:300] if payload is not None else "")})
+    rows.insert(0, {"jeu de données": "(code INSEE de la commune, via GASPAR)", "chemin": "gaspar/risques", "statut": "ok" if insee else "introuvable",
+                    "objets": None, "valeurs lues": insee or "", "réponse brute (extrait)": ""})
     return rows
