@@ -40,6 +40,7 @@ from catmap import events as evt
 from catmap import supply as sp
 from catmap import websearch as ws
 from catmap import activity as act
+from catmap import georisques as gr
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -2633,9 +2634,91 @@ def _europe_sites_section(alerts, rings, active=None):
 
 
 # --------------------------------------------------------------------------
+def _georisques_section():
+    st.subheader("Risques naturels et technologiques en France (Géorisques)")
+    st.markdown("Interroge l'API publique **Géorisques** (BRGM) pour chacun de vos points GPS et ajoute des colonnes `gr_…` : "
+                "risques par adresse, sismicité, radon, argiles, mouvements de terrain, cavités, sols pollués, ICPE, arrêtés CatNat… "
+                "Valable pour la France uniquement.")
+    src = st.radio("Points à analyser", ["Fichier CSV / Excel", "Dernier résultat de géolocalisation"], horizontal=True, key="gr_src")
+    df = lat_c = lon_c = None
+    name = ""
+    if src == "Fichier CSV / Excel":
+        up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
+                              type=["csv", "txt", "xlsx"], key="gr_csv")
+        if up is None:
+            st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
+        else:
+            try:
+                df, lat_c, lon_c = cr.read_points_csv(up.getvalue(), up.name)
+                name = up.name
+            except InputError as e:
+                st.error(str(e))
+    else:
+        last = st.session_state.get("result") or st.session_state.get("area_result") or st.session_state.get("act_result")
+        if last is None or last.sites.empty:
+            st.caption("Aucun résultat de géolocalisation en mémoire : lancez une recherche dans l'onglet Géolocalisation ou chargez un fichier.")
+        else:
+            df, lat_c, lon_c, name = last.sites.drop(columns=[c for c in ("_outer",) if c in last.sites.columns]), "lat", "long", "géolocalisation"
+    if df is None:
+        return
+    st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
+    keys = list(gr.BY_KEY)
+    chosen = st.multiselect("Jeux de données interrogés", keys, default=[d.key for d in gr.DATASETS if d.default], key="gr_sets",
+                            format_func=lambda k: gr.BY_KEY[k].label)
+    c1, c2 = st.columns(2)
+    radius = c1.slider("Rayon de recherche autour du point (m)", 100, 5000, 1000, step=100, key="gr_radius",
+                       help="Utilisé pour compter les objets proches (cavités, mouvements de terrain, ICPE, SIS…).")
+    max_pts = c2.number_input("Nombre maximal de points interrogés", 1, 5000, 300, step=50, key="gr_max")
+    n_calls = min(len(df), int(max_pts)) * len(chosen)
+    st.caption(f"≈ {n_calls} appel(s) à l'API (limite annoncée : 1000 par minute) : environ {max(1, round(n_calls / 800))} min. "
+               "Les points identiques ne sont interrogés qu'une fois.")
+    with st.expander("Tester sur un point (diagnostic)"):
+        t1, t2 = st.columns(2)
+        tlat = t1.number_input("Latitude", -90.0, 90.0, 48.8566, format="%.6f", key="gr_tlat")
+        tlon = t2.number_input("Longitude", -180.0, 180.0, 2.3522, format="%.6f", key="gr_tlon")
+        if st.button("Tester", key="gr_probe", disabled=not chosen):
+            with st.spinner("Interrogation de Géorisques…"):
+                st.session_state["gr_probe_rows"] = gr.probe(float(tlat), float(tlon), chosen, int(radius))
+        rows = st.session_state.get("gr_probe_rows")
+        if rows:
+            _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+            st.caption("Si un jeu de données est en « chemin introuvable » ou ne renvoie rien d'attendu, copiez la ligne ci-dessus : "
+                       "elle suffit à corriger le chemin ou le nom du champ.")
+    if st.button("Interroger Géorisques", type="primary", key="gr_go", disabled=not chosen):
+        bar = st.progress(0.0)
+        with st.spinner("Interrogation de Géorisques…"):
+            res, summ = gr.enrich_points(df, lat_c, lon_c, chosen, int(radius), int(max_pts),
+                                         on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+        bar.empty()
+        st.session_state["gr_result"] = (name, len(df), res, summ, chosen)
+    stored = st.session_state.get("gr_result")
+    if not stored or stored[0] != name or stored[1] != len(df):
+        return
+    _, _, res, summ, used = stored
+    m = st.columns(4)
+    m[0].metric("Points", summ["points"])
+    m[1].metric("Interrogés", summ["interroges"])
+    m[2].metric("Réponses complètes", int((res["gr_statut"] == "ok").sum()))
+    m[3].metric("En erreur / partiel", int(res["gr_statut"].isin(["échec", "partiel"]).sum()))
+    if summ["non_interroges"]:
+        st.warning(f"{summ['non_interroges']} point(s) au-delà du maximum n'ont pas été interrogés : augmentez le maximum.")
+    if summ["invalides"]:
+        st.warning(f"{summ['invalides']} point(s) sans coordonnées valides.")
+    for msg, n in sorted(summ["erreurs"].items(), key=lambda x: -x[1])[:6]:
+        st.warning(f"{n} point(s) : {msg}")
+    new_cols = [c for c in res.columns if c.startswith("gr_")]
+    flag = [c for c in new_cols if c.endswith("_nb")]
+    mask = (res[flag].fillna(0).astype(float) > 0).any(axis=1) if flag else None
+    _cross_table(res, new_cols, mask, "gr_tbl", "Seulement les points avec au moins un objet proche")
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(res), "catmap_georisques.csv", "text/csv")
+    st.caption("Source : Géorisques (BRGM / ministère de la Transition écologique), données publiques ; vérifiez les conditions de "
+               "réutilisation sur georisques.gouv.fr. `_nb` = nombre d'objets dans le rayon choisi ; « Oui / Non » = risque présent à l'adresse "
+               "selon le rapport de risques. Un risque absent de la base n'est pas un risque nul.")
+
+
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    st.caption("Section à venir.")
+    _georisques_section()
 
 
 PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel,
