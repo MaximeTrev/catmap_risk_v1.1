@@ -217,6 +217,14 @@ class TestAppSmoke(unittest.TestCase):
                 app.main()
             self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
 
+    def test_georisques_page_renders(self):
+        app, st = self.load({"Navigation": "Risque climatiques"})
+        with self.fake_cyclones():
+            app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+            app.main()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertTrue(any(c[0] == "subheader" and "Géorisques" in str(c[1]) for c in st.calls), st.calls[:5])
+
     def test_fire_cross_with_csv(self):
         from catmap import events as evt
         from tests.test_events import _gj
