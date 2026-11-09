@@ -209,6 +209,14 @@ class TestAppSmoke(unittest.TestCase):
         tabs = [c for c in st.calls if c[0] == "tabs"]
         self.assertTrue(any("Entreprises dans une zone" in str(t) for t in tabs), tabs)
 
+    def test_zone_activity_modes_render(self):
+        for mode in ("Un secteur d'activité (code NAF)", "Une activité économique (langage naturel)"):
+            app, st = self.load({"Navigation": "Géolocalisation", "zone_mode": mode})
+            with self.fake_cyclones():
+                app.get_settings = lambda: __import__("catmap.config", fromlist=["x"]).load_settings(env={})
+                app.main()
+            self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
     def test_fire_cross_with_csv(self):
         from catmap import events as evt
         from tests.test_events import _gj
