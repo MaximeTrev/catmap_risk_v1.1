@@ -2669,9 +2669,12 @@ def _georisques_section():
     radius = c1.slider("Rayon de recherche autour du point (m)", 100, 5000, 1000, step=100, key="gr_radius",
                        help="Utilisé pour compter les objets proches (cavités, mouvements de terrain, ICPE, SIS…).")
     max_pts = c2.number_input("Nombre maximal de points interrogés", 1, 5000, 300, step=50, key="gr_max")
-    n_calls = min(len(df), int(max_pts)) * len(chosen)
-    st.caption(f"≈ {n_calls} appel(s) à l'API (limite annoncée : 1000 par minute) : environ {max(1, round(n_calls / 800))} min. "
-               "Les points identiques ne sont interrogés qu'une fois.")
+    n_pts = min(len(df), int(max_pts))
+    n_other = n_pts * (len([k for k in chosen if k != "rapport"]) + (1 if any(gr.BY_KEY[k].by_insee for k in chosen) else 0))
+    n_rap = n_pts if "rapport" in chosen else 0
+    est = max(n_other / gr.RATE_PER_MINUTE["default"], n_rap / gr.RATE_PER_MINUTE["rapport"])
+    st.caption(f"≈ {n_other + n_rap} appel(s) à l'API, soit environ {max(1, round(est))} min (quotas : 5 appels/s, et 1 appel/s pour le "
+               "rapport de risques, dont l'API est instable : décoché par défaut). Les points identiques ne sont interrogés qu'une fois.")
     with st.expander("Tester sur un point (diagnostic)"):
         t1, t2 = st.columns(2)
         tlat = t1.number_input("Latitude", -90.0, 90.0, 48.8566, format="%.6f", key="gr_tlat")
