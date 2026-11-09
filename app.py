@@ -39,6 +39,7 @@ from catmap import meteoalarm as ma
 from catmap import events as evt
 from catmap import supply as sp
 from catmap import websearch as ws
+from catmap import activity as act
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -433,8 +434,10 @@ def _render_result(res):
     area = res.meta.get("area")
     c = st.columns(5)
     c[0].metric("Sites", f"{len(sites):,}".replace(",", " "))
-    if area:
+    if area and area.get("radius_m"):
         c[1].metric("Rayon du périmètre", f"{area['radius_m']:,.0f} m".replace(",", " "))
+    elif area:
+        c[1].metric("Zone", str(area.get("country") or area.get("iso2") or "pays"))
     else:
         c[1].metric("Entreprises trouvées", f"{n_found} / {n_req}")
     c[2].metric("Pays renseigné", f"{comp['pays']:.0f} %")
@@ -619,6 +622,154 @@ def _run_area(area: AreaQuery, options: AreaOptions, result_key="result"):
     st.session_state["result_options"] = options
 
 
+ZONE_MODES = ["Toutes les entreprises d'une zone", "Un secteur d'activité (code NAF)",
+              "Une activité économique (langage naturel)"]
+
+
+def _page_zone():
+    mode = st.radio("Que cherchez-vous ?", ZONE_MODES, horizontal=True, key="zone_mode")
+    if mode == ZONE_MODES[0]:
+        st.markdown("**Toutes les entreprises situées dans une zone** : cliquez sur la carte pour fixer le centre, déplacez la souris "
+                    "pour régler le rayon, cliquez de nouveau pour valider, puis lancez la recherche. Les objets portant un tag "
+                    "*shop*, *amenity* ou *brand* sont retenus.")
+        _page_area()
+    else:
+        _page_activity(mode == ZONE_MODES[2])
+
+
+def _country_choices():
+    out = {}
+    for a in get_countries().attrs:
+        iso = (a.get("iso2") or "").upper()
+        if iso:
+            out[f"{a.get('name_fr') or a.get('name_en')} ({iso})"] = (iso, a.get("name_fr") or a.get("name_en") or iso)
+    return dict(sorted(out.items()))
+
+
+def _activity_label(aid: str) -> str:
+    a = act.ACTIVITY_BY_ID.get(aid)
+    return f"{a.label} (NAF {', '.join(a.naf)})" if a else aid
+
+
+def _page_activity(natural: bool):
+    s = get_settings()
+    kp = "act_"
+    countries = _country_choices()
+    detected_country = None
+    if natural:
+        st.markdown("**Partir d'une activité économique** : saisissez un terme court (« café », « commerce », « pharmacie », "
+                    "« composants électroniques »), sans lieu : le périmètre se choisit plus bas. Le terme est d'abord cherché dans "
+                    "la table de correspondance NAF/OSM de l'application ; l'IA (Linkup) n'est interrogée que si rien ne correspond.")
+        text = st.text_input("Activité", key=f"{kp}text", placeholder="café")
+        key = _search_key()
+        use_ai = st.checkbox("Si aucune correspondance, interroger l'IA (Linkup)", value=bool(key), key=f"{kp}use_ai",
+                             disabled=not key)
+        if not key:
+            st.caption("IA indisponible : renseignez `LINKUP_API_KEY` dans les secrets Streamlit pour l'activer.")
+        if st.button("Chercher le terme", key=f"{kp}analyse", disabled=not text.strip()):
+            interp = act.lookup_term(text, get_naf())
+            ai_err = ""
+            if interp.criteria.is_empty() and use_ai and key:
+                try:
+                    interp = act.interpret_ai(text, key)
+                    interp.notes.append("Aucune correspondance dans la table : critères proposés par l'IA (à vérifier).")
+                except RuntimeError as e:
+                    ai_err = str(e)
+            st.session_state[f"{kp}interp"] = (text, interp, ai_err)
+            st.session_state[f"{kp}acts"] = list(interp.criteria.activities)
+            st.session_state[f"{kp}kw"] = ", ".join(interp.criteria.extra_names)
+            st.session_state[f"{kp}divs"] = list(interp.criteria.naf_divisions)
+            st.session_state[f"{kp}tags"] = [f"{k}={v}" for k, v in interp.criteria.extra_tags]
+            st.session_state.pop(f"{kp}result", None)
+        stored = st.session_state.get(f"{kp}interp")
+        if stored and stored[0] == text:
+            _, interp, ai_err = stored
+            st.caption(f"Source : **{interp.source}**")
+            if ai_err:
+                st.warning(f"IA indisponible : {ai_err}")
+            for n in interp.notes:
+                st.caption(n)
+        elif stored:
+            st.caption("Le terme a changé : cliquez sur « Chercher le terme ».")
+        tag_opts = list(dict.fromkeys(st.session_state.get(f"{kp}tags", [])))
+        chosen_tags = st.multiselect("Tags OSM retenus (modifiables)", tag_opts, key=f"{kp}tags")
+        chosen = st.multiselect("Activités de la taxonomie", list(act.ACTIVITY_BY_ID), key=f"{kp}acts",
+                                format_func=_activity_label)
+        divs = st.multiselect("Divisions NAF", list(act.DIVISIONS), key=f"{kp}divs",
+                              format_func=lambda d: f"{d} - {act.DIVISIONS[d]}")
+        kw = st.text_input("Mots du nom à ajouter (séparés par des virgules)", key=f"{kp}kw")
+        words = [w.strip().lower() for w in kw.split(",") if act._SAFE_WORD.match(w.strip())]
+        pairs = tuple((t.split("=", 1)[0], t.split("=", 1)[1]) for t in chosen_tags if "=" in t)
+        criteria = act.Criteria(tuple(chosen), act.normalize_divisions(divs), pairs, tuple(dict.fromkeys(words)),
+                                (text or "").strip()[:80])
+    else:
+        st.markdown("**Rechercher un secteur d'activité (NAF)** : choisissez des divisions NAF rév. 2 (ou saisissez des codes comme "
+                    "`26.11Z`, `C`). Les tags OSM correspondants viennent de la table de correspondance de l'application, "
+                    "complétée par la taxonomie des activités industrielles.")
+        divs = st.multiselect("Divisions NAF", list(act.DIVISIONS), key=f"{kp}naf_divs",
+                              format_func=lambda d: f"{d} - {act.DIVISIONS[d]}")
+        free = st.text_input("Ou codes NAF libres (séparés par des virgules)", key=f"{kp}naf_free", placeholder="26.11Z, 10, C")
+        codes = act.normalize_divisions(list(divs) + [c for c in free.split(",") if c.strip()])
+        if free.strip() and not act.normalize_divisions([c for c in free.split(",") if c.strip()]):
+            st.warning("Aucun code NAF reconnu dans la saisie libre.")
+        st.caption("Seule la division (2 premiers chiffres) est utilisée : OpenStreetMap ne permet pas d'aller plus fin de façon fiable.")
+        label = "NAF " + ", ".join(codes) if codes else ""
+        criteria = act.Criteria(naf_divisions=codes, label=label[:80])
+
+    filters = act.build_filters(criteria, get_naf()) if not criteria.is_empty() else []
+    if filters:
+        with st.expander(f"Critères OpenStreetMap utilisés ({len(filters)})"):
+            _stretch(st.dataframe, pd.DataFrame([{"activité": f.activity, "type": f.kind, "critère": f.description}
+                                                 for f in filters]), hide_index=True)
+    with st.expander("Options"):
+        named = st.checkbox("Uniquement les lieux nommés (name ou brand)", True, key=f"{kp}named")
+        dedup = st.slider("Fusion des doublons (mètres)", 0, 100, 25, key=f"{kp}dedup")
+    options = AreaOptions(include_relations=False, named_only=named, dedup_radius_m=float(dedup))
+
+    scope_kind = st.radio("Périmètre", ["Un pays", "Un cercle sur la carte"], horizontal=True, key=f"{kp}scope")
+    scope = None
+    if scope_kind == "Un pays":
+        names = list(countries)
+        default = next((i for i, n in enumerate(names) if detected_country and n.endswith(f"({detected_country})")), 0)
+        sel = st.selectbox("Pays", names, index=default, key=f"{kp}country_{detected_country or 'x'}")
+        iso, nm = countries[sel]
+        scope = act.ActivityScope("country", iso2=iso, country=nm)
+        st.caption("Recherche sur tout le territoire du pays (zone administrative OpenStreetMap). Les grands pays ou les critères "
+                   f"très larges peuvent être longs ; au plus {s.area_max_sites:,} objets sont lus.".replace(",", " "))
+        if any(f.kind == "tag" and f.key in ("shop", "amenity") for f in filters):
+            st.warning("Ces critères incluent des commerces ou services très nombreux : à l'échelle d'un pays la requête peut "
+                       "dépasser la limite ; préférez un cercle.")
+        go_row = st.container()
+    else:
+        n = st.session_state.get(f"{kp}pick_n", 0)
+        picked = circle_picker(center=(46.6, 2.5), zoom=6, max_radius_m=s.area_max_radius_m, key=f"{kp}picker_{n}")
+        go_row = st.container()
+        if picked:
+            try:
+                area = AreaQuery.from_value(picked)
+                area.validate(s.area_max_radius_m)
+                scope = act.ActivityScope("circle", area=area)
+                st.markdown(f"**Périmètre validé** : centre ({area.lat:.5f}, {area.lon:.5f}), rayon **{area.radius_m:,.0f} m**"
+                            .replace(",", " "))
+                go_row.button("Nouvelle prise", key=f"{kp}new", on_click=_area_new, args=(kp, f"{kp}result"))
+            except ValueError as e:
+                st.error(str(e))
+    if go_row.button("Recherche", type="primary", key=f"{kp}go{'_nl' if natural else '_naf'}",
+                     disabled=(scope is None or criteria.is_empty())):
+        status = st.empty()
+        with st.spinner("Interrogation d'Overpass…"):
+            res = act.locate_activity(get_client(), s, scope, criteria, options, get_countries(), get_naf(),
+                                      on_event=lambda m: status.caption(m))
+        status.empty()
+        st.session_state[f"{kp}result"] = res
+    if criteria.is_empty():
+        st.caption("Choisissez au moins une activité ou un code NAF pour lancer la recherche.")
+    res = st.session_state.get(f"{kp}result")
+    if res is not None and res.meta.get("activity") is not None:
+        st.divider()
+        _render_result(res)
+
+
 def page_geolocalisation():
     st.title("Géolocalisation")
     t_ent, t_sc, t_zone = st.tabs(["Géolocalisation des entreprises", "Géolocalisation supply chain", "Entreprises dans une zone"])
@@ -627,10 +778,7 @@ def page_geolocalisation():
     with t_sc:
         _tab_supply_chain()
     with t_zone:
-        st.markdown("**Toutes les entreprises situées dans une zone** : cliquez sur la carte pour fixer le centre, déplacez la souris pour "
-                    "régler le rayon, cliquez de nouveau pour valider, puis lancez la recherche. Les objets portant un tag *shop*, "
-                    "*amenity* ou *brand* sont retenus.")
-        _page_area()
+        _page_zone()
 
 
 def _tab_entreprises():
