@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -274,12 +274,19 @@ def enrich_points(df: pd.DataFrame, lat_col: str, lon_col: str, selected: list[s
         vals["gr_statut"] = "ok" if not errs else ("échec" if len(errs) == len(selected) else "partiel")
         with lock:
             results[pt] = vals
+
+    # ``on_progress`` (barre Streamlit) doit être appelé depuis le thread principal, jamais depuis un thread de travail
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futures = [ex.submit(work, pt) for pt in uniq]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception as e:  # noqa: BLE001 - un point en échec ne doit pas faire tomber les autres
+                with lock:
+                    raw_errors[f"erreur interne: {type(e).__name__}"] = raw_errors.get(f"erreur interne: {type(e).__name__}", 0) + 1
             done[0] += 1
             if on_progress:
                 on_progress(done[0], len(uniq))
-
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        list(ex.map(work, uniq))
     rows = [results.get(k, {"gr_statut": "non interrogé" if k else "coordonnées invalides"}) for k in keys]
     add = pd.DataFrame(rows, index=out.index)
     cols = [c for c in new_columns(selected) if c in add.columns] + [c for c in add.columns if c not in new_columns(selected)]
