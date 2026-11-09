@@ -90,6 +90,15 @@ class T(unittest.TestCase):
         self.assertEqual((summ["interroges"], summ["non_interroges"]), (2, 3))
         self.assertEqual(list(out["gr_statut"]).count("non interrogé"), 3)
 
+    def test_progress_called_from_main_thread(self):
+        import threading
+        main, seen = threading.get_ident(), []
+        df = pd.DataFrame({"lat": [48.0 + i / 100 for i in range(6)], "long": [2.0] * 6})
+        gr.enrich_points(df, "lat", "long", ["sismique"], 1000, 10, Sess(ROUTES()), workers=3,
+                         on_progress=lambda i, n: seen.append((threading.get_ident(), i, n)))
+        self.assertEqual([t for t, _, _ in seen], [main] * 6)
+        self.assertEqual(seen[-1][1:], (6, 6))
+
     def test_probe(self):
         rows = gr.probe(48.8, 2.3, ["sismique", "mvt"], 1000, Sess(ROUTES()))
         self.assertEqual(rows[0]["statut"], "ok")
