@@ -163,6 +163,96 @@ class T(unittest.TestCase):
         with self.assertRaises(fh.TileError):
             fh.load_catalog(Sess({}))
 
+    # --- téléchargement tronqué, cache corrompu, vidage du cache, détail des tuiles
+    def _tif_bytes(self):
+        d = Path(tempfile.mkdtemp())
+        raw, _ = tile_arrays()
+        return make_tif(d / "t.tif", raw, tiled=True)
+
+    def test_truncated_download_is_resumed(self):
+        body = self._tif_bytes()
+        url = BASE + "RP100/ID1_N60_E20_RP100_depth.tif"
+        half = len(body) // 2
+
+        class Cut(Sess):
+            def get(self, url, timeout=None, headers=None, stream=False, **kw):
+                self.calls.append((url, dict(headers or {})))
+                rng = (headers or {}).get("Range")
+                if rng:                                              # reprise : le reste du fichier
+                    start = int(rng.split("=")[1].split("-")[0])
+                    return Resp(206, body[start:], {"Content-Range": f"bytes {start}-{len(body) - 1}/{len(body)}"})
+                r = Resp(200, body[:half], {"Content-Length": str(len(body))})   # flux coupé à mi-chemin
+                return r
+
+        s = Cut({})
+        path = fh.download_tile(url, self.cache, s)
+        self.assertEqual(path.read_bytes(), body)
+        self.assertTrue(any("Range" in h for _, h in s.calls))
+        self.assertEqual(fh.sample_geotiff(path, [22.05], [58.95]), [2.5])
+
+    def test_truncated_without_range_support_fails_cleanly(self):
+        body = self._tif_bytes()
+        url = BASE + "RP100/ID1_N60_E20_RP100_depth.tif"
+        s = Sess({url: Resp(200, body[: len(body) // 2], {"Content-Length": str(len(body))})})
+        with self.assertRaises(fh.TileError) as cm:
+            fh.download_tile(url, self.cache, s, attempts=2)
+        self.assertIn("incomplet", str(cm.exception))
+        self.assertEqual(list(self.cache.glob("*")), [])             # rien de corrompu laissé en cache
+
+    def test_corrupt_cached_file_is_redownloaded(self):
+        body = self._tif_bytes()
+        url = BASE + "RP100/ID1_N60_E20_RP100_depth.tif"
+        dest = fh._cache_path(url, self.cache)
+        dest.write_bytes(body[: len(body) // 3])                     # ancien téléchargement tronqué resté en cache
+        path = fh.download_tile(url, self.cache, Sess({url: Resp(200, body, {"Content-Length": str(len(body))})}))
+        self.assertEqual(path.read_bytes(), body)
+        self.assertTrue(fh.tiff_complete(path)[0])
+        self.assertFalse(fh.tiff_complete(self.cache / "inexistant.tif")[0])
+
+    def test_cache_info_and_clear(self):
+        (self.cache / "a.tif").write_bytes(b"x" * 2_000_000)
+        (self.cache / "b.tif").write_bytes(b"x" * 1_000_000)
+        self.assertEqual(fh.cache_info(self.cache), (2, 3.0))
+        self.assertEqual(fh.clear_cache(self.cache), (2, 3.0))
+        self.assertEqual(fh.cache_info(self.cache), (0, 0.0))
+        self.assertEqual(fh.clear_cache(self.cache / "nope"), (0, 0.0))
+
+    def test_tiles_detail_in_summary(self):
+        df = pd.DataFrame({"name": ["a", "b"], "lat": [58.95, 55.0], "long": [22.05, 35.0]})
+        _, summ = fh.estimate_depths(df, "lat", "long", [100], ["raw"], session=Sess(routes()), cache_dir=self.cache)
+        det = {t["id"]: t for t in summ["tuiles_detail"]}
+        self.assertEqual(sorted(det), [1, 2])
+        self.assertEqual((det[1]["statut"], det[1]["points"], det[1]["west"], det[1]["north"]), ("ok", 1, 20, 60))
+        _, summ = fh.estimate_depths(df, "lat", "long", [100], ["reclass"], session=Sess(routes()), cache_dir=self.cache)
+        self.assertEqual({t["id"]: t["statut"] for t in summ["tuiles_detail"]}[2], "erreur")   # pas de reclass pour la tuile 2
+
+    def test_render_preview_colors_bounds_and_max_reduction(self):
+        d = Path(tempfile.mkdtemp())
+        raw, rec = tile_arrays()
+        make_tif(d / "a.tif", raw, tiled=True)
+        make_tif(d / "b.tif", rec, tiled=False, nodata=None)
+        img, (south, west, north, east) = fh.render_preview(d / "a.tif", "raw", max_px=100)      # pas de réduction
+        self.assertEqual((img.shape, (south, west, north, east)), ((100, 100, 4), (50.0, 20.0, 60.0, 30.0)))
+        hexrgb = lambda h: [int(h[i:i + 2], 16) for i in (1, 3, 5)]
+        self.assertEqual(list(img[10, 20]), hexrgb(fh.CLASS_COLORS[2]) + [255])              # 2,5 m -> classe 2
+        self.assertEqual(list(img[10, 21]), hexrgb(fh.CLASS_COLORS[1]) + [255])              # 0,4 m -> classe 1
+        self.assertEqual(img[0, 0, 3], 0)                                                     # sans-donnée : transparent
+        small, _ = fh.render_preview(d / "a.tif", "raw", max_px=50)                         # réduction par 2 : classe maximale conservée
+        self.assertEqual(small.shape, (50, 50, 4))
+        self.assertEqual(list(small[5, 10]), hexrgb(fh.CLASS_COLORS[2]) + [255])
+        img2, _ = fh.render_preview(d / "b.tif", "reclass", max_px=100)                      # tuile « par bandes », classes déjà 1-4
+        self.assertEqual(list(img2[10, 20]), hexrgb(fh.CLASS_COLORS[3]) + [255])
+        self.assertEqual(img2[0, 0, 3], 0)                                                    # 0 = aucune inondation : transparent
+
+    def test_to_classes_thresholds(self):
+        c = fh.to_classes(np.array([0, 0.5, 1, 2.9, 3, 9.99, 10, -9999, np.nan]), "raw", -9999.0)
+        self.assertEqual(list(c), [0, 1, 2, 2, 3, 3, 4, 0, 0])
+
+    def test_summary_lists_files_read(self):
+        df = pd.DataFrame({"name": ["a"], "lat": [58.95], "long": [22.05]})
+        _, summ = fh.estimate_depths(df, "lat", "long", [100], ["raw"], session=Sess(routes()), cache_dir=self.cache)
+        self.assertTrue(Path(summ["fichiers_lus"]["debordement_RP100_raw|1"]).exists())
+
     def test_diagnose(self):
         rows = fh.diagnose(100, Sess(routes()))
         self.assertTrue(all(x["résultat"] == "OK" for x in rows), rows)
