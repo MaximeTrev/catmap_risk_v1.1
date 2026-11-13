@@ -258,36 +258,198 @@ class Resolver:
 
 
 # --------------------------------------------------------------------------------- téléchargement et lecture
-def download_tile(url: str, cache_dir: Path = DEFAULT_CACHE, session=None, max_mb: float = 400.0) -> Path:
-    """Télécharge (flux) une tuile dans le cache disque ; réutilise le fichier s'il existe déjà. ``TileError`` en cas d'échec."""
+def tiff_complete(path: Path) -> tuple[bool, str]:
+    """Contrôle d'intégrité : tous les blocs annoncés par le fichier doivent tenir dans sa taille (détecte un téléchargement tronqué)."""
+    path = Path(path)
+    try:
+        import tifffile
+        size = path.stat().st_size
+        with tifffile.TiffFile(str(path)) as tf:
+            pg = tf.pages[0]
+            ends = [o + c for o, c in zip(pg.dataoffsets, pg.databytecounts)]
+            if not ends:
+                return False, "aucun bloc de données"
+            if max(ends) > size:
+                return False, f"fichier tronqué : {size / 1e6:.1f} Mo reçus pour {max(ends) / 1e6:.1f} Mo attendus"
+        return True, ""
+    except ImportError:
+        return True, "contrôle non effectué (tifffile absent)"
+    except Exception as e:  # noqa: BLE001
+        return False, f"en-tête illisible ({type(e).__name__}: {str(e)[:120]})"
+
+
+def _cache_path(url: str, cache_dir: Path) -> Path:
+    return Path(cache_dir) / re.sub(r"[^\w.\-]+", "_", url.split("flood_hazard/")[-1])
+
+
+def download_tile(url: str, cache_dir: Path = DEFAULT_CACHE, session=None, max_mb: float = 400.0, attempts: int = 3) -> Path:
+    """Télécharge une tuile dans le cache disque. Un fichier en cache n'est réutilisé que s'il est complet. Un flux interrompu est repris
+    (requête partielle si le serveur l'accepte, sinon nouveau téléchargement), puis le fichier est contrôlé. ``TileError`` en cas d'échec."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    dest = cache_dir / re.sub(r"[^\w.\-]+", "_", url.split("flood_hazard/")[-1])
+    dest = _cache_path(url, cache_dir)
     if dest.exists() and dest.stat().st_size > 0:
-        return dest
+        ok, _ = tiff_complete(dest)
+        if ok:
+            return dest
+        dest.unlink(missing_ok=True)                       # fichier en cache incomplet ou corrompu : on le refait
     tmp = dest.with_suffix(dest.suffix + ".part")
+    last = "échec"
     try:
-        r = _http_get(session, url, stream=True, headers={"User-Agent": "CatMap"}, timeout=120)
-        if r.status_code != 200:
-            raise TileError(f"téléchargement refusé (HTTP {r.status_code})")
-        total = 0
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                if chunk:
-                    total += len(chunk)
-                    if total > max_mb * 1e6:
-                        raise TileError(f"fichier trop volumineux (> {max_mb:.0f} Mo)")
-                    f.write(chunk)
-        if total == 0:
-            raise TileError("fichier vide")
-        tmp.replace(dest)
-        return dest
+        tmp.unlink(missing_ok=True)
+        expected = None
+        for attempt in range(1, attempts + 1):
+            have = tmp.stat().st_size if tmp.exists() else 0
+            headers = {"User-Agent": "CatMap", "Accept-Encoding": "identity"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            try:
+                r = _http_get(session, url, stream=True, headers=headers, timeout=120)
+            except Exception as e:  # noqa: BLE001
+                last = f"{type(e).__name__}: {str(e)[:120]}"
+                continue
+            if have and r.status_code == 200:              # le serveur ignore Range : on repart de zéro
+                tmp.unlink(missing_ok=True)
+                have = 0
+            elif r.status_code not in (200, 206):
+                raise TileError(f"téléchargement refusé (HTTP {r.status_code})")
+            if expected is None:
+                cl = r.headers.get("Content-Length")
+                cr = r.headers.get("Content-Range")
+                if cr and "/" in cr and cr.rsplit("/", 1)[-1].isdigit():
+                    expected = int(cr.rsplit("/", 1)[-1])
+                elif cl and cl.isdigit():
+                    expected = have + int(cl)
+            try:
+                with open(tmp, "ab" if have else "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        if chunk:
+                            f.write(chunk)
+                            if f.tell() > max_mb * 1e6:
+                                raise TileError(f"fichier trop volumineux (> {max_mb:.0f} Mo)")
+            except TileError:
+                raise
+            except Exception as e:  # noqa: BLE001 - flux coupé : on reprendra là où il s'est arrêté
+                last = f"flux interrompu ({type(e).__name__})"
+            size = tmp.stat().st_size if tmp.exists() else 0
+            if size and (expected is None or size >= expected):
+                ok, why = tiff_complete(tmp)
+                if ok:
+                    tmp.replace(dest)
+                    return dest
+                last = why
+                tmp.unlink(missing_ok=True)
+                expected = None
+            else:
+                last = f"{size / 1e6:.1f} Mo reçus sur {(expected or 0) / 1e6:.1f} Mo"
+        raise TileError(f"téléchargement incomplet après {attempts} essais ({last})")
     except TileError:
         tmp.unlink(missing_ok=True)
         raise
     except Exception as e:  # noqa: BLE001
         tmp.unlink(missing_ok=True)
         raise TileError(f"téléchargement impossible ({type(e).__name__}: {str(e)[:150]})") from e
+
+
+def cache_info(cache_dir: Path = DEFAULT_CACHE) -> tuple[int, float]:
+    """(nombre de fichiers, taille en Mo) du cache de tuiles."""
+    d = Path(cache_dir)
+    files = [f for f in d.glob("*") if f.is_file()] if d.exists() else []
+    return len(files), round(sum(f.stat().st_size for f in files) / 1e6, 1)
+
+
+def clear_cache(cache_dir: Path = DEFAULT_CACHE) -> tuple[int, float]:
+    """Supprime les tuiles du cache ; retourne (fichiers supprimés, Mo libérés)."""
+    n, mb = cache_info(cache_dir)
+    for f in (Path(cache_dir).glob("*") if Path(cache_dir).exists() else []):
+        if f.is_file():
+            f.unlink(missing_ok=True)
+    return n, mb
+
+
+def _georef(page) -> tuple[float, float, float, float]:
+    """(x0, y0, sx, sy) : coin haut-gauche et taille de pixel (sy > 0 vers le bas) lus dans les tags GeoTIFF."""
+    tag = page.tags.get
+    if tag(34264) is not None:                               # ModelTransformation
+        m = tag(34264).value
+        return float(m[3]), float(m[7]), float(m[0]), -float(m[5])
+    if tag(33550) is not None and tag(33922) is not None:
+        scale, tie = tag(33550).value, tag(33922).value
+        return (float(tie[3]) - float(tie[0]) * float(scale[0]), float(tie[4]) + float(tie[1]) * float(scale[1]),
+                float(scale[0]), float(scale[1]))
+    raise TileError("géoréférencement absent du fichier (tags GeoTIFF)")
+
+
+def _nodata(page) -> Optional[float]:
+    nd = page.tags.get(42113).value if page.tags.get(42113) is not None else None
+    try:
+        return float(str(nd).strip("\x00 ")) if nd is not None else None
+    except ValueError:
+        return None
+
+
+def to_classes(arr: np.ndarray, kind: str, nodata: Optional[float]) -> np.ndarray:
+    """Classe de légende 0 à 4 par pixel (0 = aucune inondation / sans-donnée). Mêmes seuils que ``flood_class``."""
+    a = np.asarray(arr, dtype="float64")
+    ok = np.isfinite(a) & (a > 0)
+    if nodata is not None:
+        ok &= a != nodata
+    if kind == "reclass":
+        return np.where(ok, np.clip(a, 0, 4), 0).astype("uint8")
+    cls = np.digitize(a, [1.0, 3.0, 10.0]) + 1             # <1 -> 1 ; 1..<3 -> 2 ; 3..<10 -> 3 ; >=10 -> 4
+    return np.where(ok, cls, 0).astype("uint8")
+
+
+def render_preview(path: Path, kind: str, max_px: int = 1000) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Image RGBA de la tuile aux couleurs de la légende, pour la carte. Retourne (rgba, (sud, ouest, nord, est)).
+    Lecture bloc par bloc ; la réduction garde la classe MAXIMALE de chaque groupe de pixels (les cellules inondées ne disparaissent pas).
+    Les pixels de classe 0 (aucune inondation, sans-donnée) sont transparents."""
+    try:
+        import tifffile
+    except ImportError as e:
+        raise TileError("bibliothèque « tifffile » absente : ajoutez-la à requirements.txt") from e
+    try:
+        with tifffile.TiffFile(str(path)) as tf:
+            page = tf.pages[0]
+            H, W = int(page.imagelength), int(page.imagewidth)
+            x0, y0, sx, sy = _georef(page)
+            nodata = _nodata(page)
+            f = max(1, int(math.ceil(max(H, W) / float(max_px))))
+            ph, pw = int(math.ceil(H / f)), int(math.ceil(W / f))
+            prev = np.zeros((ph, pw), dtype="uint8")
+            tiled = bool(page.is_tiled)
+            th, tw = (int(page.tilelength), int(page.tilewidth)) if tiled else (int(page.rowsperstrip), W)
+            across = int(math.ceil(W / tw))
+            fh = tf.filehandle
+            for seg in range(len(page.dataoffsets)):
+                fh.seek(page.dataoffsets[seg])
+                data = fh.read(page.databytecounts[seg])
+                arr, _, _ = page.decode(data, seg)
+                arr = np.squeeze(arr)
+                if arr.ndim != 2:
+                    raise TileError(f"organisation de fichier non gérée (dimensions {arr.shape})")
+                r0, c0 = ((seg // across) * th, (seg % across) * tw) if tiled else (seg * th, 0)
+                h, w = min(arr.shape[0], H - r0), min(arr.shape[1], W - c0)
+                if h <= 0 or w <= 0:
+                    continue
+                c = to_classes(arr[:h, :w], kind, nodata)
+                if not c.any():
+                    continue
+                cr, cc = (r0 + np.arange(h)) // f, (c0 + np.arange(w)) // f
+                rs = np.flatnonzero(np.r_[True, np.diff(cr) != 0])
+                cs = np.flatnonzero(np.r_[True, np.diff(cc) != 0])
+                red = np.maximum.reduceat(np.maximum.reduceat(c, rs, axis=0), cs, axis=1)
+                ix = np.ix_(cr[rs], cc[cs])
+                prev[ix] = np.maximum(prev[ix], red)
+    except TileError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise TileError(f"image impossible à produire ({type(e).__name__}: {str(e)[:160]})") from e
+    pal = np.zeros((5, 4), dtype="uint8")
+    for k in (1, 2, 3, 4):
+        hx = CLASS_COLORS[k].lstrip("#")
+        pal[k] = [int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16), 255]
+    return pal[prev], (y0 - H * sy, x0, y0, x0 + W * sx)
 
 
 def sample_geotiff(path: Path, lons, lats) -> list[Optional[float]]:
@@ -302,22 +464,8 @@ def sample_geotiff(path: Path, lons, lats) -> list[Optional[float]]:
         with tifffile.TiffFile(str(path)) as tf:
             page = tf.pages[0]
             H, W = int(page.imagelength), int(page.imagewidth)
-            tag = page.tags.get
-            if tag(34264) is not None:                               # ModelTransformation
-                m = tag(34264).value
-                x0, sx, y0, sy = float(m[3]), float(m[0]), float(m[7]), -float(m[5])
-            elif tag(33550) is not None and tag(33922) is not None:
-                scale, tie = tag(33550).value, tag(33922).value
-                x0 = float(tie[3]) - float(tie[0]) * float(scale[0])
-                y0 = float(tie[4]) + float(tie[1]) * float(scale[1])
-                sx, sy = float(scale[0]), float(scale[1])
-            else:
-                raise TileError("géoréférencement absent du fichier (tags GeoTIFF)")
-            nd = tag(42113).value if tag(42113) is not None else None
-            try:
-                nodata = float(str(nd).strip("\x00 ")) if nd is not None else None
-            except ValueError:
-                nodata = None
+            x0, y0, sx, sy = _georef(page)
+            nodata = _nodata(page)
             cols = np.floor((lons - x0) / sx).astype(np.int64)
             rows = np.floor((y0 - lats) / sy).astype(np.int64)
             inside = (cols >= 0) & (cols < W) & (rows >= 0) & (rows < H)
@@ -379,6 +527,7 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
     err_by_row: dict[int, list[str]] = {}
     jobs = [(rp, k, tid) for rp in rps for k in kinds for tid in by_tile]
     n_dl = 0
+    files_read: dict[str, str] = {}
     for done, (rp, k, tid) in enumerate(jobs, start=1):
         name = column_name(rp, k)
         rows = by_tile[tid]
@@ -386,7 +535,16 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
             url = resolver.url(tile_by_id[tid], rp, k)
             path = download_tile(url, cache_dir, session)
             n_dl += 1
-            vals = sample_geotiff(path, pl["lon"][rows], pl["lat"][rows])
+            files_read[f"{name}|{tid}"] = str(path)
+            try:
+                vals = sample_geotiff(path, pl["lon"][rows], pl["lat"][rows])
+            except TileError as first:                     # fichier en cache abîmé : on le supprime et on retélécharge une fois
+                Path(path).unlink(missing_ok=True)
+                path = download_tile(url, cache_dir, session)
+                try:
+                    vals = sample_geotiff(path, pl["lon"][rows], pl["lat"][rows])
+                except TileError as again:
+                    raise TileError(f"{again} (déjà observé au premier essai : {first}) ; fichier peut-être incomplet côté serveur") from again
             for i, v in zip(rows, vals):
                 cols[name][i] = 0.0 if v is None else (int(v) if k == "reclass" else round(float(v), 3))
         except TileError as e:
@@ -407,7 +565,13 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
         else:
             status.append("ok")
     out[f"{RISK}_statut"] = status
-    summary = {"points": len(out), "hors_tuile": int(sum(t is None for t in tiles)), "tuiles": len(by_tile),
+    detail = []
+    for tid, rows in by_tile.items():
+        t = tile_by_id[tid]
+        errs = [f"{key.split(' tuile')[0]}: {v[0]}" for key, v in problems.items() if key.endswith(f"tuile ID{tid}")]
+        detail.append({"id": tid, "west": t.west, "south": t.south, "east": t.east, "north": t.north, "points": len(rows),
+                       "statut": "erreur" if errs else "ok", "erreurs": errs})
+    summary = {"fichiers_lus": files_read, "tuiles_detail": detail, "points": len(out), "hors_tuile": int(sum(t is None for t in tiles)), "tuiles": len(by_tile),
                "fichiers": len(jobs), "telecharges_ou_en_cache": n_dl, "problemes": problems, "notes_dossiers": resolver.notes}
     return out, summary
 
