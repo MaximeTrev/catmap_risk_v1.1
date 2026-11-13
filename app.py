@@ -2748,7 +2748,14 @@ def _fh_popup(row, cols, kinds_of):
     return "<br>".join(lines)
 
 
-def _fh_map(res, cols_by_kind, color_col):
+@st.cache_data(show_spinner=False, max_entries=12)
+def _fh_preview(path: str, kind: str, size: int):
+    """Image RGBA d'une tuile (mise en cache ; ``size`` invalide le cache si le fichier est retéléchargé)."""
+    img, bounds = fhz.render_preview(Path(path), kind)
+    return img, bounds
+
+
+def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None):
     import folium
     pts = res.dropna(subset=["lat_f", "lon_f"])
     center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
@@ -2757,12 +2764,24 @@ def _fh_map(res, cols_by_kind, color_col):
     kinds_of = {c: k for k, cs in cols_by_kind.items() for c in cs}
     allc = [c for cs in cols_by_kind.values() for c in cs] + [c for c in ("debordement_tuile", "debordement_statut") if c in res.columns]
     kind = kinds_of.get(color_col, "raw")
+    for img, (south, west, north, east) in overlays or []:      # valeurs de la tuile, mêmes couleurs que la légende
+        folium.raster_layers.ImageOverlay(image=img, bounds=[[south, west], [north, east]], opacity=0.75, interactive=False,
+                                          zindex=2).add_to(m)
+    for t in tiles or []:                                   # emprise des tuiles réellement lues (vert : lue, rouge : en erreur)
+        ok = t["statut"] == "ok"
+        tip = f"Tuile ID{t['id']} : {t['points']} point(s) ; " + ("lue" if ok else "ERREUR : " + " | ".join(t["erreurs"])[:200])
+        folium.Rectangle([[t["south"], t["west"]], [t["north"], t["east"]]], color="#2e7d32" if ok else "#c62828", weight=2,
+                         fill=True, fill_opacity=0.06, tooltip=html_escape(tip)).add_to(m)
+    if tiles and not len(shown):
+        m.fit_bounds([[min(t["south"] for t in tiles), min(t["west"] for t in tiles)], [max(t["north"] for t in tiles), max(t["east"] for t in tiles)]])
     for _, r in shown.iterrows():
         cls = fhz.flood_class(r.get(color_col), kind)
         folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=fhz.CLASS_COLORS[cls],
                             fill_opacity=0.9, tooltip=str(r.get("name") or ""),
                             popup=folium.Popup(_fh_popup(r, allc, kinds_of), max_width=420)).add_to(m)
-    if len(shown) > 1:
+    if tiles:
+        m.fit_bounds([[min(t["south"] for t in tiles), min(t["west"] for t in tiles)], [max(t["north"] for t in tiles), max(t["east"] for t in tiles)]])
+    elif len(shown) > 1:
         m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
     legend = "".join(f'<div><span style="background:{fhz.CLASS_COLORS[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
                      f'margin-right:6px"></span>{lab}</div>' for k, lab in fhz.CLASS_LABELS.items())
@@ -2770,7 +2789,8 @@ def _fh_map(res, cols_by_kind, color_col):
                'margin-right:6px"></span>Hors tuile / erreur</div>')
     m.get_root().html.add_child(folium.Element(
         f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;background:white;color:#222;padding:8px 10px;border:1px solid #888;'
-        f'border-radius:4px;font-size:12px"><b>Hauteur d\'eau ({html_escape(color_col)})</b>{legend}</div>'))
+        f'border-radius:4px;font-size:12px"><b>Hauteur d\'eau ({html_escape(color_col)})</b>{legend}'
+        + ('<div style="margin-top:4px;color:#555">Raster : zones sans inondation transparentes</div>' if overlays else "") + '</div>'))
     if len(pts) > len(shown):
         st.caption(f"Carte limitée aux {len(shown)} premiers points sur {len(pts)} (le tableau et le CSV contiennent tout).")
     _ev_show_map(m, "fh_map")
@@ -2838,12 +2858,43 @@ def _exposition_section():
         st.warning(f"{k} : {v[0]}")
     cols_by_kind = {k: [fhz.column_name(r, k) for r in used_rps] for k in used_kinds}
     value_cols = [c for cs in cols_by_kind.values() for c in cs]
-    color_col = st.selectbox("Colorer la carte selon", value_cols, key="fh_color")
-    _fh_map(res, cols_by_kind, color_col)
+    c_a, c_b, c_c = st.columns([2, 1, 1])
+    color_col = c_a.selectbox("Colorer la carte selon", value_cols, key="fh_color")
+    show_tiles = c_b.checkbox("Afficher les tuiles extraites", value=False, key="fh_show_tiles")
+    show_vals = c_c.checkbox("… avec leurs valeurs (raster)", value=False, key="fh_show_vals", disabled=not show_tiles,
+                             help="Colore chaque pixel de la tuile selon la légende, pour la colonne choisie à gauche.")
+    overlays = []
+    if show_tiles and show_vals:
+        kind_sel = "reclass" if color_col.endswith("_reclass") else "raw"
+        ok_tiles = [t for t in summ.get("tuiles_detail", []) if t["statut"] == "ok" or color_col in
+                    [k.split("|")[0] for k in summ.get("fichiers_lus", {}) if k.endswith(f"|{t['id']}")]]
+        for t in ok_tiles[:6]:
+            pth = summ.get("fichiers_lus", {}).get(f"{color_col}|{t['id']}")
+            if not pth or not Path(pth).exists():
+                st.caption(f"Tuile ID{t['id']} : fichier absent du cache (cache vidé ?) ; relancez le calcul pour l'afficher.")
+                continue
+            try:
+                with st.spinner(f"Image de la tuile ID{t['id']}…"):
+                    overlays.append(_fh_preview(pth, kind_sel, Path(pth).stat().st_size))
+            except fhz.TileError as e:
+                st.warning(f"Tuile ID{t['id']} : {e}")
+        if len(ok_tiles) > 6:
+            st.caption(f"Valeurs affichées pour 6 tuiles sur {len(ok_tiles)} (limite d'affichage de la carte).")
+    _fh_map(res, cols_by_kind, color_col, summ.get("tuiles_detail") if show_tiles else None, overlays)
     out = res.drop(columns=["lat_f", "lon_f"])
     flooded = (out[value_cols].fillna(0).astype(float) > 0).any(axis=1)
     _cross_table(out, value_cols + ["debordement_tuile", "debordement_statut"], flooded, "fh_tbl", "Seulement les points inondables")
-    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
+    with d2:
+        n_c, mb_c = fhz.cache_info()
+        if st.button(f"Vider le cache des tuiles ({n_c} fichier(s), {mb_c} Mo)", key="fh_clear_cache", type="primary"):
+            n_del, mb_del = fhz.clear_cache()
+            st.session_state["fh_cache_msg"] = f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Les tuiles seront retéléchargées au prochain calcul."
+            st.rerun()
+        if st.session_state.get("fh_cache_msg"):
+            st.caption(st.session_state.pop("fh_cache_msg"))
     st.caption("0 = aucune inondation modélisée à ce point (pas une garantie d'absence de risque : les cours d'eau de bassin inférieur à "
                "500 km² ne sont pas modélisés, et des profondeurs très élevées peuvent être des artefacts du modèle). Source : JRC / "
                "Copernicus EMS GloFAS, jeu « Global river flood hazard maps » v2.1.2, licence ODbL v1.0 (à faire valider pour votre usage).")
