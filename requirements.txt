@@ -10,3 +10,4 @@ openpyxl>=3.1
 
 lxml>=5.0
 pdfplumber>=0.11
+tifffile>=2024.1.30
