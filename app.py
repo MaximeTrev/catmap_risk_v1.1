@@ -41,6 +41,7 @@ from catmap import supply as sp
 from catmap import websearch as ws
 from catmap import activity as act
 from catmap import georisques as gr
+from catmap import floodhazard as fhz
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -2634,17 +2635,15 @@ def _europe_sites_section(alerts, rings, active=None):
 
 
 # --------------------------------------------------------------------------
-def _georisques_section():
-    st.subheader("Risques naturels et technologiques en France (Géorisques)")
-    st.markdown("Interroge l'API publique **Géorisques** (BRGM) pour chacun de vos points GPS et ajoute des colonnes `gr_…` : "
-                "risques par adresse, sismicité, radon, argiles, mouvements de terrain, cavités, sols pollués, ICPE, arrêtés CatNat… "
-                "Valable pour la France uniquement.")
-    src = st.radio("Points à analyser", ["Fichier CSV / Excel", "Dernier résultat de géolocalisation"], horizontal=True, key="gr_src")
+def _points_input(kp: str):
+    """Points à analyser : fichier CSV / Excel (colonnes lat et long) ou dernier résultat de géolocalisation.
+    Retourne (df, colonne lat, colonne lon, nom) ou (None, None, None, "")."""
+    src = st.radio("Points à analyser", ["Fichier CSV / Excel", "Dernier résultat de géolocalisation"], horizontal=True, key=f"{kp}src")
     df = lat_c = lon_c = None
     name = ""
     if src == "Fichier CSV / Excel":
         up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
-                              type=["csv", "txt", "xlsx"], key="gr_csv")
+                              type=["csv", "txt", "xlsx"], key=f"{kp}csv")
         if up is None:
             st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
         else:
@@ -2659,6 +2658,15 @@ def _georisques_section():
             st.caption("Aucun résultat de géolocalisation en mémoire : lancez une recherche dans l'onglet Géolocalisation ou chargez un fichier.")
         else:
             df, lat_c, lon_c, name = last.sites.drop(columns=[c for c in ("_outer",) if c in last.sites.columns]), "lat", "long", "géolocalisation"
+    return df, lat_c, lon_c, name
+
+
+def _georisques_section():
+    st.subheader("Risques naturels et technologiques en France (Géorisques)")
+    st.markdown("Interroge l'API publique **Géorisques** (BRGM) pour chacun de vos points GPS et ajoute des colonnes `gr_…` : "
+                "risques par adresse, sismicité, radon, argiles, mouvements de terrain, cavités, sols pollués, ICPE, arrêtés CatNat… "
+                "Valable pour la France uniquement.")
+    df, lat_c, lon_c, name = _points_input("gr_")
     if df is None:
         return
     st.caption(f"{len(df)} point(s) lus (colonnes {lat_c} / {lon_c}).")
@@ -2719,9 +2727,135 @@ def _georisques_section():
                "selon le rapport de risques. Un risque absent de la base n'est pas un risque nul.")
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fh_catalog():
+    return fhz.load_catalog()
+
+
+def _fh_popup(row, cols, kinds_of):
+    import html
+    lines = [f"<b>{html.escape(str(row.get('name') or row.get('nom') or 'Point'))}</b>"]
+    for c in cols:
+        v = row.get(c)
+        k = kinds_of.get(c)
+        if k == "raw":
+            txt = "n/d" if v is None or pd.isna(v) else f"{float(v):.2f} m"
+        elif k == "reclass":
+            txt = "n/d" if v is None or pd.isna(v) else f"classe {int(v)} ({fhz.CLASS_LABELS.get(int(v), '')})"
+        else:
+            txt = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+        lines.append(f"{html.escape(c)} : <b>{html.escape(txt)}</b>")
+    return "<br>".join(lines)
+
+
+def _fh_map(res, cols_by_kind, color_col):
+    import folium
+    pts = res.dropna(subset=["lat_f", "lon_f"])
+    center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
+    m = _ev_base_map(center, 6)
+    shown = pts.head(3000)
+    kinds_of = {c: k for k, cs in cols_by_kind.items() for c in cs}
+    allc = [c for cs in cols_by_kind.values() for c in cs] + [c for c in ("debordement_tuile", "debordement_statut") if c in res.columns]
+    kind = kinds_of.get(color_col, "raw")
+    for _, r in shown.iterrows():
+        cls = fhz.flood_class(r.get(color_col), kind)
+        folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=fhz.CLASS_COLORS[cls],
+                            fill_opacity=0.9, tooltip=str(r.get("name") or ""),
+                            popup=folium.Popup(_fh_popup(r, allc, kinds_of), max_width=420)).add_to(m)
+    if len(shown) > 1:
+        m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
+    legend = "".join(f'<div><span style="background:{fhz.CLASS_COLORS[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
+                     f'margin-right:6px"></span>{lab}</div>' for k, lab in fhz.CLASS_LABELS.items())
+    legend += (f'<div><span style="background:{fhz.CLASS_COLORS[None]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
+               'margin-right:6px"></span>Hors tuile / erreur</div>')
+    m.get_root().html.add_child(folium.Element(
+        f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;background:white;color:#222;padding:8px 10px;border:1px solid #888;'
+        f'border-radius:4px;font-size:12px"><b>Hauteur d\'eau ({html_escape(color_col)})</b>{legend}</div>'))
+    if len(pts) > len(shown):
+        st.caption(f"Carte limitée aux {len(shown)} premiers points sur {len(pts)} (le tableau et le CSV contiennent tout).")
+    _ev_show_map(m, "fh_map")
+
+
+def html_escape(x):
+    import html
+    return html.escape(str(x))
+
+
+def _exposition_section():
+    st.subheader("Débordement & submersion")
+    st.markdown("**Débordement de cours d'eau** : hauteur d'eau attendue à chaque point pour une période de retour donnée, d'après les "
+                "cartes mondiales du JRC / GloFAS (90 m, v2.1.2). Les tuiles utiles sont téléchargées à la demande. La **submersion "
+                "marine** n'est pas encore intégrée.")
+    rps = st.multiselect("Scénario (période de retour, en années)", list(fhz.RPS), default=[100], key="fh_rps",
+                         format_func=lambda r: f"RP{r}")
+    kind_lab = st.radio("Type de donnée", ["raw (hauteur d'eau en m)", "reclass (classe 1 à 4)", "les deux"], horizontal=True, key="fh_kind")
+    kinds = ["raw"] if kind_lab.startswith("raw") else ["reclass"] if kind_lab.startswith("reclass") else ["raw", "reclass"]
+    with st.expander("Diagnostic de la source JRC (à lancer en cas de problème)"):
+        rp_t = st.selectbox("Période de retour testée", list(fhz.RPS), index=4, key="fh_diag_rp", format_func=lambda r: f"RP{r}")
+        if st.button("Tester l'accès aux tuiles", key="fh_diag_go"):
+            with st.spinner("Contrôle du catalogue, des noms de fichiers et du téléchargement…"):
+                st.session_state["fh_diag"] = fhz.diagnose(int(rp_t))
+        if st.session_state.get("fh_diag"):
+            _stretch(st.dataframe, pd.DataFrame(st.session_state["fh_diag"]), hide_index=True)
+            st.caption("En cas d'ÉCHEC, copiez ce tableau : il suffit à corriger le nom de dossier, de fichier ou le format de lecture.")
+    df, lat_c, lon_c, name = _points_input("fh_")
+    if df is None:
+        return
+    if not rps:
+        st.caption("Choisissez au moins un scénario.")
+        return
+    try:
+        catalog = _fh_catalog()
+    except fhz.TileError as e:
+        st.error(f"Catalogue des tuiles JRC indisponible : {e}")
+        return
+    pl = fhz.plan(df, lat_c, lon_c, catalog)
+    n_tiles = len(pl["tile_ids"])
+    n_files = n_tiles * len(rps) * len(kinds)
+    max_mb = n_tiles * len(rps) * ((30 if "raw" in kinds else 0) + (3 if "reclass" in kinds else 0))
+    st.caption(f"{len(df)} point(s) lus ; {n_tiles} tuile(s) concernée(s) ; {n_files} fichier(s) à lire, au plus ≈ {max_mb} Mo "
+               "à télécharger la première fois (ordres de grandeur issus des tailles observées : jusqu'à 30 Mo en raw, environ 10 fois "
+               "moins en reclass). Les points hors de toute tuile restent vides.")
+    if st.button("Estimer la hauteur d'eau", type="primary", key="fh_go"):
+        bar = st.progress(0.0)
+        with st.spinner("Téléchargement et lecture des tuiles…"):
+            res, summ = fhz.estimate_depths(df, lat_c, lon_c, rps, kinds, catalog,
+                                            on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+        bar.empty()
+        res["lat_f"] = pd.to_numeric(res[lat_c], errors="coerce")
+        res["lon_f"] = pd.to_numeric(res[lon_c], errors="coerce")
+        st.session_state["fh_result"] = (name, len(df), res, summ, list(rps), list(kinds))
+    stored = st.session_state.get("fh_result")
+    if not stored or stored[0] != name or stored[1] != len(df):
+        return
+    _, _, res, summ, used_rps, used_kinds = stored
+    m = st.columns(4)
+    m[0].metric("Points", summ["points"])
+    m[1].metric("Dans une tuile", summ["points"] - summ["hors_tuile"])
+    m[2].metric("Hors tuile", summ["hors_tuile"])
+    m[3].metric("Points partiels", int(res["debordement_statut"].str.startswith("partiel").sum()))
+    for k, v in list(summ["problemes"].items())[:6]:
+        st.warning(f"{k} : {v[0]}")
+    cols_by_kind = {k: [fhz.column_name(r, k) for r in used_rps] for k in used_kinds}
+    value_cols = [c for cs in cols_by_kind.values() for c in cs]
+    color_col = st.selectbox("Colorer la carte selon", value_cols, key="fh_color")
+    _fh_map(res, cols_by_kind, color_col)
+    out = res.drop(columns=["lat_f", "lon_f"])
+    flooded = (out[value_cols].fillna(0).astype(float) > 0).any(axis=1)
+    _cross_table(out, value_cols + ["debordement_tuile", "debordement_statut"], flooded, "fh_tbl", "Seulement les points inondables")
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
+    st.caption("0 = aucune inondation modélisée à ce point (pas une garantie d'absence de risque : les cours d'eau de bassin inférieur à "
+               "500 km² ne sont pas modélisés, et des profondeurs très élevées peuvent être des artefacts du modèle). Source : JRC / "
+               "Copernicus EMS GloFAS, jeu « Global river flood hazard maps » v2.1.2, licence ODbL v1.0 (à faire valider pour votre usage).")
+
+
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    _georisques_section()
+    tabs = st.tabs(["Exposition aux risques", "Géorisques"])
+    with tabs[0]:
+        _safe_tab(_exposition_section, "Exposition aux risques")
+    with tabs[1]:
+        _safe_tab(_georisques_section, "Géorisques")
 
 
 PAGES = {"Géolocalisation": page_geolocalisation, "Temps réel": page_temps_reel,
