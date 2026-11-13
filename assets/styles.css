@@ -116,3 +116,9 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 [class*="st-key-ev_ct_go_"] button, [class*="st-key-ev_ct_go_"] button p, [class*="st-key-ev_ct_go_"] button span {
     color: #ffffff !important;
 }
+
+/* Exposition aux risques : boutons « Estimer » et « Vider le cache » en texte blanc */
+.st-key-fh_go button, .st-key-fh_go button p, .st-key-fh_go button span,
+.st-key-fh_clear_cache button, .st-key-fh_clear_cache button p, .st-key-fh_clear_cache button span {
+    color: #ffffff !important;
+}
