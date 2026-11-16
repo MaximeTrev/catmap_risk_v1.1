@@ -85,6 +85,38 @@ class TestJrc(unittest.TestCase):
         self.assertAlmostEqual(float(dm.jrc_curve(j, "Asia", "commercial").at(2.0)), 0.2)
         self.assertEqual(dm.jrc_max_value(j, "France", "commercial"), 600.0)
 
+    def test_official_layout(self):
+        """Mise en page du classeur officiel JRC : continents en colonnes, catégories en blocs de lignes, pays en lignes."""
+        hdr = [["Damage\nclass", "Flood depth,\n[m]", "Damage function"] + [None] * 6 + ["Standard deviation"] + [None] * 6,
+               [None, None, "EUROPE", "North AMERICA", "Centr&South\nAMERICA", "ASIA", "AFRICA", "OCEANIA", "GLOBAL",
+                "EUROPE", "North AMERICA", "Centr&South\nAMERICA", "ASIA", "AFRICA", "OCEANIA", "GLOBAL"]]
+        body = [["Industrial buildings", 0, 0, 0.0257, 0, 0, 0, "-", 0] + [0] * 7, [None, 1, 0.27, 0.51, 0.89, 0.48, 0.25, "-", 0.48] + [0.1] * 7,
+                [None, 2, 0.52, 0.74, 1, 0.72, 0.49, "-", 0.69] + [0.1] * 7,
+                ["Transport", 0, 0, "-", 0, 0, "-", "-", 0] + [0] * 7, [None, 1, 0.54, "-", 0.17, 0.57, "-", "-", 0.43] + [0.1] * 7]
+        grid = pd.DataFrame([[None] * 16] + hdr + body)
+        mx = pd.DataFrame([[None, "Building based", None, None, "Land-use based", "Object based"],
+                           ["Country", "Max Damage Structure", "Max Damage Content", "Total", "Total", "Total"],
+                           [None, "(EUR/m2, 2010)", "(EUR/m2, 2010)", "(EUR/m2, 2010)", "(EUR/m2, 2010)", "(EUR/object, 2010)"],
+                           ["France", 350.0, 520.0, 870.0, 260.0, 1.0], ["Vietnam", 115.0, 172.0, 287.0, 86.0, 1.0]])
+        data = pd.DataFrame([[None, None, None, "RES"], ["Country", "ISO A3 code", "GDP", "RES"], ["France", "FRA", 40000, 1], ["Vietnam", "VNM", 1000, 1]])
+        isot = pd.DataFrame([["Country", "A 2", "A 3", "Number"], ["FRANCE", "FR", "FRA", 250], ["VIET NAM", "VN", "VNM", 704]])
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf) as xw:
+            grid.to_excel(xw, sheet_name="Damage functions", header=False, index=False)
+            mx.to_excel(xw, sheet_name="MaxDamage-Industrial", header=False, index=False)
+            data.to_excel(xw, sheet_name="MaxDamage-Data", header=False, index=False)
+            isot.to_excel(xw, sheet_name="ISO_Table", header=False, index=False)
+        j = dm.parse_jrc(buf.getvalue(), "JRC_global.xlsx")
+        self.assertAlmostEqual(float(dm.jrc_curve(j, "Europe", "industrial").at(1.0)), 0.27)
+        self.assertAlmostEqual(float(dm.jrc_curve(j, "South America", "industrial").at(1.0)), 0.89)
+        self.assertAlmostEqual(float(dm.jrc_curve(j, "Asia", "transport").at(1.0)), 0.57)
+        with self.assertRaises(dm.DamageError):                                 # « - » dans le fichier : pas de courbe
+            dm.jrc_curve(j, "Oceania", "industrial")
+        self.assertEqual(dm.jrc_max_value(j, "France", "industrial"), 870.0)
+        self.assertEqual(dm.jrc_max_value(j, "FR", "industrial", "struct"), 350.0)
+        self.assertEqual(dm.jrc_max_value(j, "VNM", "industrial"), 287.0)
+        self.assertEqual(dm.jrc_max_value(j, "VN", "industrial"), 287.0)
+
     def test_percent_scale_detected(self):
         csv = "continent,classe,hauteur_m,taux\nEurope,commercial,0,0\nEurope,commercial,1,50\n"
         j = dm.parse_jrc(csv.encode(), "jrc.csv")
