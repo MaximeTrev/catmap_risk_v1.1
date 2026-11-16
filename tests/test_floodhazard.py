@@ -253,6 +253,29 @@ class T(unittest.TestCase):
         _, summ = fh.estimate_depths(df, "lat", "long", [100], ["raw"], session=Sess(routes()), cache_dir=self.cache)
         self.assertTrue(Path(summ["fichiers_lus"]["debordement_RP100_raw|1"]).exists())
 
+    def test_sparse_blocks_are_nodata_not_errors(self):
+        """GeoTIFF « sparse » : un bloc de taille 0 est sans-donnée ; le décompresser donnait « Error -5 … truncated stream »."""
+        d = Path(tempfile.mkdtemp())
+        raw, _ = tile_arrays()
+        raw[50, 50] = 1.5
+        make_tif(d / "a.tif", raw, tiled=True)                      # tuiles de 32 px : le bloc 0 couvre les lignes/colonnes 0-31
+        with tifffile.TiffFile(str(d / "a.tif")) as tf:
+            bo = tf.byteorder
+            offs = [tf.pages[0].tags[324].valueoffset, tf.pages[0].tags[325].valueoffset]
+        b = bytearray((d / "a.tif").read_bytes())
+        for o in offs:                                               # offset et taille du bloc 0 mis à 0
+            b[o:o + 4] = (0).to_bytes(4, "little" if bo == "<" else "big")
+        (d / "sparse.tif").write_bytes(bytes(b))
+        with self.assertRaises(Exception):                           # contrôle : sans le correctif, ce bloc fait échouer zlib
+            import zlib
+            zlib.decompress(b"")
+        lon, lat = [22.05, 25.05], [58.95, 54.95]                    # (10,20) est dans le bloc vide ; (50,50) dans un bloc plein
+        self.assertEqual(fh.sample_geotiff(d / "sparse.tif", lon, lat), [None, 1.5])
+        img, _ = fh.render_preview(d / "sparse.tif", "raw", max_px=100)
+        self.assertEqual(img[10, 20, 3], 0)                          # bloc vide : transparent, sans erreur
+        self.assertEqual(img[50, 50, 3], 255)
+        self.assertTrue(fh.tiff_complete(d / "sparse.tif")[0])
+
     def test_diagnose(self):
         rows = fh.diagnose(100, Sess(routes()))
         self.assertTrue(all(x["résultat"] == "OK" for x in rows), rows)
