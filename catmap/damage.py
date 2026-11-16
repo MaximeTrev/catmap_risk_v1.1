@@ -8,7 +8,7 @@ Deux familles de courbes au choix :
 * **FEMA Hazus** (fonctions riverines, reprises sur Zenodo par A. Pollack, 2023, DOI 10.5281/zenodo.10027236, CC BY 4.0) : fichier
   ``haz_fl_dept.csv`` en format large (colonnes ``ft04m`` … ``ft24`` = pieds par rapport au plancher du rez-de-chaussée, valeurs en %).
 
-Aucun jeu de courbes n'est « inventé » ici : les fichiers sont lus tels quels (dossier ``data/damage/``, téléchargement Zenodo pour
+Aucun jeu de courbes n'est « inventé » ici : les fichiers sont lus tels quels (dossier ``data/flood/``, téléchargement Zenodo pour
 Hazus, ou téléversement). Le format du fichier Excel JRC n'a PAS pu être vérifié depuis l'environnement de développement (réseau
 bloqué) : ``load_jrc`` est tolérant et renvoie un diagnostic ; à défaut, un CSV « long » simple est accepté (voir ``JRC_TEMPLATE``).
 
@@ -28,7 +28,11 @@ import numpy as np
 import pandas as pd
 
 FT = 0.3048
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "damage"
+DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
+DATA_DIRS = (DATA_ROOT / "flood", DATA_ROOT / "damage", DATA_ROOT)       # data/flood en priorité (dépôt GitHub de l'utilisateur)
+DATA_DIR = DATA_DIRS[0]
+FILE_ALIASES = {"riverine_ids.csv": ("riverine_ids.csv", "haz_riverine_ids.csv"), "haz_fl_dept.csv": ("haz_fl_dept.csv",),
+                "haz_fl_occ.csv": ("haz_fl_occ.csv",)}
 CACHE_DIR = Path(tempfile.gettempdir()) / "catmap_damage"
 HAZUS_URL = "https://zenodo.org/records/10027236/files/{name}?download=1"
 HAZUS_FILES = ("haz_fl_dept.csv", "haz_fl_occ.csv", "riverine_ids.csv")
@@ -390,10 +394,13 @@ def jrc_max_value(jrc: dict, country: str, cls: str, component: str = "total") -
 
 # ───────────────────────────── chargement des fichiers ─────────────────────────────
 def find_local(name: str) -> Optional[Path]:
-    for d in (DATA_DIR, CACHE_DIR):
-        p = d / name
-        if p.exists() and p.stat().st_size > 0:
-            return p
+    """Fichier Hazus dans data/flood, data/damage, data, ou cache de téléchargement (nom insensible à la casse, alias acceptés)."""
+    wanted = {a.lower() for a in FILE_ALIASES.get(name, (name,))}
+    for d in (*DATA_DIRS, CACHE_DIR):
+        if d.exists():
+            for p in sorted(d.iterdir()):
+                if p.is_file() and p.name.lower() in wanted and p.stat().st_size > 0:
+                    return p
     return None
 
 
@@ -420,7 +427,7 @@ def fetch_hazus(session=None, timeout: int = 30) -> dict:
         except Exception as e:                               # noqa: BLE001
             errs.append(f"{name} : {type(e).__name__} {str(e)[:120]}")
     if "haz_fl_dept.csv" not in out:
-        raise DamageError("Téléchargement Hazus impossible (" + " ; ".join(errs) + "). Déposez haz_fl_dept.csv dans data/damage/ "
+        raise DamageError("Téléchargement Hazus impossible (" + " ; ".join(errs) + "). Déposez haz_fl_dept.csv dans data/flood/ "
                           "(GitHub) ou téléversez-le ci-dessous.")
     return out
 
@@ -541,8 +548,11 @@ def merge_jrc(parts: list) -> dict:
 
 
 def load_jrc_local() -> Optional[dict]:
-    """Fichiers ``data/damage/jrc*`` (xlsx, csv) fusionnés ; ``None`` s'il n'y en a pas. Lève ``DamageError`` si illisibles."""
-    files = sorted(p for p in DATA_DIR.glob("jrc*") if p.suffix.lower() in (".xlsx", ".xls", ".csv")) if DATA_DIR.exists() else []
+    """Fichiers ``data/flood/*jrc*`` (xlsx, csv) fusionnés ; ``None`` s'il n'y en a pas. Lève ``DamageError`` si illisibles."""
+    files = []
+    for d in DATA_DIRS:
+        if d.exists():
+            files += [p for p in sorted(d.iterdir()) if p.is_file() and "jrc" in p.name.lower() and p.suffix.lower() in (".xlsx", ".xls", ".csv")]
     if not files:
         return None
     return merge_jrc([parse_jrc(p.read_bytes(), p.name) for p in files])
