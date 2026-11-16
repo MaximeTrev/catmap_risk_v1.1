@@ -383,6 +383,62 @@ def jrc_curve(jrc: dict, continent: str, cls: str) -> Curve:
     return Curve(h, r, f"JRC {continent} – {CLASS_LABELS.get(cls, cls)}")
 
 
+_A2_CONTINENT = {}
+for _cont, _codes in {
+    "Europe": "AL AD AT BY BE BA BG HR CY CZ DK EE FO FI FR DE GI GR GG HU IS IE IM IT JE XK LV LI LT LU MT MD MC ME NL MK NO PL PT RO RU "
+              "SM RS SK SI ES SJ SE CH UA GB VA AX",
+    "North America": "US CA GL BM PM",
+    "South America": "MX BZ CR SV GT HN NI PA AG BS BB CU DM DO GD HT JM KN LC VC TT AI AW BQ VG KY CW GP MQ MS PR SX TC VI MF BL "
+                     "AR BO BR CL CO EC FK GF GY PY PE SR UY VE GS",
+    "Asia": "AF AM AZ BH BD BT BN KH CN GE HK IN ID IR IQ IL JP JO KZ KW KG LA LB MO MY MV MN MM NP KP OM PK PS PH QA SA SG KR LK SY TW "
+            "TJ TH TL TR TM AE UZ VN YE",
+    "Africa": "DZ AO BJ BW BF BI CM CV CF TD KM CG CD CI DJ EG GQ ER SZ ET GA GM GH GN GW KE LS LR LY MG MW ML MR MU YT MA MZ NA NE NG RE "
+              "RW SH ST SN SC SL SO ZA SS SD TZ TG TN UG EH ZM ZW",
+    "Oceania": "AS AU CK FJ PF GU KI MH FM NR NC NZ NU NF MP PW PG PN WS SB TK TO TV VU WF UM",
+}.items():
+    for _c in _codes.split():
+        _A2_CONTINENT[_c] = _cont
+
+
+def continent_series(df: pd.DataFrame, country_col: Optional[str], jrc: Optional[dict], default: str) -> tuple[pd.Series, int]:
+    """Continent de la courbe JRC par point, d'après une colonne pays (code ISO 2 ou 3 lettres, ou nom anglais du fichier JRC).
+    Pays inconnu ou colonne absente → ``default``. Renvoie (série, nombre de points ramenés à ``default``)."""
+    if not country_col or country_col not in df.columns:
+        return pd.Series(default, index=df.index), 0
+    iso = (jrc or {}).get("iso", {})
+    rev = {nm: k.upper() for k, nm in iso.items() if len(k) == 2}
+    cache: dict = {}
+
+    def one(v):
+        t = str(v or "").strip().lower()
+        if t in cache:
+            return cache[t]
+        a2 = None
+        if len(t) == 2:
+            a2 = t.upper()
+        elif t:
+            a2 = rev.get(iso.get(t, t))
+        cache[t] = _A2_CONTINENT.get(a2) if a2 else None
+        return cache[t]
+
+    res = df[country_col].map(one)
+    unknown = int(res.isna().sum())
+    return res.fillna(default), unknown
+
+
+def jrc_curve_for(jrc: dict, continent: str, cls: str) -> Curve:
+    """Courbe du continent, sinon courbe « Global » de la même catégorie (repli signalé dans ``Curve.continent``)."""
+    try:
+        c = jrc_curve(jrc, continent, cls)
+        c.continent = continent
+        return c
+    except DamageError:
+        c = jrc_curve(jrc, "Global", cls)          # lève DamageError si absente aussi
+        c.continent = "Global"
+        c.label += f" (repli : pas de courbe « {continent} »)"
+        return c
+
+
 def jrc_max_value(jrc: dict, country: str, cls: str, component: str = "total") -> Optional[float]:
     """Valeur de remplacement maximale (€/m², prix 2010) du pays : ``total`` = structure + contenu, ``struct`` = structure seule.
     Le pays peut être un nom anglais, un code ISO à 2 ou 3 lettres."""
@@ -473,21 +529,25 @@ def column_eur(rp: int) -> str:
 
 
 def estimate_damages(df: pd.DataFrame, depth_cols: dict, curves_by_class: dict, classes: pd.Series, values: pd.Series,
-                     method_label: str) -> tuple[pd.DataFrame, dict]:
+                     method_label: str, continents: Optional[pd.Series] = None) -> tuple[pd.DataFrame, dict]:
     """Calcule taux et pertes par scénario.
 
-    ``depth_cols`` : ``{rp: nom de colonne de hauteur (m)}`` ; ``curves_by_class`` : ``{classe: Curve}``. Renvoie
-    (DataFrame de nouvelles colonnes aligné sur ``df``, résumé)."""
+    ``depth_cols`` : ``{rp: nom de colonne de hauteur (m)}`` ; ``curves_by_class`` : ``{classe: Curve}`` ou, si ``continents`` est
+    donné (une valeur par point), ``{"continent|classe": Curve}``. Renvoie (DataFrame de nouvelles colonnes, résumé)."""
     out = pd.DataFrame(index=df.index)
     out["dommage_methode"] = method_label
     out["dommage_classe"] = classes
+    keys = classes if continents is None else continents.astype(str) + "|" + classes.astype(str)
+    if continents is not None:
+        out["dommage_continent_demande"] = continents
+        out["dommage_continent_courbe"] = keys.map(lambda k: getattr(curves_by_class.get(k), "continent", None))
     out["dommage_valeur_exposee_eur"] = values
-    missing = sorted({c for c in classes.dropna().unique() if c not in curves_by_class})
+    missing = sorted({str(c).replace("|", " / ") for c in keys.dropna().unique() if c not in curves_by_class})
     for rp, col in depth_cols.items():
         depth = pd.to_numeric(df[col], errors="coerce")
         ratio = pd.Series(np.nan, index=df.index)
         for cls, curve in curves_by_class.items():
-            m = classes == cls
+            m = keys == cls
             if m.any():
                 r = pd.Series(curve.at(depth[m].to_numpy()), index=depth[m].index)
                 ratio.loc[m] = r.where(depth[m] > 0, 0.0).where(depth[m].notna())
@@ -504,7 +564,8 @@ def estimate_damages(df: pd.DataFrame, depth_cols: dict, curves_by_class: dict, 
     summ = {"points": len(df), "sans_valeur": int(values.isna().sum()), "sans_hauteur": int(
         pd.concat([pd.to_numeric(df[c], errors="coerce") for c in depth_cols.values()], axis=1).isna().all(axis=1).sum()),
             "classes_sans_courbe": missing, "pertes_totales": total, "pam_totale": None if aal is None else float(np.nansum(aal)),
-            "pam_bornes": (rps[0], rps[-1]) if aal is not None else None}
+            "pam_bornes": (rps[0], rps[-1]) if aal is not None else None,
+            "repli_global": 0 if continents is None else int(((out["dommage_continent_courbe"] == "Global") & (continents != "Global")).sum())}
     return out, summ
 
 
