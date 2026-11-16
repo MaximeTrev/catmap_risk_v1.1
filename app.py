@@ -2832,7 +2832,7 @@ _DMG_VALUE_MODES = {
     "col": "Valeur de chaque point : colonne du CSV (en €)",
     "area": "Surface (colonne, m²) × valeur de remplacement saisie (€/m²)",
     "const": "Même valeur exposée pour tous les points (€)",
-    "jrc_area": "Surface (colonne, m²) × valeur de remplacement JRC du pays (colonne pays)",
+    "jrc_area": "Surface (colonne, m²) × valeur de remplacement JRC du pays (recommandé si la valeur n'est pas connue)",
 }
 
 
@@ -2879,7 +2879,7 @@ def _fh_damage_jrc_ui():
         st.error(err)
     if loc:
         parts.append(loc)
-    ups = st.file_uploader("Courbes JRC (Huizinga et al. 2017) : fichier Excel officiel ou CSV au format simple "
+    ups = st.file_uploader("Fichier JRC (Huizinga et al. 2017) : classeur Excel officiel ou CSV au format simple "
                            "(facultatif si déjà dans data/flood/)", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="fh_jrc_up")
     for u in ups or []:
         try:
@@ -2888,13 +2888,20 @@ def _fh_damage_jrc_ui():
             st.error(str(e))
     jrc = dmg.merge_jrc(parts) if parts else None
     if jrc is None:
-        st.caption("Aucune courbe JRC chargée. " + dmg.JRC_TEMPLATE)
+        st.caption("Aucun fichier JRC chargé. " + dmg.JRC_TEMPLATE)
     else:
         for n in jrc["notes"][:4]:
             st.warning(n)
-        if jrc["curves"]:
-            st.caption(f"{len(jrc['curves'])} courbe(s) lue(s) ; {len(jrc['maxdmg'])} valeur(s) maximale(s) par pays/classe.")
+        st.caption(f"{len(jrc['curves'])} courbe(s) lue(s) ; {len(jrc['maxdmg'])} valeur(s) de remplacement par pays et catégorie.")
     return jrc
+
+
+def _guess_col(cols, words, default_none=True):
+    """Index (dans ["(aucune)"] + cols) de la 1re colonne dont le nom contient un des mots ; 0 = « (aucune) »."""
+    for i, c in enumerate(cols):
+        if any(w in str(c).lower() for w in words):
+            return i + 1
+    return 0 if default_none else 1
 
 
 def _fh_damage_panel(df, name, rps, kinds, ensure):
@@ -2905,89 +2912,106 @@ def _fh_damage_panel(df, name, rps, kinds, ensure):
         with st.container(border=True):
             st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario. "
                         "Les hauteurs d'eau (raw) des scénarios choisis sont estimées automatiquement si elles ne le sont pas déjà.")
-            if True:
-                method = st.radio("Approche", ["JRC – courbes mondiales par continent (Huizinga et al. 2017)",
-                                               "FEMA Hazus – fonctions riverines (États-Unis)"], key="fh_dmg_method")
-                is_jrc = method.startswith("JRC")
-                jrc = hz = None
-                if is_jrc:
-                    jrc = _fh_damage_jrc_ui()
+            method = st.radio("Approche", ["JRC – courbes mondiales par continent (Huizinga et al. 2017)",
+                                           "FEMA Hazus – fonctions riverines (États-Unis)"], key="fh_dmg_method")
+            is_jrc = method.startswith("JRC")
+            with st.expander("Fichier JRC (courbes et valeurs de remplacement par pays)", expanded=is_jrc):
+                jrc = _fh_damage_jrc_ui()
+            hz = None if is_jrc else _fh_damage_hazus_ui()
+            c1, c2, c3 = st.columns(3)
+            cls_main = list(dmg.CLASSES) if is_jrc else ["industrial", "commercial", "residential"]
+            default_cls = c1.selectbox("Type d'actif par défaut", cls_main, key="fh_dmg_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
+            type_col = c2.selectbox("Colonne décrivant le type d'actif (facultatif)", ["(aucune)"] + base_cols, key="fh_dmg_typecol",
+                                    index=_guess_col(base_cols, ("type", "categ", "activ", "naf")),
+                                    help="Libellés reconnus : industriel / usine, commercial / magasin / bureau, résidentiel / logement… "
+                                         "Les autres lignes reçoivent le type par défaut.")
+            country_col = c3.selectbox("Colonne pays (code ISO 2/3 lettres ou nom anglais)", ["(aucune)"] + base_cols, key="fh_dmg_ctrycol",
+                                       index=_guess_col(base_cols, ("pays_iso", "iso2", "iso3", "country", "pays")),
+                                       help="Sert à choisir la courbe du bon continent (approche JRC) et la valeur de remplacement du pays.")
+            type_col = None if type_col == "(aucune)" else type_col
+            country_col = None if country_col == "(aucune)" else country_col
+            jrc_val_ok = bool(jrc and jrc["maxdmg"] and country_col)
+            if jrc and jrc["maxdmg"] and not country_col:
+                st.caption("Choisissez une colonne pays pour utiliser les valeurs de remplacement JRC par pays.")
+            modes = (["jrc_area"] if jrc_val_ok else []) + ["area", "col", "const"]
+            mode = st.radio("Valeur exposée", modes, key="fh_dmg_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
+            v1, v2 = st.columns(2)
+            value_col = area_col = None
+            component = "total"
+            unit_value = const = 0.0
+            if mode == "col":
+                value_col = v1.selectbox("Colonne de valeur (€)", base_cols, key="fh_dmg_valcol")
+            elif mode == "const":
+                const = v1.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="fh_dmg_const")
+            else:
+                area_idx = _guess_col(base_cols, ("surface", "area", "m2", "m²"), default_none=False) - 1
+                area_col = v1.selectbox("Colonne de surface (m²)", base_cols, key="fh_dmg_areacol", index=max(0, area_idx))
+                if mode == "area":
+                    unit_value = v2.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="fh_dmg_unit")
                 else:
-                    hz = _fh_damage_hazus_ui()
-                c1, c2 = st.columns(2)
-                cls_main = [k for k in dmg.CLASSES if k in ("industrial", "commercial", "residential")] if not is_jrc else list(dmg.CLASSES)
-                default_cls = c1.selectbox("Type d'actif par défaut", cls_main, key="fh_dmg_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
-                type_col = c2.selectbox("Colonne décrivant le type d'actif (facultatif)", ["(aucune)"] + base_cols, key="fh_dmg_typecol",
-                                        help="Libellés reconnus : industriel / usine, commercial / magasin / bureau, résidentiel / logement… "
-                                             "Les autres lignes reçoivent le type par défaut.")
-                type_col = None if type_col == "(aucune)" else type_col
-                modes = [m for m in _DMG_VALUE_MODES if m != "jrc_area" or (is_jrc and jrc and jrc["maxdmg"])]
-                mode = st.radio("Valeur exposée", modes, key="fh_dmg_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
-                v1, v2 = st.columns(2)
-                value_col = area_col = country_col = None
-                component = "total"
-                unit_value = const = 0.0
-                if mode == "col":
-                    value_col = v1.selectbox("Colonne de valeur (€)", base_cols, key="fh_dmg_valcol")
-                elif mode == "const":
-                    const = v1.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="fh_dmg_const")
-                else:
-                    area_col = v1.selectbox("Colonne de surface (m²)", base_cols, key="fh_dmg_areacol")
-                    if mode == "area":
-                        unit_value = v2.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="fh_dmg_unit")
-                    else:
-                        country_col = v2.selectbox("Colonne pays (nom anglais ou code ISO 2/3 lettres, ex. pays_iso2)", base_cols, key="fh_dmg_ctrycol")
-                        comp_lab = st.radio("Valeur de remplacement JRC", ["Structure + contenu (total)", "Structure seule"], horizontal=True,
-                                            key="fh_dmg_comp")
-                        component = "struct" if comp_lab.startswith("Structure seule") else "total"
-                continent = occ = None
-                floor_h = 0.0
+                    comp_lab = v2.radio("Valeur de remplacement JRC", ["Structure + contenu (total)", "Structure seule"], key="fh_dmg_comp",
+                                        help="Prix 2010, par pays et par catégorie (résidentiel, commercial, industriel).")
+                    component = "struct" if comp_lab.startswith("Structure seule") else "total"
+            continent = occ = None
+            floor_h = 0.0
+            if is_jrc:
+                conts = sorted(set(dmg.CONTINENTS.values()))
+                continent = st.selectbox("Continent de la courbe si le pays n'est pas reconnu" if country_col else
+                                         "Continent de la courbe (appliqué à tous les points : choisissez une colonne pays pour le déduire)",
+                                         conts, index=conts.index("Europe"), key="fh_dmg_cont",
+                                         help="Avec une colonne pays, chaque point reçoit la courbe de son continent ; « Global » sert de repli "
+                                              "quand le continent n'a pas de courbe pour la catégorie.")
+            elif hz is not None:
+                occs = hz["occupancies"]
+                occ = {}
+                cols = st.columns(3)
+                for col, (cls, pref) in zip(cols, (("industrial", "IND"), ("commercial", "COM"), ("residential", "RES"))):
+                    opts = [o for o in occs if o.startswith(pref)]
+                    if opts:
+                        occ[cls] = col.selectbox(f"Occupation Hazus – {dmg.CLASS_LABELS[cls].lower()}", opts, key=f"fh_hz_occ_{cls}",
+                                                 format_func=lambda o: f"{o} – {occs[o]}" if occs.get(o) else o)
+                floor_h = st.number_input("Hauteur du plancher au-dessus du terrain (m)", min_value=0.0, max_value=3.0, value=0.0, step=0.1,
+                                          key="fh_hz_floor", help="Les fonctions Hazus sont relatives au plancher du rez-de-chaussée ; "
+                                          "0 = plancher au niveau du terrain.")
+            ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
+            if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
+                prev = st.session_state.get("fh_result")
+                if not prev or prev[0] != name or prev[1] != len(df) or "raw" not in prev[5] or not set(rps) <= set(prev[4]):
+                    ensure(sorted(set(kinds) | {"raw"}))
+                res = st.session_state["fh_result"][2]
+                used_rps = [r for r in rps]
+                classes = dmg.asset_class_series(res, type_col, default_cls)
+                curves, problems = {}, []
+                conts_pt = None
                 if is_jrc:
-                    continent = st.selectbox("Continent de la courbe (appliqué à tous les points)", sorted(set(dmg.CONTINENTS.values())),
-                                             index=sorted(set(dmg.CONTINENTS.values())).index("Europe"), key="fh_dmg_cont",
-                                             help="« Global » n'est renseigné que pour certaines catégories dans le fichier JRC.")
-                elif hz is not None:
-                    occs = hz["occupancies"]
-                    occ = {}
-                    cols = st.columns(3)
-                    for col, (cls, pref) in zip(cols, (("industrial", "IND"), ("commercial", "COM"), ("residential", "RES"))):
-                        opts = [o for o in occs if o.startswith(pref)]
-                        if opts:
-                            occ[cls] = col.selectbox(f"Occupation Hazus – {dmg.CLASS_LABELS[cls].lower()}", opts, key=f"fh_hz_occ_{cls}",
-                                                     format_func=lambda o: f"{o} – {occs[o]}" if occs.get(o) else o)
-                    floor_h = st.number_input("Hauteur du plancher au-dessus du terrain (m)", min_value=0.0, max_value=3.0, value=0.0, step=0.1,
-                                              key="fh_hz_floor", help="Les fonctions Hazus sont relatives au plancher du rez-de-chaussée ; "
-                                              "0 = plancher au niveau du terrain.")
-                ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
-                if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
-                    prev = st.session_state.get("fh_result")
-                    if not prev or prev[0] != name or prev[1] != len(df) or "raw" not in prev[5] or not set(rps) <= set(prev[4]):
-                        ensure(sorted(set(kinds) | {"raw"}))
-                    res = st.session_state["fh_result"][2]
-                    used_rps = [r for r in rps]
-                    classes = dmg.asset_class_series(res, type_col, default_cls)
-                    needed = sorted(classes.dropna().unique())
-                    curves, problems = {}, []
-                    for cls in needed:
+                    conts_pt, n_unk = dmg.continent_series(res, country_col, jrc, continent)
+                    if n_unk:
+                        problems.append(f"{n_unk} point(s) : pays non reconnu, courbe « {continent} » utilisée.")
+                    for cont, cls in sorted(set(zip(conts_pt, classes))):
                         try:
-                            if is_jrc:
-                                curves[cls] = dmg.jrc_curve(jrc, continent, cls)
-                            elif occ.get(cls):
+                            curves[f"{cont}|{cls}"] = dmg.jrc_curve_for(jrc, cont, cls)
+                        except dmg.DamageError as e:
+                            problems.append(str(e))
+                else:
+                    for cls in sorted(classes.dropna().unique()):
+                        try:
+                            if occ.get(cls):
                                 curves[cls] = dmg.hazus_curve(hz, occ[cls], floor_h)
                             else:
                                 problems.append(f"Hazus : pas d'occupation pour la classe « {dmg.CLASS_LABELS.get(cls, cls)} ».")
                         except dmg.DamageError as e:
                             problems.append(str(e))
-                    try:
-                        values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, component)
-                        depth_cols = {r: fhz.column_name(r, "raw") for r in used_rps}
-                        out, summ = dmg.estimate_damages(res, depth_cols, curves, classes, values,
-                                                         ("JRC " + str(continent)) if is_jrc else "FEMA Hazus")
-                        summ["problemes"] = problems
-                        summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
-                        st.session_state["fh_dmg_result"] = (name, len(res), out, summ, curves)
-                    except dmg.DamageError as e:
-                        st.error(str(e))
+                try:
+                    values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, component)
+                    depth_cols = {r: fhz.column_name(r, "raw") for r in used_rps}
+                    out, summ = dmg.estimate_damages(res, depth_cols, curves, classes, values, "JRC" if is_jrc else "FEMA Hazus", conts_pt)
+                    if summ.get("repli_global"):
+                        problems.append(f"{summ['repli_global']} point(s) : pas de courbe du continent pour cette catégorie, courbe « Global » utilisée.")
+                    summ["problemes"] = problems
+                    summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                    st.session_state["fh_dmg_result"] = (name, len(res), out, summ, curves)
+                except dmg.DamageError as e:
+                    st.error(str(e))
     stored = st.session_state.get("fh_dmg_result")
     if not stored or stored[0] != name or stored[1] != len(df):
         return None
@@ -3009,8 +3033,9 @@ def _fh_damage_panel(df, name, rps, kinds, ensure):
         st.caption(f"Perte annuelle moyenne : intégrale trapézoïdale entre RP{summ['pam_bornes'][0]} et RP{summ['pam_bornes'][1]} "
                    "uniquement (pas d'extrapolation hors de cet intervalle) ; ajoutez des scénarios pour la rendre plus complète.")
     with st.expander("Courbes utilisées"):
-        for cls, cv in curves.items():
-            st.markdown(f"**{dmg.CLASS_LABELS.get(cls, cls)}** : {cv.label}")
+        for key, cv in curves.items():
+            cont_, _, cls = key.rpartition("|")
+            st.markdown(f"**{(cont_ + ' / ') if cont_ else ''}{dmg.CLASS_LABELS.get(cls, cls)}** : {cv.label}")
             st.line_chart(cv.as_frame().set_index("hauteur (m)"), height=180)
     return stored
 
