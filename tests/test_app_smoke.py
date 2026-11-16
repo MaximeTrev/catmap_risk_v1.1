@@ -56,7 +56,10 @@ def make_fakes(script):
     st.date_input = lambda label, value=None, **k: value
     st.multiselect = lambda label, options=None, default=None, **k: script.get(k.get("key"), default or [])
     st.slider = lambda label, mn, mx, value, *a, **k: value
-    st.selectbox = lambda label, options, **k: options[0]
+    if not hasattr(st, "number_input"):
+        st.number_input = lambda label, *a, **k: k.get("value", 0.0)
+    st.line_chart = rec("line_chart")
+    st.selectbox = lambda label, options, **k: script.get(k.get("key"), options[0])
     st.button = lambda label, **k: script.get("button:" + label, False) and not k.get("disabled")
     st.download_button = lambda *a, **k: (st.calls.append(("download", a[0], a[1].__len__() if hasattr(a[1], "__len__") else 0)), False)[1]
     st.columns = lambda n, **k: [Container(st) for _ in range(n if isinstance(n, int) else len(n))]
@@ -374,6 +377,41 @@ class TestAppSmoke(unittest.TestCase):
         names = [c[1][0] for c in st.calls if c[0] == "metric"]
         self.assertIn("Polynésie française", names)
         self.assertIn("Nouvelle-Calédonie", names)
+
+    def test_damage_panel_jrc_and_map(self):
+        import pandas as pd
+        csv = ("continent,classe,hauteur_m,taux\nEurope,residential,0,0\nEurope,residential,1,0.2\nEurope,residential,3,0.6\n").encode()
+
+        class Up:
+            name = "jrc.csv"
+            def getvalue(self): return csv
+
+        res = pd.DataFrame({"valeur": [1000.0, 2000.0, 500.0], "name": ["a", "b", "c"], "lat_f": [45.0, 45.1, 45.2], "lon_f": [4.0, 4.1, 4.2],
+                            "debordement_RP10_raw": [0.0, 1.0, float("nan")], "debordement_RP100_raw": [1.0, 3.0, float("nan")]})
+        app, st = self.load({"fh_jrc_up": [Up()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
+        st.session_state["fh_dmg_open"] = True
+        stored = app._fh_damage_panel(res, [10, 100], ["raw"], "pts.csv")
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertIsNotNone(stored)
+        out = stored[2]
+        self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[0], 200.0)
+        self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[1], 1200.0)
+        self.assertTrue(out["dommage_RP100_eur"].iloc[2] != out["dommage_RP100_eur"].iloc[2])      # NaN : pas de perte inventée
+        from catmap import damage as dmg
+        full = pd.concat([res, out], axis=1)
+        kinds = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in out.columns if c.startswith("dommage_RP") or c == "dommage_PAM_eur"}
+        damage = {"kinds": kinds, "edges": {c: dmg.class_edges(out[c], k) for c, k in kinds.items()}}
+        for col in ("dommage_RP100_eur", "dommage_RP100_ratio", "dommage_PAM_eur", "debordement_RP100_raw"):
+            app._fh_map(full, {"raw": ["debordement_RP10_raw", "debordement_RP100_raw"]}, col, None, None, damage)
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
+    def test_damage_panel_requires_raw(self):
+        import pandas as pd
+        res = pd.DataFrame({"valeur": [1.0], "debordement_RP100_reclass": [2.0]})
+        app, st = self.load({})
+        st.session_state["fh_dmg_open"] = True
+        self.assertIsNone(app._fh_damage_panel(res, [100], ["reclass"], "x.csv"))
+        self.assertTrue([c for c in st.calls if c[0] == "warning" and "raw" in c[1][0]])
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
