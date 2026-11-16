@@ -40,7 +40,8 @@ _CLASS_KEYS = {"residential": ("resid", "habit", "logement"), "commercial": ("co
                "industrial": ("industr", "usine", "factory"), "transport": ("transport",), "infrastructure": ("infrastr",),
                "agriculture": ("agricul",)}
 CONTINENTS = {"europe": "Europe", "asia": "Asia", "africa": "Africa", "oceania": "Oceania", "australia": "Oceania",
-              "north america": "North America", "south america": "South America", "latin america": "South America"}
+              "north america": "North America", "centr&south": "South America", "south america": "South America",
+              "latin america": "South America", "global": "Global"}
 
 JRC_TEMPLATE = ("Courbes JRC au format CSV « long » accepté : colonnes `continent`, `classe` (residential / commercial / industrial / "
                 "transport / infrastructure / agriculture), `hauteur_m`, `taux` (0 à 1) ; valeurs maximales : colonnes `pays`, `classe`, "
@@ -186,7 +187,7 @@ def _num(x) -> Optional[float]:
 
 
 def _continent_of(text) -> Optional[str]:
-    t = str(text or "").strip().lower()
+    t = " ".join(str(text or "").lower().split())
     for k, v in CONTINENTS.items():
         if t == k or (len(t) < 40 and k in t):
             return v
@@ -249,18 +250,93 @@ def _grid_to_jrc(grid: pd.DataFrame, sheet: str, curves: dict, maxdmg: dict, not
         r += 1
 
 
+def _parse_official_workbook(sheets: dict, curves: dict, maxdmg: dict, maxstruct: dict, iso: dict, notes: list) -> bool:
+    """Classeur officiel JRC (« Damage functions » : continents en colonnes, catégories en blocs de lignes ; feuilles
+    « MaxDamage-Residential / Commercial / Industrial » : pays en lignes). Renvoie True si la feuille des courbes a été reconnue."""
+    found = False
+    for sh, g in sheets.items():
+        g = g.reset_index(drop=True)
+        name = str(sh).strip().lower()
+        if name.startswith("damage function"):
+            hdr = None
+            for r in range(min(len(g), 12)):
+                cols = {}
+                for j, v in enumerate(g.iloc[r].tolist()):
+                    c = _continent_of(v)
+                    if c and c not in cols.values():              # 1er bloc seulement (le 2e = écart-type)
+                        cols[j] = c
+                if len(cols) >= 3:
+                    hdr = (r, cols)
+                    break
+            if hdr is None:
+                continue
+            r0, cols = hdr
+            cls = None
+            pts: dict = {}
+            for r in range(r0 + 1, len(g)):
+                lab = g.iat[r, 0]
+                if isinstance(lab, str) and lab.strip():
+                    cls = class_of(lab) or cls
+                d = _num(g.iat[r, 1])
+                if d is None or cls is None:
+                    continue
+                for j, cont in cols.items():
+                    v = _num(g.iat[r, j])
+                    if v is not None:
+                        pts.setdefault((cont, cls), []).append((d, v))
+            for key, lst in pts.items():
+                if len(lst) >= 2:
+                    curves[key] = ([a for a, _ in lst], [b for _, b in lst])
+            found = found or bool(pts)
+        elif name.startswith("maxdamage-"):
+            cls = class_of(name.split("-", 1)[1])
+            if cls not in ("residential", "commercial", "industrial"):
+                continue
+            for r in range(len(g)):
+                country, struct = g.iat[r, 0], _num(g.iat[r, 1]) if g.shape[1] > 1 else None
+                tot = _num(g.iat[r, 3]) if g.shape[1] > 3 else None
+                if isinstance(country, str) and country.strip().lower() not in ("country", "nan"):
+                    if struct and struct > 0:
+                        maxstruct[(country.strip().lower(), cls)] = struct
+                    if tot and tot > 0:
+                        maxdmg[(country.strip().lower(), cls)] = tot
+        elif name == "maxdamage-data" or name == "iso_table":
+            pass
+    for sh, g in sheets.items():                                   # codes pays → nom (feuille « MaxDamage-Data » puis « ISO_Table »)
+        name = str(sh).strip().lower()
+        g = g.reset_index(drop=True)
+        if name == "maxdamage-data":
+            for r in range(len(g)):
+                nm, a3 = g.iat[r, 0], g.iat[r, 1]
+                if isinstance(nm, str) and isinstance(a3, str) and len(a3.strip()) == 3:
+                    iso[a3.strip().lower()] = nm.strip().lower()
+    for sh, g in sheets.items():
+        if str(sh).strip().lower() == "iso_table":
+            g = g.reset_index(drop=True)
+            for r in range(len(g)):
+                nm, a2, a3 = g.iat[r, 0], g.iat[r, 1], g.iat[r, 2]
+                if isinstance(a2, str) and isinstance(a3, str) and a3.strip().lower() in iso:
+                    iso[a2.strip().lower()] = iso[a3.strip().lower()]
+                    if isinstance(nm, str):
+                        iso.setdefault(nm.strip().lower(), iso[a3.strip().lower()])
+    return found
+
+
 def parse_jrc(data: bytes, filename: str, maxdata: Optional[bytes] = None) -> dict:
     """Lit les courbes JRC (Excel officiel, tolérant ; ou CSV « long ») → ``{"curves": {(continent, classe): (h, taux)},
     "maxdmg": {(pays, classe): eur_m2}, "notes": [...]}``."""
     curves: dict = {}
     maxdmg: dict = {}
+    maxstruct: dict = {}
+    iso: dict = {}
     notes: list = []
     name = filename.lower()
     try:
         if name.endswith((".xlsx", ".xlsm", ".xls")):
             sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None)
-            for sh, grid in sheets.items():
-                _grid_to_jrc(grid, str(sh), curves, maxdmg, notes)
+            if not _parse_official_workbook(sheets, curves, maxdmg, maxstruct, iso, notes):
+                for sh, grid in sheets.items():                    # mise en page différente : lecture tolérante
+                    _grid_to_jrc(grid, str(sh), curves, maxdmg, notes)
         else:
             df = pd.read_csv(io.BytesIO(data), sep=None, engine="python", encoding="utf-8-sig")
             df.columns = [str(c).strip().lower() for c in df.columns]
@@ -291,7 +367,7 @@ def parse_jrc(data: bytes, filename: str, maxdata: Optional[bytes] = None) -> di
             notes.append(str(e))
     if not curves and not maxdmg:
         notes.append("Aucune courbe reconnue dans le fichier. " + JRC_TEMPLATE)
-    return {"curves": curves, "maxdmg": maxdmg, "notes": notes}
+    return {"curves": curves, "maxdmg": maxdmg, "maxdmg_struct": maxstruct, "iso": iso, "notes": notes}
 
 
 def jrc_curve(jrc: dict, continent: str, cls: str) -> Curve:
@@ -303,8 +379,13 @@ def jrc_curve(jrc: dict, continent: str, cls: str) -> Curve:
     return Curve(h, r, f"JRC {continent} – {CLASS_LABELS.get(cls, cls)}")
 
 
-def jrc_max_value(jrc: dict, country: str, cls: str) -> Optional[float]:
-    return jrc.get("maxdmg", {}).get((str(country or "").strip().lower(), cls))
+def jrc_max_value(jrc: dict, country: str, cls: str, component: str = "total") -> Optional[float]:
+    """Valeur de remplacement maximale (€/m², prix 2010) du pays : ``total`` = structure + contenu, ``struct`` = structure seule.
+    Le pays peut être un nom anglais, un code ISO à 2 ou 3 lettres."""
+    c = str(country or "").strip().lower()
+    c = jrc.get("iso", {}).get(c, c)
+    table = jrc.get("maxdmg_struct" if component == "struct" else "maxdmg", {})
+    return table.get((c, cls))
 
 
 # ───────────────────────────── chargement des fichiers ─────────────────────────────
@@ -358,7 +439,7 @@ def asset_class_series(df: pd.DataFrame, col: Optional[str], default: str) -> pd
 
 def exposed_value(df: pd.DataFrame, mode: str, value_col: Optional[str] = None, area_col: Optional[str] = None,
                   unit_value: float = 0.0, const: float = 0.0, country_col: Optional[str] = None,
-                  classes: Optional[pd.Series] = None, jrc: Optional[dict] = None) -> pd.Series:
+                  classes: Optional[pd.Series] = None, jrc: Optional[dict] = None, component: str = "total") -> pd.Series:
     """Valeur exposée (€) par point. ``mode`` : ``col`` (colonne en €), ``area`` (surface × €/m² saisi), ``const`` (valeur unique),
     ``jrc_area`` (surface × valeur de remplacement JRC du pays)."""
     num = lambda c: pd.to_numeric(df[c].astype(str).str.replace(",", ".").str.replace(r"[^\d.\-eE]", "", regex=True), errors="coerce")  # noqa: E731
@@ -371,7 +452,7 @@ def exposed_value(df: pd.DataFrame, mode: str, value_col: Optional[str] = None, 
     if mode == "jrc_area":
         if jrc is None or not country_col:
             raise DamageError("Valeurs JRC par pays : fichier des valeurs maximales et colonne pays requis.")
-        vals = [jrc_max_value(jrc, c, k) for c, k in zip(df[country_col], classes)]
+        vals = [jrc_max_value(jrc, c, k, component) for c, k in zip(df[country_col], classes)]
         return num(area_col) * pd.Series([v if v is not None else np.nan for v in vals], index=df.index)
     raise DamageError(f"Mode de valeur exposée inconnu : {mode}")
 
@@ -449,10 +530,12 @@ def damage_class(value, edges: list) -> Optional[int]:
 
 # ───────────────────────────── chargement local JRC, légende de carte ─────────────────────────────
 def merge_jrc(parts: list) -> dict:
-    out = {"curves": {}, "maxdmg": {}, "notes": []}
+    out = {"curves": {}, "maxdmg": {}, "maxdmg_struct": {}, "iso": {}, "notes": []}
     for p in parts:
         out["curves"].update(p.get("curves", {}))
         out["maxdmg"].update(p.get("maxdmg", {}))
+        out["maxdmg_struct"].update(p.get("maxdmg_struct", {}))
+        out["iso"].update(p.get("iso", {}))
         out["notes"].extend(p.get("notes", []))
     return out
 
