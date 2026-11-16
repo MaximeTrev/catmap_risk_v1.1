@@ -2926,6 +2926,7 @@ def _fh_damage_panel(res, used_rps, used_kinds, name):
                 mode = st.radio("Valeur exposée", modes, key="fh_dmg_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
                 v1, v2 = st.columns(2)
                 value_col = area_col = country_col = None
+                component = "total"
                 unit_value = const = 0.0
                 if mode == "col":
                     value_col = v1.selectbox("Colonne de valeur (€)", base_cols, key="fh_dmg_valcol")
@@ -2936,12 +2937,16 @@ def _fh_damage_panel(res, used_rps, used_kinds, name):
                     if mode == "area":
                         unit_value = v2.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="fh_dmg_unit")
                     else:
-                        country_col = v2.selectbox("Colonne pays (nom en anglais, comme dans le fichier JRC)", base_cols, key="fh_dmg_ctrycol")
+                        country_col = v2.selectbox("Colonne pays (nom anglais ou code ISO 2/3 lettres, ex. pays_iso2)", base_cols, key="fh_dmg_ctrycol")
+                        comp_lab = st.radio("Valeur de remplacement JRC", ["Structure + contenu (total)", "Structure seule"], horizontal=True,
+                                            key="fh_dmg_comp")
+                        component = "struct" if comp_lab.startswith("Structure seule") else "total"
                 continent = occ = None
                 floor_h = 0.0
                 if is_jrc:
                     continent = st.selectbox("Continent de la courbe (appliqué à tous les points)", sorted(set(dmg.CONTINENTS.values())),
-                                             index=sorted(set(dmg.CONTINENTS.values())).index("Europe"), key="fh_dmg_cont")
+                                             index=sorted(set(dmg.CONTINENTS.values())).index("Europe"), key="fh_dmg_cont",
+                                             help="« Global » n'est renseigné que pour certaines catégories dans le fichier JRC.")
                 elif hz is not None:
                     occs = hz["occupancies"]
                     occ = {}
@@ -2970,7 +2975,7 @@ def _fh_damage_panel(res, used_rps, used_kinds, name):
                         except dmg.DamageError as e:
                             problems.append(str(e))
                     try:
-                        values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc)
+                        values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, component)
                         depth_cols = {r: fhz.column_name(r, "raw") for r in used_rps}
                         out, summ = dmg.estimate_damages(res, depth_cols, curves, classes, values,
                                                          ("JRC " + str(continent)) if is_jrc else "FEMA Hazus")
