@@ -2643,7 +2643,7 @@ def _points_input(kp: str):
     name = ""
     if src == "Fichier CSV / Excel":
         up = st.file_uploader("CSV de points (colonnes « lat » et « long », par exemple l'export de l'onglet Géolocalisation)",
-                              type=["csv", "txt", "xlsx"], key=f"{kp}csv")
+                              type=["csv", "txt", "xlsx"], key=f"{kp}csv_{st.session_state.get(f'{kp}up_n', 0)}")
         if up is None:
             st.caption("Chargez un fichier pour lancer l'analyse. Séparateur « ; » ou « , » accepté.")
         else:
@@ -2889,9 +2889,14 @@ def _exposition_section():
         st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
     with d2:
         n_c, mb_c = fhz.cache_info()
-        if st.button(f"Vider le cache des tuiles ({n_c} fichier(s), {mb_c} Mo)", key="fh_clear_cache", type="primary"):
+        if st.button(f"Vider le cache et le CSV ({n_c} tuile(s) en cache, {mb_c} Mo)", key="fh_clear_cache", type="primary"):
             n_del, mb_del = fhz.clear_cache()
-            st.session_state["fh_cache_msg"] = f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Les tuiles seront retéléchargées au prochain calcul."
+            # vide aussi le CSV chargé (nouvelle clé de widget) et le résultat affiché
+            st.session_state["fh_up_n"] = st.session_state.get("fh_up_n", 0) + 1
+            for k in ("fh_result", "fh_diag", "fh_color", "fh_show_tiles", "fh_show_vals"):
+                st.session_state.pop(k, None)
+            st.session_state["fh_cache_msg"] = (f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Le fichier CSV chargé et le résultat "
+                                                "ont aussi été retirés ; les tuiles seront retéléchargées au prochain calcul.")
             st.rerun()
         if st.session_state.get("fh_cache_msg"):
             st.caption(st.session_state.pop("fh_cache_msg"))
