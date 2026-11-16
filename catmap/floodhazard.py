@@ -367,6 +367,12 @@ def clear_cache(cache_dir: Path = DEFAULT_CACHE) -> tuple[int, float]:
     return n, mb
 
 
+def _is_empty_block(page, seg: int) -> bool:
+    """Un GeoTIFF peut ne rien stocker (taille 0) pour les blocs entièrement sans-donnée (option « sparse » de GDAL). Les décompresser
+    échoue avec « Error -5 … incomplete or truncated stream » : ce n'est pas un fichier tronqué, le bloc est simplement vide."""
+    return int(page.databytecounts[seg]) == 0 or int(page.dataoffsets[seg]) == 0
+
+
 def _georef(page) -> tuple[float, float, float, float]:
     """(x0, y0, sx, sy) : coin haut-gauche et taille de pixel (sy > 0 vers le bas) lus dans les tags GeoTIFF."""
     tag = page.tags.get
@@ -422,6 +428,8 @@ def render_preview(path: Path, kind: str, max_px: int = 1000) -> tuple[np.ndarra
             across = int(math.ceil(W / tw))
             fh = tf.filehandle
             for seg in range(len(page.dataoffsets)):
+                if _is_empty_block(page, seg):                     # bloc « sparse » : transparent
+                    continue
                 fh.seek(page.dataoffsets[seg])
                 data = fh.read(page.databytecounts[seg])
                 arr, _, _ = page.decode(data, seg)
@@ -475,6 +483,8 @@ def sample_geotiff(path: Path, lons, lats) -> list[Optional[float]]:
             seg_of = (rows // th) * across + (cols // tw) if tiled else rows // th
             fh = tf.filehandle
             for seg in np.unique(seg_of[inside]):
+                if _is_empty_block(page, int(seg)):               # bloc « sparse » : aucune donnée stockée = sans-donnée
+                    continue
                 fh.seek(page.dataoffsets[int(seg)])
                 data = fh.read(page.databytecounts[int(seg)])
                 arr, idx, _ = page.decode(data, int(seg))
@@ -492,7 +502,7 @@ def sample_geotiff(path: Path, lons, lats) -> list[Optional[float]]:
                     out[i] = v
     except TileError:
         raise
-    except Exception as e:  # noqa: BLE001 - codec manquant, fichier tronqué…
+    except Exception as e:  # noqa: BLE001 - codec manquant, bloc illisible…
         raise TileError(f"lecture impossible ({type(e).__name__}: {str(e)[:200]})") from e
     return out
 
@@ -544,7 +554,7 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
                 try:
                     vals = sample_geotiff(path, pl["lon"][rows], pl["lat"][rows])
                 except TileError as again:
-                    raise TileError(f"{again} (déjà observé au premier essai : {first}) ; fichier peut-être incomplet côté serveur") from again
+                    raise TileError(f"{again} (erreur identique après retéléchargement : le contenu du fichier pose problème)") from again
             for i, v in zip(rows, vals):
                 cols[name][i] = 0.0 if v is None else (int(v) if k == "reclass" else round(float(v), 3))
         except TileError as e:
