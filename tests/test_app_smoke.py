@@ -378,21 +378,33 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("Polynésie française", names)
         self.assertIn("Nouvelle-Calédonie", names)
 
-    def test_damage_panel_jrc_and_map(self):
+    def _depth_res(self):
         import pandas as pd
+        return pd.DataFrame({"valeur": [1000.0, 2000.0, 500.0], "name": ["a", "b", "c"], "lat_f": [45.0, 45.1, 45.2], "lon_f": [4.0, 4.1, 4.2],
+                             "debordement_RP10_raw": [0.0, 1.0, float("nan")], "debordement_RP100_raw": [1.0, 3.0, float("nan")]})
+
+    def _jrc_upload(self):
         csv = ("continent,classe,hauteur_m,taux\nEurope,residential,0,0\nEurope,residential,1,0.2\nEurope,residential,3,0.6\n").encode()
 
         class Up:
             name = "jrc.csv"
             def getvalue(self): return csv
+        return Up()
 
-        res = pd.DataFrame({"valeur": [1000.0, 2000.0, 500.0], "name": ["a", "b", "c"], "lat_f": [45.0, 45.1, 45.2], "lon_f": [4.0, 4.1, 4.2],
-                            "debordement_RP10_raw": [0.0, 1.0, float("nan")], "debordement_RP100_raw": [1.0, 3.0, float("nan")]})
-        app, st = self.load({"fh_jrc_up": [Up()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
+    def test_damage_panel_runs_depths_first_then_damages_and_map(self):
+        import pandas as pd
+        res = self._depth_res()
+        df = res[["valeur", "name"]].copy()
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
         st.session_state["fh_dmg_open"] = True
-        stored = app._fh_damage_panel(res, [10, 100], ["raw"], "pts.csv")
+        calls = []
+
+        def ensure(kinds):                      # simule l'estimation des hauteurs : aucune hauteur en mémoire au départ
+            calls.append(kinds)
+            st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], list(kinds))
+        stored = app._fh_damage_panel(df, "pts.csv", [10, 100], ["reclass"], ensure)
+        self.assertEqual(calls, [["raw", "reclass"]])                     # raw ajouté d'office
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
-        self.assertIsNotNone(stored)
         out = stored[2]
         self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[0], 200.0)
         self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[1], 1200.0)
@@ -405,13 +417,16 @@ class TestAppSmoke(unittest.TestCase):
             app._fh_map(full, {"raw": ["debordement_RP10_raw", "debordement_RP100_raw"]}, col, None, None, damage)
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
 
-    def test_damage_panel_requires_raw(self):
-        import pandas as pd
-        res = pd.DataFrame({"valeur": [1.0], "debordement_RP100_reclass": [2.0]})
-        app, st = self.load({})
+    def test_damage_panel_does_not_rerun_depths_when_available(self):
+        res = self._depth_res()
+        df = res[["valeur", "name"]].copy()
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
         st.session_state["fh_dmg_open"] = True
-        self.assertIsNone(app._fh_damage_panel(res, [100], ["reclass"], "x.csv"))
-        self.assertTrue([c for c in st.calls if c[0] == "warning" and "raw" in c[1][0]])
+        st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], ["raw"])
+        calls = []
+        stored = app._fh_damage_panel(df, "pts.csv", [10, 100], ["raw"], lambda k: calls.append(k))
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(stored)
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
