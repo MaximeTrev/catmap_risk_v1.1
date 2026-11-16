@@ -395,7 +395,7 @@ class TestAppSmoke(unittest.TestCase):
         import pandas as pd
         res = self._depth_res()
         df = res[["valeur", "name"]].copy()
-        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe", "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
         st.session_state["fh_dmg_open"] = True
         calls = []
 
@@ -420,13 +420,45 @@ class TestAppSmoke(unittest.TestCase):
     def test_damage_panel_does_not_rerun_depths_when_available(self):
         res = self._depth_res()
         df = res[["valeur", "name"]].copy()
-        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe"})
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe", "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
         st.session_state["fh_dmg_open"] = True
         st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], ["raw"])
         calls = []
         stored = app._fh_damage_panel(df, "pts.csv", [10, 100], ["raw"], lambda k: calls.append(k))
         self.assertEqual(calls, [])
         self.assertIsNotNone(stored)
+
+    def test_damage_panel_per_point_continent_and_jrc_values_with_hazus(self):
+        import pandas as pd
+        curves = ("continent,classe,hauteur_m,taux\nEurope,industrial,0,0\nEurope,industrial,2,0.5\n"
+                  "Asia,industrial,0,0\nAsia,industrial,2,0.2\n").encode()
+        values = b"pays,classe,eur_m2\nFR,industrial,100\nVN,industrial,50\n"
+
+        class Up:
+            def __init__(self, name, data): self.name, self._d = name, data
+            def getvalue(self): return self._d
+        res = pd.DataFrame({"name": ["fr", "vn", "xx"], "surface_m2": [10.0, 10.0, 10.0], "pays_iso2": ["FR", "VN", "ZZ"],
+                            "lat_f": [45.0, 10.0, 0.0], "lon_f": [4.0, 106.0, 0.0],
+                            "debordement_RP100_raw": [2.0, 2.0, 2.0]})
+        df = res[["name", "surface_m2", "pays_iso2"]].copy()
+        script = {"fh_jrc_up": [Up("jrc_c.csv", curves), Up("jrc_v.csv", values)], "button:Calculer les dommages": True,
+                  "fh_dmg_cls": "industrial", "fh_dmg_ctrycol": "pays_iso2", "fh_dmg_cont": "Europe", "fh_dmg_areacol": "surface_m2"}
+        app, st = self.load(script)
+        st.session_state["fh_dmg_open"] = True
+        st.session_state["fh_result"] = ("p.csv", len(df), res, {}, [100], ["raw"])
+        stored = app._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
+        out = stored[2]
+        self.assertEqual(list(out["dommage_continent_courbe"]), ["Europe", "Asia", "Europe"])      # Vietnam → Asie ; ZZ inconnu → défaut
+        self.assertEqual(list(out["dommage_RP100_ratio"].round(3)), [0.5, 0.2, 0.5])
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        # valeurs JRC du pays (mode par défaut) avec l'approche Hazus
+        from catmap import damage as dmg
+        script["fh_dmg_method"] = "FEMA Hazus – fonctions riverines (États-Unis)"
+        hz = dmg.parse_hazus(__import__("tests.test_damage", fromlist=["x"]).hazus_csv())
+        app2, st2 = self.load(script)
+        st2.session_state.update({"fh_dmg_open": True, "fh_hz": hz, "fh_result": ("p.csv", len(df), res, {}, [100], ["raw"])})
+        stored2 = app2._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
+        self.assertEqual(list(stored2[2]["dommage_valeur_exposee_eur"].round(1))[:2], [1000.0, 500.0])   # 10 m² × 100 / × 50 €/m²
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
