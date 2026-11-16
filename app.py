@@ -2837,7 +2837,7 @@ _DMG_VALUE_MODES = {
 
 
 def _fh_damage_hazus_ui():
-    """Charge les fonctions Hazus (dossier data/damage, téléchargement Zenodo à la demande, ou fichier téléversé)."""
+    """Charge les fonctions Hazus (dossier data/flood, téléchargement Zenodo à la demande, ou fichier téléversé)."""
     hz = st.session_state.get("fh_hz")
     if hz is None:
         local = dmg.local_files(dmg.HAZUS_FILES)
@@ -2880,7 +2880,7 @@ def _fh_damage_jrc_ui():
     if loc:
         parts.append(loc)
     ups = st.file_uploader("Courbes JRC (Huizinga et al. 2017) : fichier Excel officiel ou CSV au format simple "
-                           "(facultatif si déjà dans data/damage/jrc*)", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="fh_jrc_up")
+                           "(facultatif si déjà dans data/flood/)", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="fh_jrc_up")
     for u in ups or []:
         try:
             parts.append(_dmg_parse_jrc(u.getvalue(), u.name))
@@ -2897,16 +2897,15 @@ def _fh_damage_jrc_ui():
     return jrc
 
 
-def _fh_damage_panel(res, used_rps, used_kinds, name):
-    """Bloc « Estimer les dommages » : choix de l'approche, paramètres, calcul. Renvoie le résultat mémorisé ou ``None``."""
-    base_cols = [c for c in res.columns if not c.startswith(("debordement_", "dommage_")) and c not in ("lat_f", "lon_f")]
+def _fh_damage_panel(df, name, rps, kinds, ensure):
+    """Bloc « Estimer les dommages » : choix de l'approche, paramètres, calcul. Si les hauteurs d'eau (raw) des scénarios choisis ne sont
+    pas encore calculées, ``ensure(kinds)`` les estime d'abord. Renvoie le résultat mémorisé ou ``None``."""
+    base_cols = [c for c in df.columns if not c.startswith(("debordement_", "dommage_")) and c not in ("lat_f", "lon_f")]
     if st.session_state.get("fh_dmg_open"):
         with st.container(border=True):
-            st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario.")
-            if "raw" not in used_kinds:
-                st.warning("Les dommages se calculent sur la hauteur d'eau brute (raw) : relancez « Estimer la hauteur d'eau » avec le type "
-                           "« raw » ou « les deux ».")
-            else:
+            st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario. "
+                        "Les hauteurs d'eau (raw) des scénarios choisis sont estimées automatiquement si elles ne le sont pas déjà.")
+            if True:
                 method = st.radio("Approche", ["JRC – courbes mondiales par continent (Huizinga et al. 2017)",
                                                "FEMA Hazus – fonctions riverines (États-Unis)"], key="fh_dmg_method")
                 is_jrc = method.startswith("JRC")
@@ -2961,6 +2960,11 @@ def _fh_damage_panel(res, used_rps, used_kinds, name):
                                               "0 = plancher au niveau du terrain.")
                 ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
                 if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
+                    prev = st.session_state.get("fh_result")
+                    if not prev or prev[0] != name or prev[1] != len(df) or "raw" not in prev[5] or not set(rps) <= set(prev[4]):
+                        ensure(sorted(set(kinds) | {"raw"}))
+                    res = st.session_state["fh_result"][2]
+                    used_rps = [r for r in rps]
                     classes = dmg.asset_class_series(res, type_col, default_cls)
                     needed = sorted(classes.dropna().unique())
                     curves, problems = {}, []
@@ -2985,7 +2989,7 @@ def _fh_damage_panel(res, used_rps, used_kinds, name):
                     except dmg.DamageError as e:
                         st.error(str(e))
     stored = st.session_state.get("fh_dmg_result")
-    if not stored or stored[0] != name or stored[1] != len(res):
+    if not stored or stored[0] != name or stored[1] != len(df):
         return None
     _, _, out, summ, curves = stored
     cols = st.columns(min(4, 1 + len(summ["pertes_totales"])))
@@ -3051,20 +3055,22 @@ def _exposition_section():
     go = b1.button("Estimer la hauteur d'eau", type="primary", key="fh_go")
     if b2.button("Estimer les dommages", type="primary", key="fh_dmg_go"):
         st.session_state["fh_dmg_open"] = True
-    if go:
+    def run_depths(kinds_to_run):
         bar = st.progress(0.0)
         with st.spinner("Téléchargement et lecture des tuiles…"):
-            res, summ = fhz.estimate_depths(df, lat_c, lon_c, rps, kinds, catalog,
-                                            on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+            res_, summ_ = fhz.estimate_depths(df, lat_c, lon_c, rps, kinds_to_run, catalog,
+                                              on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
         bar.empty()
-        res["lat_f"] = pd.to_numeric(res[lat_c], errors="coerce")
-        res["lon_f"] = pd.to_numeric(res[lon_c], errors="coerce")
-        st.session_state["fh_result"] = (name, len(df), res, summ, list(rps), list(kinds))
+        res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
+        res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
+        st.session_state["fh_result"] = (name, len(df), res_, summ_, list(rps), list(kinds_to_run))
         st.session_state.pop("fh_dmg_result", None)               # les dommages dépendent des hauteurs : à recalculer
+
+    if go:
+        run_depths(kinds)
+    dmg_stored = _fh_damage_panel(df, name, rps, kinds, run_depths)
     stored = st.session_state.get("fh_result")
     if not stored or stored[0] != name or stored[1] != len(df):
-        if st.session_state.get("fh_dmg_open"):
-            st.warning("Calculez d'abord les hauteurs d'eau (bouton « Estimer la hauteur d'eau ») : les dommages en sont déduits.")
         return
     _, _, res, summ, used_rps, used_kinds = stored
     m = st.columns(4)
@@ -3076,7 +3082,6 @@ def _exposition_section():
         st.warning(f"{k} : {v[0]}")
     cols_by_kind = {k: [fhz.column_name(r, k) for r in used_rps] for k in used_kinds}
     value_cols = [c for cs in cols_by_kind.values() for c in cs]
-    dmg_stored = _fh_damage_panel(res, used_rps, used_kinds, name)
     damage = None
     color_opts = list(value_cols)
     if dmg_stored is not None:
