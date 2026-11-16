@@ -171,3 +171,18 @@ class TestEstimate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLocalFiles(unittest.TestCase):
+    def test_find_local_case_insensitive_and_alias(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "HAZ_riverine_ids.csv").write_text("DmgFnId\n1\n")
+            (Path(d) / "JRC_global_flood_depth-damage_functions__30102017.xlsx").write_bytes(b"x")
+            with mock.patch.object(dm, "DATA_DIRS", (Path(d),)), mock.patch.object(dm, "CACHE_DIR", Path(d) / "none"):
+                self.assertEqual(dm.find_local("riverine_ids.csv").name, "HAZ_riverine_ids.csv")
+                self.assertIsNone(dm.find_local("haz_fl_dept.csv"))
+                with self.assertRaises(dm.DamageError):                    # fichier illisible : erreur claire, pas de plantage muet
+                    dm.load_jrc_local()
