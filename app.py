@@ -42,6 +42,7 @@ from catmap import websearch as ws
 from catmap import activity as act
 from catmap import georisques as gr
 from catmap import floodhazard as fhz
+from catmap import damage as dmg
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -2742,6 +2743,10 @@ def _fh_popup(row, cols, kinds_of):
             txt = "n/d" if v is None or pd.isna(v) else f"{float(v):.2f} m"
         elif k == "reclass":
             txt = "n/d" if v is None or pd.isna(v) else f"classe {int(v)} ({fhz.CLASS_LABELS.get(int(v), '')})"
+        elif k == "ratio":
+            txt = "n/d" if v is None or pd.isna(v) else f"{float(v) * 100:.1f} %"
+        elif k == "eur":
+            txt = "n/d" if v is None or pd.isna(v) else f"{float(v):,.0f} €".replace(",", " ")
         else:
             txt = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
         lines.append(f"{html.escape(c)} : <b>{html.escape(txt)}</b>")
@@ -2755,15 +2760,20 @@ def _fh_preview(path: str, kind: str, size: int):
     return img, bounds
 
 
-def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None):
+def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None, damage=None):
     import folium
     pts = res.dropna(subset=["lat_f", "lon_f"])
     center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
     m = _ev_base_map(center, 6)
     shown = pts.head(3000)
     kinds_of = {c: k for k, cs in cols_by_kind.items() for c in cs}
-    allc = [c for cs in cols_by_kind.values() for c in cs] + [c for c in ("debordement_tuile", "debordement_statut") if c in res.columns]
+    dmg_cols = list((damage or {}).get("kinds", {}))
+    kinds_of.update((damage or {}).get("kinds", {}))
+    allc = ([c for cs in cols_by_kind.values() for c in cs] + [c for c in ("debordement_tuile", "debordement_statut") if c in res.columns]
+            + [c for c in ("dommage_classe", "dommage_valeur_exposee_eur") if c in res.columns] + [c for c in dmg_cols if c in res.columns])
     kind = kinds_of.get(color_col, "raw")
+    is_dmg = kind in ("ratio", "eur")
+    edges = (damage or {}).get("edges", {}).get(color_col, [0.1, 0.3, 0.6])
     for img, (south, west, north, east) in overlays or []:      # valeurs de la tuile, mêmes couleurs que la légende
         folium.raster_layers.ImageOverlay(image=img, bounds=[[south, west], [north, east]], opacity=0.75, interactive=False,
                                           zindex=2).add_to(m)
@@ -2775,21 +2785,25 @@ def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None):
     if tiles and not len(shown):
         m.fit_bounds([[min(t["south"] for t in tiles), min(t["west"] for t in tiles)], [max(t["north"] for t in tiles), max(t["east"] for t in tiles)]])
     for _, r in shown.iterrows():
-        cls = fhz.flood_class(r.get(color_col), kind)
-        folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=fhz.CLASS_COLORS[cls],
+        cls = dmg.damage_class(r.get(color_col), edges) if is_dmg else fhz.flood_class(r.get(color_col), kind)
+        folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True,
+                            fill_color=(dmg.DMG_COLORS if is_dmg else fhz.CLASS_COLORS)[cls],
                             fill_opacity=0.9, tooltip=str(r.get("name") or ""),
                             popup=folium.Popup(_fh_popup(r, allc, kinds_of), max_width=420)).add_to(m)
     if tiles:
         m.fit_bounds([[min(t["south"] for t in tiles), min(t["west"] for t in tiles)], [max(t["north"] for t in tiles), max(t["east"] for t in tiles)]])
     elif len(shown) > 1:
         m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
-    legend = "".join(f'<div><span style="background:{fhz.CLASS_COLORS[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
-                     f'margin-right:6px"></span>{lab}</div>' for k, lab in fhz.CLASS_LABELS.items())
-    legend += (f'<div><span style="background:{fhz.CLASS_COLORS[None]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
-               'margin-right:6px"></span>Hors tuile / erreur</div>')
+    pal = dmg.DMG_COLORS if is_dmg else fhz.CLASS_COLORS
+    title = "Dommages" if is_dmg else "Hauteur d'eau"
+    labels = dmg.legend_labels(edges, kind) if is_dmg else fhz.CLASS_LABELS
+    legend = "".join(f'<div><span style="background:{pal[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
+                     f'margin-right:6px"></span>{lab}</div>' for k, lab in labels.items())
+    legend += (f'<div><span style="background:{pal[None]};display:inline-block;width:12px;height:12px;border:1px solid #444;'
+               f'margin-right:6px"></span>{"Pas de donnée" if is_dmg else "Hors tuile / erreur"}</div>')
     m.get_root().html.add_child(folium.Element(
         f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;background:white;color:#222;padding:8px 10px;border:1px solid #888;'
-        f'border-radius:4px;font-size:12px"><b>Hauteur d\'eau ({html_escape(color_col)})</b>{legend}'
+        f'border-radius:4px;font-size:12px"><b>{html_escape(title)} ({html_escape(color_col)})</b>{legend}'
         + ('<div style="margin-top:4px;color:#555">Raster : zones sans inondation transparentes</div>' if overlays else "") + '</div>'))
     if len(pts) > len(shown):
         st.caption(f"Carte limitée aux {len(shown)} premiers points sur {len(pts)} (le tableau et le CSV contiennent tout).")
@@ -2799,6 +2813,198 @@ def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None):
 def html_escape(x):
     import html
     return html.escape(str(x))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _dmg_jrc_local():
+    try:
+        return dmg.load_jrc_local(), ""
+    except dmg.DamageError as e:
+        return None, str(e)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _dmg_parse_jrc(data: bytes, filename: str):
+    return dmg.parse_jrc(data, filename)
+
+
+_DMG_VALUE_MODES = {
+    "col": "Valeur de chaque point : colonne du CSV (en €)",
+    "area": "Surface (colonne, m²) × valeur de remplacement saisie (€/m²)",
+    "const": "Même valeur exposée pour tous les points (€)",
+    "jrc_area": "Surface (colonne, m²) × valeur de remplacement JRC du pays (colonne pays)",
+}
+
+
+def _fh_damage_hazus_ui():
+    """Charge les fonctions Hazus (dossier data/damage, téléchargement Zenodo à la demande, ou fichier téléversé)."""
+    hz = st.session_state.get("fh_hz")
+    if hz is None:
+        local = dmg.local_files(dmg.HAZUS_FILES)
+        if "haz_fl_dept.csv" in local:
+            try:
+                hz = dmg.parse_hazus(local["haz_fl_dept.csv"], local.get("riverine_ids.csv"), local.get("haz_fl_occ.csv"))
+                st.session_state["fh_hz"] = hz
+            except dmg.DamageError as e:
+                st.error(str(e))
+    if hz is None:
+        c1, c2 = st.columns([1, 2])
+        if c1.button("Télécharger les fonctions Hazus (Zenodo)", key="fh_hz_dl"):
+            with st.spinner("Téléchargement depuis Zenodo…"):
+                try:
+                    got = dmg.fetch_hazus()
+                    st.session_state["fh_hz"] = dmg.parse_hazus(got["haz_fl_dept.csv"], got.get("riverine_ids.csv"), got.get("haz_fl_occ.csv"))
+                    st.rerun()
+                except dmg.DamageError as e:
+                    st.error(str(e))
+        ups = c2.file_uploader("… ou téléversez haz_fl_dept.csv (facultatifs : riverine_ids.csv, haz_fl_occ.csv)", type=["csv"],
+                               accept_multiple_files=True, key="fh_hz_up")
+        if ups:
+            by = {u.name.lower(): u.getvalue() for u in ups}
+            if "haz_fl_dept.csv" not in by:
+                st.warning("Le fichier haz_fl_dept.csv est indispensable.")
+            else:
+                try:
+                    st.session_state["fh_hz"] = dmg.parse_hazus(by["haz_fl_dept.csv"], by.get("riverine_ids.csv"), by.get("haz_fl_occ.csv"))
+                    st.rerun()
+                except dmg.DamageError as e:
+                    st.error(str(e))
+    return st.session_state.get("fh_hz")
+
+
+def _fh_damage_jrc_ui():
+    parts = []
+    loc, err = _dmg_jrc_local()
+    if err:
+        st.error(err)
+    if loc:
+        parts.append(loc)
+    ups = st.file_uploader("Courbes JRC (Huizinga et al. 2017) : fichier Excel officiel ou CSV au format simple "
+                           "(facultatif si déjà dans data/damage/jrc*)", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="fh_jrc_up")
+    for u in ups or []:
+        try:
+            parts.append(_dmg_parse_jrc(u.getvalue(), u.name))
+        except dmg.DamageError as e:
+            st.error(str(e))
+    jrc = dmg.merge_jrc(parts) if parts else None
+    if jrc is None:
+        st.caption("Aucune courbe JRC chargée. " + dmg.JRC_TEMPLATE)
+    else:
+        for n in jrc["notes"][:4]:
+            st.warning(n)
+        if jrc["curves"]:
+            st.caption(f"{len(jrc['curves'])} courbe(s) lue(s) ; {len(jrc['maxdmg'])} valeur(s) maximale(s) par pays/classe.")
+    return jrc
+
+
+def _fh_damage_panel(res, used_rps, used_kinds, name):
+    """Bloc « Estimer les dommages » : choix de l'approche, paramètres, calcul. Renvoie le résultat mémorisé ou ``None``."""
+    base_cols = [c for c in res.columns if not c.startswith(("debordement_", "dommage_")) and c not in ("lat_f", "lon_f")]
+    if st.session_state.get("fh_dmg_open"):
+        with st.container(border=True):
+            st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario.")
+            if "raw" not in used_kinds:
+                st.warning("Les dommages se calculent sur la hauteur d'eau brute (raw) : relancez « Estimer la hauteur d'eau » avec le type "
+                           "« raw » ou « les deux ».")
+            else:
+                method = st.radio("Approche", ["JRC – courbes mondiales par continent (Huizinga et al. 2017)",
+                                               "FEMA Hazus – fonctions riverines (États-Unis)"], key="fh_dmg_method")
+                is_jrc = method.startswith("JRC")
+                jrc = hz = None
+                if is_jrc:
+                    jrc = _fh_damage_jrc_ui()
+                else:
+                    hz = _fh_damage_hazus_ui()
+                c1, c2 = st.columns(2)
+                cls_main = [k for k in dmg.CLASSES if k in ("industrial", "commercial", "residential")] if not is_jrc else list(dmg.CLASSES)
+                default_cls = c1.selectbox("Type d'actif par défaut", cls_main, key="fh_dmg_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
+                type_col = c2.selectbox("Colonne décrivant le type d'actif (facultatif)", ["(aucune)"] + base_cols, key="fh_dmg_typecol",
+                                        help="Libellés reconnus : industriel / usine, commercial / magasin / bureau, résidentiel / logement… "
+                                             "Les autres lignes reçoivent le type par défaut.")
+                type_col = None if type_col == "(aucune)" else type_col
+                modes = [m for m in _DMG_VALUE_MODES if m != "jrc_area" or (is_jrc and jrc and jrc["maxdmg"])]
+                mode = st.radio("Valeur exposée", modes, key="fh_dmg_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
+                v1, v2 = st.columns(2)
+                value_col = area_col = country_col = None
+                unit_value = const = 0.0
+                if mode == "col":
+                    value_col = v1.selectbox("Colonne de valeur (€)", base_cols, key="fh_dmg_valcol")
+                elif mode == "const":
+                    const = v1.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="fh_dmg_const")
+                else:
+                    area_col = v1.selectbox("Colonne de surface (m²)", base_cols, key="fh_dmg_areacol")
+                    if mode == "area":
+                        unit_value = v2.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="fh_dmg_unit")
+                    else:
+                        country_col = v2.selectbox("Colonne pays (nom en anglais, comme dans le fichier JRC)", base_cols, key="fh_dmg_ctrycol")
+                continent = occ = None
+                floor_h = 0.0
+                if is_jrc:
+                    continent = st.selectbox("Continent de la courbe (appliqué à tous les points)", sorted(set(dmg.CONTINENTS.values())),
+                                             index=sorted(set(dmg.CONTINENTS.values())).index("Europe"), key="fh_dmg_cont")
+                elif hz is not None:
+                    occs = hz["occupancies"]
+                    occ = {}
+                    cols = st.columns(3)
+                    for col, (cls, pref) in zip(cols, (("industrial", "IND"), ("commercial", "COM"), ("residential", "RES"))):
+                        opts = [o for o in occs if o.startswith(pref)]
+                        if opts:
+                            occ[cls] = col.selectbox(f"Occupation Hazus – {dmg.CLASS_LABELS[cls].lower()}", opts, key=f"fh_hz_occ_{cls}",
+                                                     format_func=lambda o: f"{o} – {occs[o]}" if occs.get(o) else o)
+                    floor_h = st.number_input("Hauteur du plancher au-dessus du terrain (m)", min_value=0.0, max_value=3.0, value=0.0, step=0.1,
+                                              key="fh_hz_floor", help="Les fonctions Hazus sont relatives au plancher du rez-de-chaussée ; "
+                                              "0 = plancher au niveau du terrain.")
+                ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
+                if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
+                    classes = dmg.asset_class_series(res, type_col, default_cls)
+                    needed = sorted(classes.dropna().unique())
+                    curves, problems = {}, []
+                    for cls in needed:
+                        try:
+                            if is_jrc:
+                                curves[cls] = dmg.jrc_curve(jrc, continent, cls)
+                            elif occ.get(cls):
+                                curves[cls] = dmg.hazus_curve(hz, occ[cls], floor_h)
+                            else:
+                                problems.append(f"Hazus : pas d'occupation pour la classe « {dmg.CLASS_LABELS.get(cls, cls)} ».")
+                        except dmg.DamageError as e:
+                            problems.append(str(e))
+                    try:
+                        values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc)
+                        depth_cols = {r: fhz.column_name(r, "raw") for r in used_rps}
+                        out, summ = dmg.estimate_damages(res, depth_cols, curves, classes, values,
+                                                         ("JRC " + str(continent)) if is_jrc else "FEMA Hazus")
+                        summ["problemes"] = problems
+                        summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                        st.session_state["fh_dmg_result"] = (name, len(res), out, summ, curves)
+                    except dmg.DamageError as e:
+                        st.error(str(e))
+    stored = st.session_state.get("fh_dmg_result")
+    if not stored or stored[0] != name or stored[1] != len(res):
+        return None
+    _, _, out, summ, curves = stored
+    cols = st.columns(min(4, 1 + len(summ["pertes_totales"])))
+    for i, (c, v) in enumerate(list(summ["pertes_totales"].items())[:3]):
+        cols[i].metric(f"Perte totale {c.split('_')[1]}", f"{v:,.0f} €".replace(",", " "))
+    if summ["pam_totale"] is not None:
+        cols[min(3, len(cols) - 1)].metric("Perte annuelle moyenne (approx.)", f"{summ['pam_totale']:,.0f} €".replace(",", " "))
+    for p in summ.get("problemes", []):
+        st.warning(p)
+    if summ["classes_sans_courbe"]:
+        st.warning("Pas de courbe pour : " + ", ".join(summ["classes_sans_courbe"]) + " (pertes laissées vides).")
+    if summ["sans_valeur"]:
+        st.warning(f"{summ['sans_valeur']} point(s) sans valeur exposée exploitable : pas de perte calculée pour eux.")
+    if summ.get("valeur_nulle"):
+        st.warning("La valeur exposée est nulle ou absente pour tous les points : les pertes en € sont vides ou nulles (les taux restent valables).")
+    if summ["pam_bornes"]:
+        st.caption(f"Perte annuelle moyenne : intégrale trapézoïdale entre RP{summ['pam_bornes'][0]} et RP{summ['pam_bornes'][1]} "
+                   "uniquement (pas d'extrapolation hors de cet intervalle) ; ajoutez des scénarios pour la rendre plus complète.")
+    with st.expander("Courbes utilisées"):
+        for cls, cv in curves.items():
+            st.markdown(f"**{dmg.CLASS_LABELS.get(cls, cls)}** : {cv.label}")
+            st.line_chart(cv.as_frame().set_index("hauteur (m)"), height=180)
+    return stored
+
 
 
 def _exposition_section():
@@ -2836,7 +3042,11 @@ def _exposition_section():
     st.caption(f"{len(df)} point(s) lus ; {n_tiles} tuile(s) concernée(s) ; {n_files} fichier(s) à lire, au plus ≈ {max_mb} Mo "
                "à télécharger la première fois (ordres de grandeur issus des tailles observées : jusqu'à 30 Mo en raw, environ 10 fois "
                "moins en reclass). Les points hors de toute tuile restent vides.")
-    if st.button("Estimer la hauteur d'eau", type="primary", key="fh_go"):
+    b1, b2, _sp = st.columns([1, 1, 2])
+    go = b1.button("Estimer la hauteur d'eau", type="primary", key="fh_go")
+    if b2.button("Estimer les dommages", type="primary", key="fh_dmg_go"):
+        st.session_state["fh_dmg_open"] = True
+    if go:
         bar = st.progress(0.0)
         with st.spinner("Téléchargement et lecture des tuiles…"):
             res, summ = fhz.estimate_depths(df, lat_c, lon_c, rps, kinds, catalog,
@@ -2845,8 +3055,11 @@ def _exposition_section():
         res["lat_f"] = pd.to_numeric(res[lat_c], errors="coerce")
         res["lon_f"] = pd.to_numeric(res[lon_c], errors="coerce")
         st.session_state["fh_result"] = (name, len(df), res, summ, list(rps), list(kinds))
+        st.session_state.pop("fh_dmg_result", None)               # les dommages dépendent des hauteurs : à recalculer
     stored = st.session_state.get("fh_result")
     if not stored or stored[0] != name or stored[1] != len(df):
+        if st.session_state.get("fh_dmg_open"):
+            st.warning("Calculez d'abord les hauteurs d'eau (bouton « Estimer la hauteur d'eau ») : les dommages en sont déduits.")
         return
     _, _, res, summ, used_rps, used_kinds = stored
     m = st.columns(4)
@@ -2858,13 +3071,25 @@ def _exposition_section():
         st.warning(f"{k} : {v[0]}")
     cols_by_kind = {k: [fhz.column_name(r, k) for r in used_rps] for k in used_kinds}
     value_cols = [c for cs in cols_by_kind.values() for c in cs]
+    dmg_stored = _fh_damage_panel(res, used_rps, used_kinds, name)
+    damage = None
+    color_opts = list(value_cols)
+    if dmg_stored is not None:
+        dmg_out = dmg_stored[2]
+        res = pd.concat([res, dmg_out], axis=1)
+        kinds_d = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in dmg_out.columns if c.startswith("dommage_RP") or c == "dommage_PAM_eur"}
+        damage = {"kinds": kinds_d, "edges": {c: dmg.class_edges(dmg_out[c], k) for c, k in kinds_d.items()}}
+        color_opts += list(kinds_d)
     c_a, c_b, c_c = st.columns([2, 1, 1])
-    color_col = c_a.selectbox("Colorer la carte selon", value_cols, key="fh_color")
+    color_col = c_a.selectbox("Colorer la carte selon", color_opts, key="fh_color")
+    is_depth_col = color_col in value_cols
     show_tiles = c_b.checkbox("Afficher les tuiles extraites", value=False, key="fh_show_tiles")
-    show_vals = c_c.checkbox("… avec leurs valeurs (raster)", value=False, key="fh_show_vals", disabled=not show_tiles,
+    show_vals = c_c.checkbox("… avec leurs valeurs (raster)", value=False, key="fh_show_vals", disabled=not (show_tiles and is_depth_col),
                              help="Colore chaque pixel de la tuile selon la légende, pour la colonne choisie à gauche.")
     overlays = []
-    if show_tiles and show_vals:
+    if show_tiles and not is_depth_col:
+        st.caption("Le raster des tuiles représente des hauteurs d'eau : choisissez une colonne de hauteur pour l'afficher.")
+    if show_tiles and show_vals and is_depth_col:
         kind_sel = "reclass" if color_col.endswith("_reclass") else "raw"
         ok_tiles = [t for t in summ.get("tuiles_detail", []) if t["statut"] == "ok" or color_col in
                     [k.split("|")[0] for k in summ.get("fichiers_lus", {}) if k.endswith(f"|{t['id']}")]]
@@ -2880,10 +3105,11 @@ def _exposition_section():
                 st.warning(f"Tuile ID{t['id']} : {e}")
         if len(ok_tiles) > 6:
             st.caption(f"Valeurs affichées pour 6 tuiles sur {len(ok_tiles)} (limite d'affichage de la carte).")
-    _fh_map(res, cols_by_kind, color_col, summ.get("tuiles_detail") if show_tiles else None, overlays)
+    _fh_map(res, cols_by_kind, color_col, summ.get("tuiles_detail") if show_tiles else None, overlays, damage)
     out = res.drop(columns=["lat_f", "lon_f"])
     flooded = (out[value_cols].fillna(0).astype(float) > 0).any(axis=1)
-    _cross_table(out, value_cols + ["debordement_tuile", "debordement_statut"], flooded, "fh_tbl", "Seulement les points inondables")
+    dmg_cols_out = [c for c in out.columns if c.startswith("dommage_")]
+    _cross_table(out, value_cols + dmg_cols_out + ["debordement_tuile", "debordement_statut"], flooded, "fh_tbl", "Seulement les points inondables")
     d1, d2 = st.columns([1, 1])
     with d1:
         st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
@@ -2893,7 +3119,7 @@ def _exposition_section():
             n_del, mb_del = fhz.clear_cache()
             # vide aussi le CSV chargé (nouvelle clé de widget) et le résultat affiché
             st.session_state["fh_up_n"] = st.session_state.get("fh_up_n", 0) + 1
-            for k in ("fh_result", "fh_diag", "fh_color", "fh_show_tiles", "fh_show_vals"):
+            for k in ("fh_result", "fh_diag", "fh_color", "fh_show_tiles", "fh_show_vals", "fh_dmg_result", "fh_dmg_open"):
                 st.session_state.pop(k, None)
             st.session_state["fh_cache_msg"] = (f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Le fichier CSV chargé et le résultat "
                                                 "ont aussi été retirés ; les tuiles seront retéléchargées au prochain calcul.")
