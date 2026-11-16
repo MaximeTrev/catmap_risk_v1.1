@@ -186,3 +186,32 @@ class TestLocalFiles(unittest.TestCase):
                 self.assertIsNone(dm.find_local("haz_fl_dept.csv"))
                 with self.assertRaises(dm.DamageError):                    # fichier illisible : erreur claire, pas de plantage muet
                     dm.load_jrc_local()
+
+
+class TestContinents(unittest.TestCase):
+    def test_continent_from_country(self):
+        jrc = {"iso": {"fra": "france", "fr": "france", "vnm": "vietnam", "vn": "vietnam", "viet nam": "vietnam"}}
+        df = pd.DataFrame({"c": ["FR", "fra", "France", "Viet Nam", "VN", "US", "ZZ", None]})
+        s, unknown = dm.continent_series(df, "c", jrc, "Europe")
+        self.assertEqual(list(s), ["Europe", "Europe", "Europe", "Asia", "Asia", "North America", "Europe", "Europe"])
+        self.assertEqual(unknown, 2)                                          # ZZ et vide → défaut
+        s0, u0 = dm.continent_series(df, None, jrc, "Asia")
+        self.assertEqual(set(s0), {"Asia"})
+        self.assertEqual(u0, 0)
+
+    def test_global_fallback_and_per_point_curves(self):
+        jrc = {"curves": {("Europe", "industrial"): ([0, 2], [0, 0.5]), ("Global", "industrial"): ([0, 2], [0, 0.4]),
+                          ("Global", "commercial"): ([0, 2], [0, 0.3])}, "maxdmg": {}}
+        c = dm.jrc_curve_for(jrc, "Oceania", "industrial")
+        self.assertEqual(c.continent, "Global")
+        self.assertIn("repli", c.label)
+        self.assertEqual(dm.jrc_curve_for(jrc, "Europe", "industrial").continent, "Europe")
+        with self.assertRaises(dm.DamageError):
+            dm.jrc_curve_for(jrc, "Europe", "residential")
+        df = pd.DataFrame({"debordement_RP100_raw": [2.0, 2.0]})
+        cont = pd.Series(["Europe", "Oceania"])
+        cls = pd.Series(["industrial", "industrial"])
+        curves = {"Europe|industrial": dm.jrc_curve_for(jrc, "Europe", "industrial"), "Oceania|industrial": dm.jrc_curve_for(jrc, "Oceania", "industrial")}
+        out, s = dm.estimate_damages(df, {100: "debordement_RP100_raw"}, curves, cls, pd.Series([100.0, 100.0]), "JRC", cont)
+        self.assertEqual(list(out["dommage_RP100_eur"]), [50.0, 40.0])
+        self.assertEqual(s["repli_global"], 1)
