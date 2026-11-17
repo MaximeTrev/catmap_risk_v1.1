@@ -59,6 +59,7 @@ def make_fakes(script):
     if not hasattr(st, "number_input"):
         st.number_input = lambda label, *a, **k: k.get("value", 0.0)
     st.line_chart = rec("line_chart")
+    st.progress = lambda *a, **k: mock.MagicMock()
     st.selectbox = lambda label, options, **k: script.get(k.get("key"), options[0])
     st.button = lambda label, **k: script.get("button:" + label, False) and not k.get("disabled")
     st.download_button = lambda *a, **k: (st.calls.append(("download", a[0], a[1].__len__() if hasattr(a[1], "__len__") else 0)), False)[1]
@@ -406,14 +407,14 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(calls, [["raw", "reclass"]])                     # raw ajouté d'office
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         out = stored[2]
-        self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[0], 200.0)
-        self.assertAlmostEqual(out["dommage_RP100_eur"].iloc[1], 1200.0)
-        self.assertTrue(out["dommage_RP100_eur"].iloc[2] != out["dommage_RP100_eur"].iloc[2])      # NaN : pas de perte inventée
+        self.assertAlmostEqual(out["dommage_debordement_RP100_eur"].iloc[0], 200.0)
+        self.assertAlmostEqual(out["dommage_debordement_RP100_eur"].iloc[1], 1200.0)
+        self.assertTrue(out["dommage_debordement_RP100_eur"].iloc[2] != out["dommage_debordement_RP100_eur"].iloc[2])      # NaN : pas de perte inventée
         from catmap import damage as dmg
         full = pd.concat([res, out], axis=1)
-        kinds = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in out.columns if c.startswith("dommage_RP") or c == "dommage_PAM_eur"}
+        kinds = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in out.columns if c.startswith("dommage_debordement_RP") or c == "dommage_debordement_PAM_eur"}
         damage = {"kinds": kinds, "edges": {c: dmg.class_edges(out[c], k) for c, k in kinds.items()}}
-        for col in ("dommage_RP100_eur", "dommage_RP100_ratio", "dommage_PAM_eur", "debordement_RP100_raw"):
+        for col in ("dommage_debordement_RP100_eur", "dommage_debordement_RP100_ratio", "dommage_debordement_PAM_eur", "debordement_RP100_raw"):
             app._fh_map(full, {"raw": ["debordement_RP10_raw", "debordement_RP100_raw"]}, col, None, None, damage)
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
 
@@ -449,7 +450,7 @@ class TestAppSmoke(unittest.TestCase):
         stored = app._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
         out = stored[2]
         self.assertEqual(list(out["dommage_continent_courbe"]), ["Europe", "Asia", "Europe"])      # Vietnam → Asie ; ZZ inconnu → défaut
-        self.assertEqual(list(out["dommage_RP100_ratio"].round(3)), [0.5, 0.2, 0.5])
+        self.assertEqual(list(out["dommage_debordement_RP100_ratio"].round(3)), [0.5, 0.2, 0.5])
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         # valeurs JRC du pays (mode par défaut) avec l'approche Hazus
         from catmap import damage as dmg
@@ -459,6 +460,44 @@ class TestAppSmoke(unittest.TestCase):
         st2.session_state.update({"fh_dmg_open": True, "fh_hz": hz, "fh_result": ("p.csv", len(df), res, {}, [100], ["raw"])})
         stored2 = app2._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
         self.assertEqual(list(stored2[2]["dommage_valeur_exposee_eur"].round(1))[:2], [1000.0, 500.0])   # 10 m² × 100 / × 50 €/m²
+
+    def test_damage_panel_submersion_uses_prefixed_columns(self):
+        import pandas as pd
+        res = pd.DataFrame({"valeur": [1000.0, 2000.0], "name": ["a", "b"], "lat_f": [45.0, 45.1], "lon_f": [4.0, 4.1],
+                            "submersion_RP100_raw": [1.0, 3.0], "submersion_RP10_raw": [0.0, 1.0]})
+        df = res[["valeur", "name"]].copy()
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe",
+                             "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
+        st.session_state["cs_dmg_open"] = True
+        st.session_state["cs_result"] = ("p.csv", 2, res, {}, [10, 100], ["raw"])
+        stored = app._fh_damage_panel(df, "p.csv", [10, 100], ["raw"], lambda k: None, app._HZ_COAST)
+        out = stored[2]
+        self.assertAlmostEqual(out["dommage_submersion_RP100_eur"].iloc[0], 200.0)
+        self.assertIn("dommage_submersion_PAM_eur", out.columns)
+        self.assertNotIn("dommage_debordement_RP100_eur", out.columns)
+        self.assertIn("cs_dmg_result", st.session_state)
+        self.assertNotIn("fh_dmg_result", st.session_state)
+
+    def test_submersion_section_end_to_end_with_fake_hazard(self):
+        import pandas as pd
+        from catmap import coastalhazard as ch
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return b"name;lat;long\nA;43,3;5,4\nB;48,8;2,3\n"
+
+        def fake(df, lat_c, lon_c, rps, scen, sub, year, **k):
+            out = df.copy().reset_index(drop=True)
+            for r in rps:
+                out[ch.column_name(r)] = [1.5, 0.0]
+            out["submersion_statut"] = "ok"
+            return out, {"points": 2, "invalides": 0, "fichiers": len(rps), "fichiers_lus": {}, "problemes": {}}
+        app, st = self.load({"expo_hazard": "Submersion marine", "cs_csv_0": Up(), "button:Estimer la hauteur d'eau": True})
+        with mock.patch.object(ch, "estimate_depths", side_effect=fake):
+            app._exposition_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertIn("cs_result", st.session_state)
+        self.assertTrue([c for c in st.calls if c[0] == "download" and c[1].startswith("Télécharger")])
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
