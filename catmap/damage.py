@@ -520,16 +520,20 @@ def exposed_value(df: pd.DataFrame, mode: str, value_col: Optional[str] = None, 
     raise DamageError(f"Mode de valeur exposée inconnu : {mode}")
 
 
-def column_ratio(rp: int) -> str:
-    return f"dommage_RP{int(rp)}_ratio"
+def column_ratio(rp: int, hazard: Optional[str] = None) -> str:
+    return f"dommage_{hazard}_RP{int(rp)}_ratio" if hazard else f"dommage_RP{int(rp)}_ratio"
 
 
-def column_eur(rp: int) -> str:
-    return f"dommage_RP{int(rp)}_eur"
+def column_eur(rp: int, hazard: Optional[str] = None) -> str:
+    return f"dommage_{hazard}_RP{int(rp)}_eur" if hazard else f"dommage_RP{int(rp)}_eur"
+
+
+def column_pam(hazard: Optional[str] = None) -> str:
+    return f"dommage_{hazard}_PAM_eur" if hazard else "dommage_PAM_eur"
 
 
 def estimate_damages(df: pd.DataFrame, depth_cols: dict, curves_by_class: dict, classes: pd.Series, values: pd.Series,
-                     method_label: str, continents: Optional[pd.Series] = None) -> tuple[pd.DataFrame, dict]:
+                     method_label: str, continents: Optional[pd.Series] = None, hazard: Optional[str] = None) -> tuple[pd.DataFrame, dict]:
     """Calcule taux et pertes par scénario.
 
     ``depth_cols`` : ``{rp: nom de colonne de hauteur (m)}`` ; ``curves_by_class`` : ``{classe: Curve}`` ou, si ``continents`` est
@@ -551,16 +555,16 @@ def estimate_damages(df: pd.DataFrame, depth_cols: dict, curves_by_class: dict, 
             if m.any():
                 r = pd.Series(curve.at(depth[m].to_numpy()), index=depth[m].index)
                 ratio.loc[m] = r.where(depth[m] > 0, 0.0).where(depth[m].notna())
-        out[column_ratio(rp)] = ratio
-        out[column_eur(rp)] = ratio * values
+        out[column_ratio(rp, hazard)] = ratio
+        out[column_eur(rp, hazard)] = ratio * values
     rps = sorted(depth_cols)
     aal = None
     if len(rps) >= 2:
         p = np.array([1.0 / r for r in rps])[::-1]            # probabilités croissantes
-        loss = np.column_stack([out[column_eur(r)].to_numpy(dtype=float) for r in rps][::-1])
+        loss = np.column_stack([out[column_eur(r, hazard)].to_numpy(dtype=float) for r in rps][::-1])
         aal = np.trapezoid(loss, p, axis=1) if hasattr(np, "trapezoid") else np.trapz(loss, p, axis=1)
-        out["dommage_PAM_eur"] = aal
-    total = {column_eur(r): float(out[column_eur(r)].sum(skipna=True)) for r in rps}
+        out[column_pam(hazard)] = aal
+    total = {column_eur(r, hazard): float(out[column_eur(r, hazard)].sum(skipna=True)) for r in rps}
     summ = {"points": len(df), "sans_valeur": int(values.isna().sum()), "sans_hauteur": int(
         pd.concat([pd.to_numeric(df[c], errors="coerce") for c in depth_cols.values()], axis=1).isna().all(axis=1).sum()),
             "classes_sans_courbe": missing, "pertes_totales": total, "pam_totale": None if aal is None else float(np.nansum(aal)),
