@@ -28,7 +28,7 @@ class TestCoastal(unittest.TestCase):
     def test_estimate_values_and_partial_failure(self):
         body = make_tif(Path(self.tmp.name) / "src.tif", arr())
         sess = Sess({ch.BASE_URL + "inuncoast_historical_nosub_hist_rp0100_0.tif": Resp(200, body, {"Content-Length": str(len(body))})})
-        df = pd.DataFrame({"lat": [58.95, 58.0, "x"], "lon": [22.05, 22.05, 1]})
+        df = pd.DataFrame({"lat": [58.95, 58.0, "x", 10.0], "lon": [22.05, 22.05, 1, 22.05]})
         out, s = ch.estimate_depths(df, "lat", "lon", [100, 500], "historical", "nosub", "hist", session=sess,
                                     cache_dir=Path(self.tmp.name) / "c")
         self.assertEqual(out["submersion_RP100_raw"].iloc[0], 2.5)
@@ -38,6 +38,10 @@ class TestCoastal(unittest.TestCase):
         self.assertEqual(out["submersion_statut"].iloc[2], "coordonnées invalides")
         self.assertTrue(out["submersion_statut"].iloc[0].startswith("partiel"))
         self.assertEqual(s["invalides"], 1)
+        self.assertTrue(pd.isna(out["submersion_RP100_raw"].iloc[3]))          # hors de l'emprise du raster : vide, pas 0
+        self.assertTrue(out["submersion_statut"].iloc[3].startswith("hors du raster"))
+        self.assertEqual(s["hors_raster"], 1)
+        self.assertEqual(s["points_positifs"]["RP100"], 1)
 
     def test_future_scenario_tries_alternative_names(self):
         body = make_tif(Path(self.tmp.name) / "src.tif", arr())
