@@ -68,6 +68,18 @@ def resolve_url(scenario: str, sub: str, year: str, rp: int, session=None) -> st
     raise TileError("fichier introuvable : " + " ; ".join(tried))
 
 
+def _extent(path: Path) -> Optional[tuple]:
+    """Emprise du raster (ouest, sud, est, nord) en degrés, ou ``None`` si illisible."""
+    try:
+        import tifffile
+        with tifffile.TiffFile(str(path)) as tf:
+            page = tf.pages[0]
+            x0, y0, sx, sy = fhz._georef(page)
+            return (x0, y0 - sy * int(page.imagelength), x0 + sx * int(page.imagewidth), y0)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int], scenario: str = "historical", sub: str = "nosub",
                     year: str = "hist", session=None, cache_dir: Path = DEFAULT_CACHE, max_mb: float = 900.0,
                     on_progress: Optional[Callable[[int, int], None]] = None) -> tuple[pd.DataFrame, dict]:
@@ -81,6 +93,8 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
     cols = {column_name(rp): [None] * len(out) for rp in rps}
     problems: dict[str, str] = {}
     files: dict[str, str] = {}
+    outside = np.zeros(len(out), bool)
+    positives: dict[str, int] = {}
     for done, rp in enumerate(rps, start=1):
         name = column_name(rp)
         try:
@@ -93,8 +107,15 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
                 Path(path).unlink(missing_ok=True)
                 path = fhz.download_tile(url, cache_dir, session, max_mb=max_mb)
                 vals = fhz.sample_geotiff(path, lon[idx], lat[idx])
+            ext = _extent(path)
+            n_pos = 0
             for i, v in zip(idx, vals):
+                if ext is not None and not (ext[0] <= lon[i] <= ext[2] and ext[1] <= lat[i] <= ext[3]):
+                    outside[i] = True                           # hors de l'image : on ne met pas 0, la valeur reste vide
+                    continue
                 cols[name][i] = 0.0 if v is None or not math.isfinite(v) or v < 0 else round(float(v), 3)
+                n_pos += cols[name][i] > 0
+            positives[f"RP{rp}"] = int(n_pos)
         except TileError as e:
             problems[f"RP{rp}"] = str(e)
         if on_progress:
@@ -105,12 +126,15 @@ def estimate_depths(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int]
     for i in range(len(out)):
         if not valid[i]:
             status.append("coordonnées invalides")
+        elif outside[i]:
+            status.append("hors du raster (hors de l'emprise de la carte)")
         elif problems and any(v is None for v in (cols[c][i] for c in cols)):
             status.append("partiel : " + " ; ".join(f"{k} {v}"[:120] for k, v in problems.items()))
         else:
             status.append("ok")
     out[f"{RISK}_statut"] = status
-    summary = {"points": len(out), "invalides": int((~valid).sum()), "fichiers": len(rps), "fichiers_lus": files, "problemes": problems,
+    summary = {"points": len(out), "invalides": int((~valid).sum()), "fichiers": len(rps), "fichiers_lus": files, "problemes": problems, "hors_raster": int(outside.sum()),
+               "points_positifs": positives,
                "scenario": scenario, "sous_scenario": sub, "annee": year}
     return out, summary
 
@@ -135,8 +159,15 @@ def diagnose(scenario: str = "historical", sub: str = "nosub", year: str = "hist
             p = tf.pages[0]
             rows.append({"étape": "format", "résultat": "OK", "détail": f"{p.imagewidth}×{p.imagelength} px, "
                          f"{'tuilé' if p.is_tiled else 'par bandes'}, compression {p.compression.name}, type {p.dtype}"})
-        v = fhz.sample_geotiff(path, [2.35], [48.85])
-        rows.append({"étape": "lecture d'un point", "résultat": "OK", "détail": f"Paris : {v[0]}"})
+        ext = _extent(path)
+        rows.append({"étape": "emprise", "résultat": "OK" if ext else "À CONTRÔLER",
+                     "détail": "illisible" if ext is None else f"lon {ext[0]:.1f} à {ext[2]:.1f}, lat {ext[1]:.1f} à {ext[3]:.1f}"})
+        checks = {"Venise (lagune)": (12.3155, 45.4408), "Rotterdam": (4.48, 51.92), "La Nouvelle-Orléans": (-90.07, 29.95),
+                  "Paris (intérieur des terres)": (2.35, 48.85)}
+        vals = fhz.sample_geotiff(path, [c[0] for c in checks.values()], [c[1] for c in checks.values()])
+        rows.append({"étape": "points de contrôle", "résultat": "OK" if any(v for v in vals) else "À CONTRÔLER",
+                     "détail": " ; ".join(f"{k} : {'aucune valeur' if v is None else v}" for k, v in zip(checks, vals))
+                     + (" (aucune hauteur > 0 sur les côtes testées : lecture à vérifier)" if not any(v for v in vals[:3]) else "")})
     except Exception as e:                                      # noqa: BLE001
         rows.append({"étape": "lecture", "résultat": "ÉCHEC", "détail": f"{type(e).__name__}: {str(e)[:200]}"})
     return rows
