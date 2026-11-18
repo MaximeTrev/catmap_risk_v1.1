@@ -3086,7 +3086,7 @@ def _rp_fmt(r):
 
 
 def _exposition_section():
-    st.subheader("Exposition aux aléas")
+    st.subheader("Débordement et submersion")
     st.markdown("Sélectionnez un ou plusieurs aléas : les points sont chargés une seule fois, les scénarios peuvent être communs ou propres à "
                 "chaque aléa, et l'estimation des dommages utilise les mêmes paramètres d'actif et de valeur pour tous les aléas choisis.")
     sel = st.multiselect("Aléas à analyser", list(_HAZARDS), default=["debordement"], key="ex_hazards", format_func=lambda k: _HAZARDS[k]["label"])
@@ -3363,9 +3363,9 @@ def _wind_section():
 
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Exposition aux risques", "Vent & tempête", "Géorisques"])
+    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Géorisques"])
     with tabs[0]:
-        _safe_tab(_exposition_section, "Exposition aux risques")
+        _safe_tab(_exposition_section, "Débordement et submersion")
     with tabs[1]:
         _safe_tab(_wind_section, "Vent & tempête")
     with tabs[2]:
