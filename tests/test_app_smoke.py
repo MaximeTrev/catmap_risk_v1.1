@@ -485,6 +485,19 @@ class TestAppSmoke(unittest.TestCase):
         self.assertNotIn("dommage_debordement_RP100_eur", per["submersion"][0].columns)
         self.assertIn("ex_dmg_result", st.session_state)
 
+    def test_damage_panel_warns_when_no_point_is_exposed(self):
+        import pandas as pd
+        res = pd.DataFrame({"valeur": [1000.0, 2000.0], "name": ["a", "b"], "lat_f": [45.0, 45.1], "lon_f": [4.0, 4.1],
+                            "submersion_RP100_raw": [0.0, 0.0]})
+        df = res[["valeur", "name"]].copy()
+        app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe",
+                             "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
+        st.session_state["ex_dmg_open"] = True
+        st.session_state["cs_result"] = ("p.csv", 2, res, {}, [100], ["raw"])
+        stored = app._fh_damage_panel(df, "p.csv", [self._hz("submersion", [100], "cs_result")], lambda k: None)
+        self.assertEqual(stored[2]["submersion"][1]["points_exposes"], 0)
+        self.assertTrue([c for c in st.calls if c[0] == "warning" and "aucun point" in c[1][0]], st.calls)
+
     def test_exposition_section_multi_hazard_end_to_end(self):
         import pandas as pd
         from catmap import coastalhazard as ch
@@ -545,6 +558,23 @@ class TestAppSmoke(unittest.TestCase):
         with mock.patch.object(ch, "estimate_depths", side_effect=fake_coast):
             app._exposition_section()
         self.assertEqual(got["rps"], [100, 1000])                                              # RP75 n'existe pas pour la submersion
+
+    def test_wind_tab_reads_catalogue_without_key(self):
+        from catmap import copernicus as cop
+        form = [{"name": "variable", "label": "V", "type": "T", "details": {"values": ["fg10_gust", "t2m"]}}]
+        app, st = self.load({"button:Lire le catalogue Copernicus": True})
+        with mock.patch.object(cop, "fetch_form", return_value=form):
+            app._wind_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertEqual(set(st.session_state["cop_forms"]), {"timeseries", "storms"})
+        self.assertFalse([c for c in st.calls if c[0] == "info"])
+
+    def test_wind_tab_reports_unreachable_catalogue(self):
+        from catmap import copernicus as cop
+        app, st = self.load({"button:Lire le catalogue Copernicus": True})
+        with mock.patch.object(cop, "fetch_form", side_effect=cop.CopernicusError("HTTP 503")):
+            app._wind_section()
+        self.assertTrue([c for c in st.calls if c[0] == "error" and "503" in c[1][0]])
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
