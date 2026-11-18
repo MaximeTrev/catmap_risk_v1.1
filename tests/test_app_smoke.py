@@ -392,21 +392,24 @@ class TestAppSmoke(unittest.TestCase):
             def getvalue(self): return csv
         return Up()
 
+    def _hz(self, name="debordement", rps=(10, 100), result="fh_result"):
+        return {"name": name, "label": name, "rps": list(rps), "col": (lambda r, n=name: f"{n}_RP{r}_raw"), "result": result}
+
     def test_damage_panel_runs_depths_first_then_damages_and_map(self):
         import pandas as pd
         res = self._depth_res()
         df = res[["valeur", "name"]].copy()
         app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe", "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
-        st.session_state["fh_dmg_open"] = True
+        st.session_state["ex_dmg_open"] = True
         calls = []
 
-        def ensure(kinds):                      # simule l'estimation des hauteurs : aucune hauteur en mémoire au départ
-            calls.append(kinds)
-            st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], list(kinds))
-        stored = app._fh_damage_panel(df, "pts.csv", [10, 100], ["reclass"], ensure)
-        self.assertEqual(calls, [["raw", "reclass"]])                     # raw ajouté d'office
+        def ensure(names):                      # simule l'estimation des hauteurs : aucune hauteur en mémoire au départ
+            calls.append(names)
+            st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], ["raw"])
+        stored = app._fh_damage_panel(df, "pts.csv", [self._hz()], ensure)
+        self.assertEqual(calls, [["debordement"]])
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
-        out = stored[2]
+        out = stored[2]["debordement"][0]
         self.assertAlmostEqual(out["dommage_debordement_RP100_eur"].iloc[0], 200.0)
         self.assertAlmostEqual(out["dommage_debordement_RP100_eur"].iloc[1], 1200.0)
         self.assertTrue(out["dommage_debordement_RP100_eur"].iloc[2] != out["dommage_debordement_RP100_eur"].iloc[2])      # NaN : pas de perte inventée
@@ -422,10 +425,10 @@ class TestAppSmoke(unittest.TestCase):
         res = self._depth_res()
         df = res[["valeur", "name"]].copy()
         app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe", "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
-        st.session_state["fh_dmg_open"] = True
+        st.session_state["ex_dmg_open"] = True
         st.session_state["fh_result"] = ("pts.csv", len(df), res, {}, [10, 100], ["raw"])
         calls = []
-        stored = app._fh_damage_panel(df, "pts.csv", [10, 100], ["raw"], lambda k: calls.append(k))
+        stored = app._fh_damage_panel(df, "pts.csv", [self._hz()], lambda k: calls.append(k))
         self.assertEqual(calls, [])
         self.assertIsNotNone(stored)
 
@@ -445,10 +448,10 @@ class TestAppSmoke(unittest.TestCase):
         script = {"fh_jrc_up": [Up("jrc_c.csv", curves), Up("jrc_v.csv", values)], "button:Calculer les dommages": True,
                   "fh_dmg_cls": "industrial", "fh_dmg_ctrycol": "pays_iso2", "fh_dmg_cont": "Europe", "fh_dmg_areacol": "surface_m2"}
         app, st = self.load(script)
-        st.session_state["fh_dmg_open"] = True
+        st.session_state["ex_dmg_open"] = True
         st.session_state["fh_result"] = ("p.csv", len(df), res, {}, [100], ["raw"])
-        stored = app._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
-        out = stored[2]
+        stored = app._fh_damage_panel(df, "p.csv", [self._hz(rps=[100])], lambda k: None)
+        out = stored[2]["debordement"][0]
         self.assertEqual(list(out["dommage_continent_courbe"]), ["Europe", "Asia", "Europe"])      # Vietnam → Asie ; ZZ inconnu → défaut
         self.assertEqual(list(out["dommage_debordement_RP100_ratio"].round(3)), [0.5, 0.2, 0.5])
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
@@ -457,47 +460,91 @@ class TestAppSmoke(unittest.TestCase):
         script["fh_dmg_method"] = "FEMA Hazus – fonctions riverines (États-Unis)"
         hz = dmg.parse_hazus(__import__("tests.test_damage", fromlist=["x"]).hazus_csv())
         app2, st2 = self.load(script)
-        st2.session_state.update({"fh_dmg_open": True, "fh_hz": hz, "fh_result": ("p.csv", len(df), res, {}, [100], ["raw"])})
-        stored2 = app2._fh_damage_panel(df, "p.csv", [100], ["raw"], lambda k: None)
-        self.assertEqual(list(stored2[2]["dommage_valeur_exposee_eur"].round(1))[:2], [1000.0, 500.0])   # 10 m² × 100 / × 50 €/m²
+        st2.session_state.update({"ex_dmg_open": True, "fh_hz": hz, "fh_result": ("p.csv", len(df), res, {}, [100], ["raw"])})
+        stored2 = app2._fh_damage_panel(df, "p.csv", [self._hz(rps=[100])], lambda k: None)
+        self.assertEqual(list(stored2[2]["debordement"][0]["dommage_valeur_exposee_eur"].round(1))[:2], [1000.0, 500.0])   # 10 m² × 100 / × 50 €/m²
 
-    def test_damage_panel_submersion_uses_prefixed_columns(self):
+    def test_damage_panel_two_hazards_share_parameters(self):
         import pandas as pd
-        res = pd.DataFrame({"valeur": [1000.0, 2000.0], "name": ["a", "b"], "lat_f": [45.0, 45.1], "lon_f": [4.0, 4.1],
-                            "submersion_RP100_raw": [1.0, 3.0], "submersion_RP10_raw": [0.0, 1.0]})
-        df = res[["valeur", "name"]].copy()
+        res_f = self._depth_res()
+        res_c = pd.DataFrame({"valeur": [1000.0, 2000.0, 500.0], "name": ["a", "b", "c"], "lat_f": [45.0, 45.1, 45.2], "lon_f": [4.0, 4.1, 4.2],
+                              "submersion_RP10_raw": [2.0, 0.0, 0.0], "submersion_RP100_raw": [3.0, 1.0, 0.0]})
+        df = res_f[["valeur", "name"]].copy()
         app, st = self.load({"fh_jrc_up": [self._jrc_upload()], "button:Calculer les dommages": True, "fh_dmg_cont": "Europe",
                              "fh_dmg_mode": "col", "fh_dmg_valcol": "valeur"})
-        st.session_state["cs_dmg_open"] = True
-        st.session_state["cs_result"] = ("p.csv", 2, res, {}, [10, 100], ["raw"])
-        stored = app._fh_damage_panel(df, "p.csv", [10, 100], ["raw"], lambda k: None, app._HZ_COAST)
-        out = stored[2]
-        self.assertAlmostEqual(out["dommage_submersion_RP100_eur"].iloc[0], 200.0)
-        self.assertIn("dommage_submersion_PAM_eur", out.columns)
-        self.assertNotIn("dommage_debordement_RP100_eur", out.columns)
-        self.assertIn("cs_dmg_result", st.session_state)
-        self.assertNotIn("fh_dmg_result", st.session_state)
+        st.session_state["ex_dmg_open"] = True
+        st.session_state["fh_result"] = ("p.csv", 3, res_f, {}, [10, 100], ["raw"])
+        st.session_state["cs_result"] = ("p.csv", 3, res_c, {}, [10, 100], ["raw"])
+        hz = [self._hz(), self._hz("submersion", result="cs_result")]
+        stored = app._fh_damage_panel(df, "p.csv", hz, lambda k: self.fail("hauteurs déjà calculées"))
+        per = stored[2]
+        self.assertEqual(set(per), {"debordement", "submersion"})
+        self.assertAlmostEqual(per["debordement"][0]["dommage_debordement_RP100_eur"].iloc[0], 200.0)
+        self.assertAlmostEqual(per["submersion"][0]["dommage_submersion_RP100_eur"].iloc[0], 600.0)     # 3 m → 60 % de 1000 €
+        self.assertIn("dommage_submersion_PAM_eur", per["submersion"][0].columns)
+        self.assertNotIn("dommage_debordement_RP100_eur", per["submersion"][0].columns)
+        self.assertIn("ex_dmg_result", st.session_state)
 
-    def test_submersion_section_end_to_end_with_fake_hazard(self):
+    def test_exposition_section_multi_hazard_end_to_end(self):
         import pandas as pd
         from catmap import coastalhazard as ch
+        from catmap import floodhazard as fh
 
         class Up:
             name = "pts.csv"
             def getvalue(self): return b"name;lat;long\nA;43,3;5,4\nB;48,8;2,3\n"
 
-        def fake(df, lat_c, lon_c, rps, scen, sub, year, **k):
+        calls = []
+
+        def fake_coast(df, lat_c, lon_c, rps, scen, sub, year, **k):
+            calls.append(("coast", list(rps)))
             out = df.copy().reset_index(drop=True)
             for r in rps:
                 out[ch.column_name(r)] = [1.5, 0.0]
             out["submersion_statut"] = "ok"
             return out, {"points": 2, "invalides": 0, "fichiers": len(rps), "fichiers_lus": {}, "problemes": {}}
-        app, st = self.load({"expo_hazard": "Submersion marine", "cs_csv_0": Up(), "button:Estimer la hauteur d'eau": True})
-        with mock.patch.object(ch, "estimate_depths", side_effect=fake):
+
+        def fake_flood(df, lat_c, lon_c, rps, kinds, catalog, **k):
+            calls.append(("flood", list(rps), list(kinds)))
+            out = df.copy().reset_index(drop=True)
+            for r in rps:
+                for kd in kinds:
+                    out[fh.column_name(r, kd)] = [0.8, 0.0]
+            out["debordement_tuile"] = ["ID1", None]
+            out["debordement_statut"] = ["ok", "hors tuile (mer ou zone non couverte)"]
+            return out, {"points": 2, "hors_tuile": 1, "tuiles": 1, "fichiers": 1, "problemes": {}, "tuiles_detail": [], "fichiers_lus": {}}
+        app, st = self.load({"ex_hazards": ["debordement", "submersion"], "ex_csv_0": Up(), "button:Estimer la hauteur d'eau": True,
+                             "ex_rps": [50, 100]})
+        with mock.patch.object(ch, "estimate_depths", side_effect=fake_coast), mock.patch.object(fh, "estimate_depths", side_effect=fake_flood), \
+                mock.patch.object(app, "_fh_catalog", return_value=object()), mock.patch.object(fh, "plan", return_value={"tile_ids": [1]}):
             app._exposition_section()
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertEqual(sorted(c[0] for c in calls), ["coast", "flood"])                       # les deux aléas lancés d'un coup
+        self.assertEqual([c for c in calls if c[0] == "flood"][0][1], [50, 100])                # RP commun appliqué aux deux
+        self.assertEqual([c for c in calls if c[0] == "coast"][0][1], [50, 100])
+        self.assertIn("fh_result", st.session_state)
         self.assertIn("cs_result", st.session_state)
         self.assertTrue([c for c in st.calls if c[0] == "download" and c[1].startswith("Télécharger")])
+
+    def test_exposition_section_common_rp_skips_unavailable_for_a_hazard(self):
+        from catmap import coastalhazard as ch
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return b"name;lat;long\nA;43,3;5,4\n"
+        got = {}
+
+        def fake_coast(df, lat_c, lon_c, rps, *a, **k):
+            got["rps"] = list(rps)
+            out = df.copy().reset_index(drop=True)
+            for r in rps:
+                out[ch.column_name(r)] = [1.0]
+            out["submersion_statut"] = "ok"
+            return out, {"points": 1, "invalides": 0, "fichiers": len(rps), "fichiers_lus": {}, "problemes": {}}
+        app, st = self.load({"ex_hazards": ["submersion"], "ex_csv_0": Up(), "button:Estimer la hauteur d'eau": True, "ex_rps": [75, 100, 1000]})
+        with mock.patch.object(ch, "estimate_depths", side_effect=fake_coast):
+            app._exposition_section()
+        self.assertEqual(got["rps"], [100, 1000])                                              # RP75 n'existe pas pour la submersion
 
     def test_secrets_flattened_and_settings_not_stale(self):
         app, st = self.load({"Navigation": "Temps réel"})
