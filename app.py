@@ -44,6 +44,7 @@ from catmap import georisques as gr
 from catmap import floodhazard as fhz
 from catmap import damage as dmg
 from catmap import coastalhazard as coast
+from catmap import copernicus as cop
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -2905,6 +2906,17 @@ def _guess_col(cols, words, default_none=True):
     return 0 if default_none else 1
 
 
+def _kpi(col, label: str, text: str):
+    """Indicateur à valeur entière visible (retour à la ligne si besoin), contrairement à ``st.metric`` qui tronque les grands montants."""
+    col.markdown(f'<div style="line-height:1.25;margin-bottom:.6rem"><div style="font-size:.85rem;opacity:.75">{label}</div>'
+                 f'<div style="font-size:1.5rem;font-weight:600;white-space:normal;overflow-wrap:anywhere">{text}</div></div>',
+                 unsafe_allow_html=True)
+
+
+def _eur(v) -> str:
+    return f"{float(v):,.0f} €".replace(",", "\u202f")
+
+
 def _fh_damage_panel(df, name, hazards, ensure):
     """Bloc « Estimer les dommages » commun à tous les aléas sélectionnés : mêmes paramètres d'actif et de valeur pour chaque aléa.
     ``hazards`` : liste de ``{"name", "label", "rps", "col", "result"}``. Si les hauteurs (raw) d'un aléa ne sont pas calculées,
@@ -3014,6 +3026,8 @@ def _fh_damage_panel(df, name, hazards, ensure):
                         out, summ = dmg.estimate_damages(res_h, depth_cols, curves, classes, values,
                                                          "JRC" if is_jrc else "FEMA Hazus", conts_pt, h["name"])
                         summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                        summ["points_exposes"] = int((res_h[list(depth_cols.values())].apply(pd.to_numeric, errors="coerce").fillna(0) > 0)
+                                                     .any(axis=1).sum())
                         fallback = max(fallback, summ.get("repli_global", 0))
                         per[h["name"]] = (out, summ)
                     if fallback:
@@ -3033,9 +3047,16 @@ def _fh_damage_panel(df, name, hazards, ensure):
         st.markdown(f"**Dommages : {h['label']}**")
         cols = st.columns(4)
         for i, (c, v) in enumerate(list(summ["pertes_totales"].items())[:3]):
-            cols[i].metric(f"Perte totale {__import__('re').search(r'RP' + chr(92) + 'd+', c).group(0)}", f"{v:,.0f} €".replace(",", " "))
+            _kpi(cols[i], f"Perte totale {__import__('re').search(r'RP' + chr(92) + 'd+', c).group(0)}", _eur(v))
         if summ["pam_totale"] is not None:
-            cols[3].metric("Perte annuelle moyenne (approx.)", f"{summ['pam_totale']:,.0f} €".replace(",", " "))
+            _kpi(cols[3], "Perte annuelle moyenne (approx.)", _eur(summ["pam_totale"]))
+        n_exp = summ.get("points_exposes")
+        if n_exp is not None:
+            st.caption(f"{n_exp} point(s) sur {summ['points']} avec une hauteur d'eau > 0 dans au moins un scénario.")
+            if n_exp == 0:
+                st.warning(f"{h['label']} : aucun point n'a de hauteur d'eau > 0, donc les pertes sont nulles. Soit vos points ne sont pas "
+                           "dans une zone exposée à cet aléa (ex. points loin de la côte pour la submersion), soit la lecture de la carte est à "
+                           "contrôler avec le « Diagnostic des sources ».")
         if summ["classes_sans_courbe"]:
             st.warning(f"{h['label']} : pas de courbe pour " + ", ".join(summ["classes_sans_courbe"]) + " (pertes laissées vides).")
     if shown:
@@ -3216,7 +3237,11 @@ def _exposition_section():
                     st.warning(f"{kk} : {v[0]}")
             else:
                 m[1].metric("Coordonnées invalides", summ_k["invalides"])
-                m[2].metric("Scénarios en échec", len(summ_k["problemes"]))
+                m[2].metric("Hors raster", summ_k.get("hors_raster", 0))
+                m[3].metric("Scénarios en échec", len(summ_k["problemes"]))
+                pos = summ_k.get("points_positifs", {})
+                if pos:
+                    st.caption("Points avec hauteur > 0 : " + " ; ".join(f"{k} : {v}" for k, v in pos.items()))
                 for kk, v in list(summ_k["problemes"].items())[:6]:
                     st.warning(f"{kk} : {v}")
     damage = None
@@ -3237,7 +3262,7 @@ def _exposition_section():
         if len(pam_cols) >= 2:
             merged["dommage_total_PAM_eur"] = merged[pam_cols].sum(axis=1, min_count=1)
             kinds_d["dommage_total_PAM_eur"] = "eur"
-            st.metric("Perte annuelle moyenne cumulée, tous aléas (approx.)", f"{float(merged['dommage_total_PAM_eur'].sum()):,.0f} €".replace(",", " "))
+            _kpi(st, "Perte annuelle moyenne cumulée, tous aléas (approx.)", _eur(merged["dommage_total_PAM_eur"].sum()))
         damage = {"kinds": kinds_d, "edges": {c: dmg.class_edges(merged[c], kd) for c, kd in kinds_d.items()}}
         color_opts += list(kinds_d)
     flood_cols = [c for kd in ("raw", "reclass") for c in cols_by_kind.get(kd, []) if c.startswith("debordement_")]
@@ -3295,12 +3320,55 @@ def _exposition_section():
                "Aqueduct Floods v2, environ 1 km, niveau extrême d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
                )
 
+def _wind_section():
+    st.subheader("Vent & tempête (Copernicus, en préparation)")
+    st.markdown("**Vent** : rafale par période de retour, ajustée sur toutes les rafales de l'historique. **Tempête** : mêmes variables et périodes "
+                "de retour, mais calculées uniquement sur les rafales de tempêtes identifiées, avec le classement des tempêtes passées. Les deux "
+                "utiliseront les données Copernicus gratuites (licence CC-BY) et la même fonction de dommage vent (rafale en m/s).")
+    import os
+    ok_key = cop.key_present(_secrets(), dict(os.environ))
+    st.caption("Clé d'API Copernicus dans les secrets Streamlit : " + ("présente." if ok_key else
+               "absente. Créez un compte gratuit sur cds.climate.copernicus.eu, copiez votre clé d'API (page de votre profil) et ajoutez-la dans "
+               "les secrets sous `CDSAPI_KEY`. Elle n'est utile qu'à l'étape suivante."))
+    st.markdown("**Étape 1 : vérifier les paramètres réels des jeux de données** (aucune clé requise). Ce contrôle lit la description publique "
+                "du catalogue Copernicus afin de construire les requêtes avec les vrais noms de variables.")
+    if st.button("Lire le catalogue Copernicus", key="cop_form_go", type="primary"):
+        res = {}
+        with st.spinner("Lecture des descriptions…"):
+            for key, ds in cop.DATASETS.items():
+                try:
+                    res[key] = {"form": cop.fetch_form(ds)}
+                except cop.CopernicusError as e:
+                    res[key] = {"error": str(e)}
+        st.session_state["cop_forms"] = res
+    forms = st.session_state.get("cop_forms") or {}
+    titles = {"timeseries": "ERA5 horaire en série temporelle (vent : toutes rafales, monde)",
+              "storms": "Tempêtes européennes : trajectoires et empreintes de rafales"}
+    for key, item in forms.items():
+        st.markdown(f"**{titles.get(key, key)}** (`{cop.DATASETS[key]}`)")
+        if "error" in item:
+            st.error(f"Lecture impossible : {item['error']}")
+            continue
+        rows = cop.summarize_form(item["form"])
+        if rows:
+            _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+        else:
+            st.warning("Structure de formulaire non reconnue : téléchargez le JSON brut ci-dessous et envoyez-le.")
+        st.download_button("Télécharger la description brute (JSON)", cop.pretty(item["form"]).encode("utf-8"),
+                           f"copernicus_{key}_form.json", "application/json", key=f"cop_dl_{key}")
+    if forms:
+        st.caption("Envoyez-moi ces tableaux (ou les fichiers JSON) : ils donnent les noms exacts des variables de rafale, des formats et des "
+                   "filtres de dates, nécessaires pour écrire les requêtes sans supposition.")
+
+
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Exposition aux risques", "Géorisques"])
+    tabs = st.tabs(["Exposition aux risques", "Vent & tempête", "Géorisques"])
     with tabs[0]:
         _safe_tab(_exposition_section, "Exposition aux risques")
     with tabs[1]:
+        _safe_tab(_wind_section, "Vent & tempête")
+    with tabs[2]:
         _safe_tab(_georisques_section, "Géorisques")
 
 
