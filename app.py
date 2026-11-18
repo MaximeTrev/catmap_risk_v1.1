@@ -2905,17 +2905,12 @@ def _guess_col(cols, words, default_none=True):
     return 0 if default_none else 1
 
 
-_HZ_FLOOD = {"name": "debordement", "col": lambda r: fhz.column_name(r, "raw"), "result": "fh_result", "dmg": "fh_dmg_result", "open": "fh_dmg_open"}
-_HZ_COAST = {"name": "submersion", "col": lambda r: coast.column_name(r), "result": "cs_result", "dmg": "cs_dmg_result", "open": "cs_dmg_open"}
-
-
-def _fh_damage_panel(df, name, rps, kinds, ensure, hzd=None):
-    """Bloc « Estimer les dommages » : choix de l'approche, paramètres, calcul. Si les hauteurs d'eau (raw) des scénarios choisis ne sont
-    pas encore calculées, ``ensure(kinds)`` les estime d'abord. ``hzd`` décrit l'aléa (nom, colonnes, clés de session).
-    Renvoie le résultat mémorisé ou ``None``."""
-    hzd = hzd or _HZ_FLOOD
+def _fh_damage_panel(df, name, hazards, ensure):
+    """Bloc « Estimer les dommages » commun à tous les aléas sélectionnés : mêmes paramètres d'actif et de valeur pour chaque aléa.
+    ``hazards`` : liste de ``{"name", "label", "rps", "col", "result"}``. Si les hauteurs (raw) d'un aléa ne sont pas calculées,
+    ``ensure([noms])`` les estime d'abord. Renvoie ``(nom, n, {aléa: (colonnes, résumé)}, courbes, avertissements)`` ou ``None``."""
     base_cols = [c for c in df.columns if not c.startswith(("debordement_", "submersion_", "dommage_")) and c not in ("lat_f", "lon_f")]
-    if st.session_state.get(hzd["open"]):
+    if st.session_state.get("ex_dmg_open"):
         with st.container(border=True):
             st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario. "
                         "Les hauteurs d'eau (raw) des scénarios choisis sont estimées automatiquement si elles ne le sont pas déjà.")
@@ -2982,16 +2977,18 @@ def _fh_damage_panel(df, name, rps, kinds, ensure, hzd=None):
                                           "0 = plancher au niveau du terrain.")
             ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
             if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
-                prev = st.session_state.get(hzd["result"])
-                if not prev or prev[0] != name or prev[1] != len(df) or "raw" not in prev[5] or not set(rps) <= set(prev[4]):
-                    ensure(sorted(set(kinds) | {"raw"}))
-                res = st.session_state[hzd["result"]][2]
-                used_rps = [r for r in rps]
-                classes = dmg.asset_class_series(res, type_col, default_cls)
+                def _depths_ok(h):
+                    prev = st.session_state.get(h["result"])
+                    return bool(prev and prev[0] == name and prev[1] == len(df) and "raw" in prev[5] and set(h["rps"]) <= set(prev[4]))
+                missing = [h["name"] for h in hazards if not _depths_ok(h)]
+                if missing:
+                    ensure(missing)
+                base = df.reset_index(drop=True)
+                classes = dmg.asset_class_series(base, type_col, default_cls)
                 curves, problems = {}, []
                 conts_pt = None
                 if is_jrc:
-                    conts_pt, n_unk = dmg.continent_series(res, country_col, jrc, continent)
+                    conts_pt, n_unk = dmg.continent_series(base, country_col, jrc, continent)
                     if n_unk:
                         problems.append(f"{n_unk} point(s) : pays non reconnu, courbe « {continent} » utilisée.")
                     for cont, cls in sorted(set(zip(conts_pt, classes))):
@@ -3009,36 +3006,46 @@ def _fh_damage_panel(df, name, rps, kinds, ensure, hzd=None):
                         except dmg.DamageError as e:
                             problems.append(str(e))
                 try:
-                    values = dmg.exposed_value(res, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, component)
-                    depth_cols = {r: hzd["col"](r) for r in used_rps}
-                    out, summ = dmg.estimate_damages(res, depth_cols, curves, classes, values, "JRC" if is_jrc else "FEMA Hazus", conts_pt, hzd["name"])
-                    if summ.get("repli_global"):
-                        problems.append(f"{summ['repli_global']} point(s) : pas de courbe du continent pour cette catégorie, courbe « Global » utilisée.")
-                    summ["problemes"] = problems
-                    summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
-                    st.session_state[hzd["dmg"]] = (name, len(res), out, summ, curves)
+                    values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, component)
+                    per, fallback = {}, 0
+                    for h in hazards:
+                        res_h = st.session_state[h["result"]][2]
+                        depth_cols = {r: h["col"](r) for r in h["rps"]}
+                        out, summ = dmg.estimate_damages(res_h, depth_cols, curves, classes, values,
+                                                         "JRC" if is_jrc else "FEMA Hazus", conts_pt, h["name"])
+                        summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                        fallback = max(fallback, summ.get("repli_global", 0))
+                        per[h["name"]] = (out, summ)
+                    if fallback:
+                        problems.append(f"{fallback} point(s) : pas de courbe du continent pour cette catégorie, courbe « Global » utilisée.")
+                    st.session_state["ex_dmg_result"] = (name, len(df), per, curves, problems)
                 except dmg.DamageError as e:
                     st.error(str(e))
-    stored = st.session_state.get(hzd["dmg"])
+    stored = st.session_state.get("ex_dmg_result")
     if not stored or stored[0] != name or stored[1] != len(df):
         return None
-    _, _, out, summ, curves = stored
-    cols = st.columns(min(4, 1 + len(summ["pertes_totales"])))
-    for i, (c, v) in enumerate(list(summ["pertes_totales"].items())[:3]):
-        cols[i].metric(f"Perte totale {__import__('re').search(r'RP\d+', c).group(0)}", f"{v:,.0f} €".replace(",", " "))
-    if summ["pam_totale"] is not None:
-        cols[min(3, len(cols) - 1)].metric("Perte annuelle moyenne (approx.)", f"{summ['pam_totale']:,.0f} €".replace(",", " "))
-    for p in summ.get("problemes", []):
+    _, _, per, curves, problems = stored
+    for p in problems:
         st.warning(p)
-    if summ["classes_sans_courbe"]:
-        st.warning("Pas de courbe pour : " + ", ".join(summ["classes_sans_courbe"]) + " (pertes laissées vides).")
-    if summ["sans_valeur"]:
-        st.warning(f"{summ['sans_valeur']} point(s) sans valeur exposée exploitable : pas de perte calculée pour eux.")
-    if summ.get("valeur_nulle"):
-        st.warning("La valeur exposée est nulle ou absente pour tous les points : les pertes en € sont vides ou nulles (les taux restent valables).")
-    if summ["pam_bornes"]:
-        st.caption(f"Perte annuelle moyenne : intégrale trapézoïdale entre RP{summ['pam_bornes'][0]} et RP{summ['pam_bornes'][1]} "
-                   "uniquement (pas d'extrapolation hors de cet intervalle) ; ajoutez des scénarios pour la rendre plus complète.")
+    shown = [h for h in hazards if h["name"] in per]
+    for h in shown:
+        _, summ = per[h["name"]]
+        st.markdown(f"**Dommages : {h['label']}**")
+        cols = st.columns(4)
+        for i, (c, v) in enumerate(list(summ["pertes_totales"].items())[:3]):
+            cols[i].metric(f"Perte totale {__import__('re').search(r'RP' + chr(92) + 'd+', c).group(0)}", f"{v:,.0f} €".replace(",", " "))
+        if summ["pam_totale"] is not None:
+            cols[3].metric("Perte annuelle moyenne (approx.)", f"{summ['pam_totale']:,.0f} €".replace(",", " "))
+        if summ["classes_sans_courbe"]:
+            st.warning(f"{h['label']} : pas de courbe pour " + ", ".join(summ["classes_sans_courbe"]) + " (pertes laissées vides).")
+    if shown:
+        summ0 = per[shown[0]["name"]][1]
+        if summ0["sans_valeur"]:
+            st.warning(f"{summ0['sans_valeur']} point(s) sans valeur exposée exploitable : pas de perte calculée pour eux.")
+        if summ0.get("valeur_nulle"):
+            st.warning("La valeur exposée est nulle ou absente pour tous les points : les pertes en € sont vides ou nulles (les taux restent valables).")
+        st.caption("Perte annuelle moyenne : intégrale trapézoïdale entre la plus petite et la plus grande période de retour choisies, sans "
+                   "extrapolation hors de cet intervalle. Les pertes par scénario ne s'additionnent pas d'un aléa à l'autre.")
     with st.expander("Courbes utilisées"):
         for key, cv in curves.items():
             cont_, _, cls = key.rpartition("|")
@@ -3047,227 +3054,246 @@ def _fh_damage_panel(df, name, rps, kinds, ensure, hzd=None):
     return stored
 
 
-
-def _debordement_section():
-    st.subheader("Débordement de cours d'eau")
-    st.markdown("**Débordement de cours d'eau** : hauteur d'eau attendue à chaque point pour une période de retour donnée, d'après les "
-                "cartes mondiales du JRC / GloFAS (90 m, v2.1.2). Les tuiles utiles sont téléchargées à la demande. La **submersion "
-                "marine** n'est pas encore intégrée.")
-    rps = st.multiselect("Scénario (période de retour, en années)", list(fhz.RPS), default=[100], key="fh_rps",
-                         format_func=lambda r: f"RP{r}")
-    kind_lab = st.radio("Type de donnée", ["raw (hauteur d'eau en m)", "reclass (classe 1 à 4)", "les deux"], horizontal=True, key="fh_kind")
-    kinds = ["raw"] if kind_lab.startswith("raw") else ["reclass"] if kind_lab.startswith("reclass") else ["raw", "reclass"]
-    with st.expander("Diagnostic de la source JRC (à lancer en cas de problème)"):
-        rp_t = st.selectbox("Période de retour testée", list(fhz.RPS), index=4, key="fh_diag_rp", format_func=lambda r: f"RP{r}")
-        if st.button("Tester l'accès aux tuiles", key="fh_diag_go"):
-            with st.spinner("Contrôle du catalogue, des noms de fichiers et du téléchargement…"):
-                st.session_state["fh_diag"] = fhz.diagnose(int(rp_t))
-        if st.session_state.get("fh_diag"):
-            _stretch(st.dataframe, pd.DataFrame(st.session_state["fh_diag"]), hide_index=True)
-            st.caption("En cas d'ÉCHEC, copiez ce tableau : il suffit à corriger le nom de dossier, de fichier ou le format de lecture.")
-    df, lat_c, lon_c, name = _points_input("fh_")
-    if df is None:
-        return
-    if not rps:
-        st.caption("Choisissez au moins un scénario.")
-        return
-    try:
-        catalog = _fh_catalog()
-    except fhz.TileError as e:
-        st.error(f"Catalogue des tuiles JRC indisponible : {e}")
-        return
-    pl = fhz.plan(df, lat_c, lon_c, catalog)
-    n_tiles = len(pl["tile_ids"])
-    n_files = n_tiles * len(rps) * len(kinds)
-    max_mb = n_tiles * len(rps) * ((30 if "raw" in kinds else 0) + (3 if "reclass" in kinds else 0))
-    st.caption(f"{len(df)} point(s) lus ; {n_tiles} tuile(s) concernée(s) ; {n_files} fichier(s) à lire, au plus ≈ {max_mb} Mo "
-               "à télécharger la première fois (ordres de grandeur issus des tailles observées : jusqu'à 30 Mo en raw, environ 10 fois "
-               "moins en reclass). Les points hors de toute tuile restent vides.")
-    b1, b2, _sp = st.columns([1, 1, 2])
-    go = b1.button("Estimer la hauteur d'eau", type="primary", key="fh_go")
-    if b2.button("Estimer les dommages", type="primary", key="fh_dmg_go"):
-        st.session_state["fh_dmg_open"] = True
-    def run_depths(kinds_to_run):
-        bar = st.progress(0.0)
-        with st.spinner("Téléchargement et lecture des tuiles…"):
-            res_, summ_ = fhz.estimate_depths(df, lat_c, lon_c, rps, kinds_to_run, catalog,
-                                              on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
-        bar.empty()
-        res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
-        res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
-        st.session_state["fh_result"] = (name, len(df), res_, summ_, list(rps), list(kinds_to_run))
-        st.session_state.pop("fh_dmg_result", None)               # les dommages dépendent des hauteurs : à recalculer
-
-    if go:
-        run_depths(kinds)
-    dmg_stored = _fh_damage_panel(df, name, rps, kinds, run_depths)
-    stored = st.session_state.get("fh_result")
-    if not stored or stored[0] != name or stored[1] != len(df):
-        return
-    _, _, res, summ, used_rps, used_kinds = stored
-    m = st.columns(4)
-    m[0].metric("Points", summ["points"])
-    m[1].metric("Dans une tuile", summ["points"] - summ["hors_tuile"])
-    m[2].metric("Hors tuile", summ["hors_tuile"])
-    m[3].metric("Points partiels", int(res["debordement_statut"].str.startswith("partiel").sum()))
-    for k, v in list(summ["problemes"].items())[:6]:
-        st.warning(f"{k} : {v[0]}")
-    cols_by_kind = {k: [fhz.column_name(r, k) for r in used_rps] for k in used_kinds}
-    value_cols = [c for cs in cols_by_kind.values() for c in cs]
-    damage = None
-    color_opts = list(value_cols)
-    if dmg_stored is not None:
-        dmg_out = dmg_stored[2]
-        res = pd.concat([res, dmg_out], axis=1)
-        kinds_d = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in dmg_out.columns if c.startswith("dommage_debordement_RP") or c == "dommage_debordement_PAM_eur"}
-        damage = {"kinds": kinds_d, "edges": {c: dmg.class_edges(dmg_out[c], k) for c, k in kinds_d.items()}}
-        color_opts += list(kinds_d)
-    c_a, c_b, c_c = st.columns([2, 1, 1])
-    color_col = c_a.selectbox("Colorer la carte selon", color_opts, key="fh_color")
-    is_depth_col = color_col in value_cols
-    show_tiles = c_b.checkbox("Afficher les tuiles extraites", value=False, key="fh_show_tiles")
-    show_vals = c_c.checkbox("… avec leurs valeurs (raster)", value=False, key="fh_show_vals", disabled=not (show_tiles and is_depth_col),
-                             help="Colore chaque pixel de la tuile selon la légende, pour la colonne choisie à gauche.")
-    overlays = []
-    if show_tiles and not is_depth_col:
-        st.caption("Le raster des tuiles représente des hauteurs d'eau : choisissez une colonne de hauteur pour l'afficher.")
-    if show_tiles and show_vals and is_depth_col:
-        kind_sel = "reclass" if color_col.endswith("_reclass") else "raw"
-        ok_tiles = [t for t in summ.get("tuiles_detail", []) if t["statut"] == "ok" or color_col in
-                    [k.split("|")[0] for k in summ.get("fichiers_lus", {}) if k.endswith(f"|{t['id']}")]]
-        for t in ok_tiles[:6]:
-            pth = summ.get("fichiers_lus", {}).get(f"{color_col}|{t['id']}")
-            if not pth or not Path(pth).exists():
-                st.caption(f"Tuile ID{t['id']} : fichier absent du cache (cache vidé ?) ; relancez le calcul pour l'afficher.")
-                continue
-            try:
-                with st.spinner(f"Image de la tuile ID{t['id']}…"):
-                    overlays.append(_fh_preview(pth, kind_sel, Path(pth).stat().st_size))
-            except fhz.TileError as e:
-                st.warning(f"Tuile ID{t['id']} : {e}")
-        if len(ok_tiles) > 6:
-            st.caption(f"Valeurs affichées pour 6 tuiles sur {len(ok_tiles)} (limite d'affichage de la carte).")
-    _fh_map(res, cols_by_kind, color_col, summ.get("tuiles_detail") if show_tiles else None, overlays, damage)
-    out = res.drop(columns=["lat_f", "lon_f"])
-    flooded = (out[value_cols].fillna(0).astype(float) > 0).any(axis=1)
-    dmg_cols_out = [c for c in out.columns if c.startswith("dommage_")]
-    _cross_table(out, value_cols + dmg_cols_out + ["debordement_tuile", "debordement_statut"], flooded, "fh_tbl", "Seulement les points inondables")
-    d1, d2 = st.columns([1, 1])
-    with d1:
-        st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_debordement.csv", "text/csv")
-    with d2:
-        n_c, mb_c = fhz.cache_info()
-        if st.button(f"Vider le cache et le CSV ({n_c} tuile(s) en cache, {mb_c} Mo)", key="fh_clear_cache", type="primary"):
-            n_del, mb_del = fhz.clear_cache()
-            # vide aussi le CSV chargé (nouvelle clé de widget) et le résultat affiché
-            st.session_state["fh_up_n"] = st.session_state.get("fh_up_n", 0) + 1
-            for k in ("fh_result", "fh_diag", "fh_color", "fh_show_tiles", "fh_show_vals", "fh_dmg_result", "fh_dmg_open"):
-                st.session_state.pop(k, None)
-            st.session_state["fh_cache_msg"] = (f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Le fichier CSV chargé et le résultat "
-                                                "ont aussi été retirés ; les tuiles seront retéléchargées au prochain calcul.")
-            st.rerun()
-        if st.session_state.get("fh_cache_msg"):
-            st.caption(st.session_state.pop("fh_cache_msg"))
-    st.caption("0 = aucune inondation modélisée à ce point (pas une garantie d'absence de risque : les cours d'eau de bassin inférieur à "
-               "500 km² ne sont pas modélisés, et des profondeurs très élevées peuvent être des artefacts du modèle). Source : JRC / "
-               "Copernicus EMS GloFAS, jeu « Global river flood hazard maps » v2.1.2, licence ODbL v1.0 (à faire valider pour votre usage).")
+_HAZARDS = {
+    "debordement": {"label": "Débordement de cours d'eau", "rps": fhz.RPS, "result": "fh_result", "col": lambda r: fhz.column_name(r, "raw")},
+    "submersion": {"label": "Submersion marine", "rps": coast.RPS, "result": "cs_result", "col": lambda r: coast.column_name(r)},
+}
 
 
-def _submersion_section():
-    st.subheader("Submersion marine")
-    st.markdown("**Submersion côtière** : hauteur d'eau attendue à chaque point pour une période de retour donnée, d'après les cartes mondiales "
-                "**WRI Aqueduct Floods** (environ 1 km), avec scénarios climatiques et subsidence. Couverture mondiale ; la résolution est "
-                "grossière à l'échelle d'un site, et un point à l'intérieur des terres vaut 0.")
-    c1, c2, c3 = st.columns(3)
-    scen = c1.selectbox("Scénario climatique", list(coast.SCENARIOS), key="cs_scen", format_func=lambda k: coast.SCENARIOS[k])
-    year = c2.selectbox("Horizon", list(coast.YEARS[scen]), key="cs_year", format_func=lambda y: "Historique" if y == "hist" else y)
-    sub = c3.selectbox("Subsidence", list(coast.SUBSIDENCE), key="cs_sub", format_func=lambda k: coast.SUBSIDENCE[k])
-    rps = st.multiselect("Période de retour (années)", list(coast.RPS), default=[100], key="cs_rps", format_func=lambda r: f"RP{r}")
-    with st.expander("Diagnostic de la source Aqueduct (à lancer en cas de problème)"):
-        rp_t = st.selectbox("Période de retour testée", list(coast.RPS), index=5, key="cs_diag_rp", format_func=lambda r: f"RP{r}")
-        if st.button("Tester l'accès au fichier", key="cs_diag_go"):
-            with st.spinner("Recherche du fichier, téléchargement et lecture…"):
-                st.session_state["cs_diag"] = coast.diagnose(scen, sub, year, int(rp_t))
-        if st.session_state.get("cs_diag"):
-            _stretch(st.dataframe, pd.DataFrame(st.session_state["cs_diag"]), hide_index=True)
-            st.caption("Les noms de fichiers des scénarios futurs n'ont pas pu être vérifiés : en cas d'ÉCHEC, copiez ce tableau.")
-    df, lat_c, lon_c, name = _points_input("cs_")
-    if df is None:
-        return
-    if not rps:
-        st.caption("Choisissez au moins un scénario.")
-        return
-    st.caption(f"{len(df)} point(s) lus ; {len(rps)} fichier(s) mondial(aux) à lire. Chaque fichier est téléchargé une fois (taille à "
-               "confirmer avec le diagnostic ci-dessus), puis réutilisé depuis le cache.")
-    b1, b2, _sp = st.columns([1, 1, 2])
-    go = b1.button("Estimer la hauteur d'eau", type="primary", key="cs_go")
-    if b2.button("Estimer les dommages", type="primary", key="cs_dmg_go"):
-        st.session_state["cs_dmg_open"] = True
-
-    def run_depths(_kinds=None):
-        bar = st.progress(0.0)
-        with st.spinner("Téléchargement et lecture des cartes côtières…"):
-            res_, summ_ = coast.estimate_depths(df, lat_c, lon_c, rps, scen, sub, year,
-                                                on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
-        bar.empty()
-        res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
-        res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
-        st.session_state["cs_result"] = (name, len(df), res_, summ_, list(rps), ["raw"])
-        st.session_state.pop("cs_dmg_result", None)
-
-    if go:
-        run_depths()
-    dmg_stored = _fh_damage_panel(df, name, rps, ["raw"], run_depths, _HZ_COAST)
-    stored = st.session_state.get("cs_result")
-    if not stored or stored[0] != name or stored[1] != len(df):
-        return
-    _, _, res, summ, used_rps, _k = stored
-    m = st.columns(3)
-    m[0].metric("Points", summ["points"])
-    m[1].metric("Coordonnées invalides", summ["invalides"])
-    m[2].metric("Scénarios en échec", len(summ["problemes"]))
-    for k, v in list(summ["problemes"].items())[:6]:
-        st.warning(f"{k} : {v}")
-    value_cols = [coast.column_name(r) for r in used_rps]
-    damage = None
-    color_opts = list(value_cols)
-    if dmg_stored is not None:
-        dmg_out = dmg_stored[2]
-        res = pd.concat([res, dmg_out], axis=1)
-        kinds_d = {c: ("ratio" if c.endswith("_ratio") else "eur") for c in dmg_out.columns
-                   if c.startswith("dommage_submersion_RP") or c == "dommage_submersion_PAM_eur"}
-        damage = {"kinds": kinds_d, "edges": {c: dmg.class_edges(dmg_out[c], k) for c, k in kinds_d.items()}}
-        color_opts += list(kinds_d)
-    color_col = st.selectbox("Colorer la carte selon", color_opts, key="cs_color")
-    _fh_map(res, {"raw": value_cols}, color_col, None, None, damage)
-    out = res.drop(columns=["lat_f", "lon_f"])
-    flooded = (out[value_cols].fillna(0).astype(float) > 0).any(axis=1)
-    dmg_cols_out = [c for c in out.columns if c.startswith("dommage_")]
-    _cross_table(out, value_cols + dmg_cols_out + ["submersion_statut"], flooded, "cs_tbl", "Seulement les points submersibles")
-    d1, d2 = st.columns([1, 1])
-    with d1:
-        st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_submersion.csv", "text/csv")
-    with d2:
-        n_c, mb_c = fhz.cache_info()
-        if st.button(f"Vider le cache et le CSV ({n_c} fichier(s) en cache, {mb_c} Mo)", key="cs_clear_cache", type="primary"):
-            fhz.clear_cache()
-            st.session_state["cs_up_n"] = st.session_state.get("cs_up_n", 0) + 1
-            for k in ("cs_result", "cs_diag", "cs_color", "cs_dmg_result", "cs_dmg_open"):
-                st.session_state.pop(k, None)
-            st.rerun()
-    st.caption("0 = aucune submersion modélisée à ce point (≠ absence de risque : résolution d'environ 1 km, modèle de niveau extrême d'eau "
-               "sans vagues ni protections locales). Source : WRI Aqueduct Floods Hazard Maps v2 (Ward et al.) ; vérifiez les conditions "
-               "de réutilisation sur wri.org.")
+def _rp_fmt(r):
+    return f"RP{r}"
 
 
 def _exposition_section():
-    hz_sel = st.radio("Aléa", ["Débordement de cours d'eau", "Submersion marine"], horizontal=True, key="expo_hazard")
-    if hz_sel.startswith("Submersion"):
-        _submersion_section()
-    else:
-        _debordement_section()
+    st.subheader("Exposition aux aléas")
+    st.markdown("Sélectionnez un ou plusieurs aléas : les points sont chargés une seule fois, les scénarios peuvent être communs ou propres à "
+                "chaque aléa, et l'estimation des dommages utilise les mêmes paramètres d'actif et de valeur pour tous les aléas choisis.")
+    sel = st.multiselect("Aléas à analyser", list(_HAZARDS), default=["debordement"], key="ex_hazards", format_func=lambda k: _HAZARDS[k]["label"])
+    if not sel:
+        st.caption("Choisissez au moins un aléa.")
+        return
+    df, lat_c, lon_c, name = _points_input("ex_")
+    if df is None:
+        return
+    common = st.checkbox("Mêmes périodes de retour pour tous les aléas sélectionnés", value=True, key="ex_common_rp",
+                         help="Décochez pour choisir des périodes de retour différentes pour chaque aléa.")
+    union = sorted({r for k in sel for r in _HAZARDS[k]["rps"]})
+    rps_common = None
+    if common:
+        rps_common = st.multiselect("Périodes de retour (années)", union, default=[100] if 100 in union else union[:1], key="ex_rps",
+                                    format_func=_rp_fmt)
+    params = {}
+    for k in sel:
+        H = _HAZARDS[k]
+        with st.expander(f"Paramètres : {H['label']}", expanded=True):
+            if common:
+                rps_k = [r for r in rps_common if r in H["rps"]]
+                skipped = [r for r in rps_common if r not in H["rps"]]
+                if skipped:
+                    st.caption("Non disponibles pour cet aléa : " + ", ".join(_rp_fmt(r) for r in skipped) + ".")
+            else:
+                rps_k = st.multiselect("Périodes de retour (années)", list(H["rps"]), default=[100], key=f"ex_rps_{k}", format_func=_rp_fmt)
+            p = {"rps": rps_k}
+            if k == "debordement":
+                kind_lab = st.radio("Type de donnée", ["raw (hauteur d'eau en m)", "reclass (classe 1 à 4)", "les deux"], horizontal=True, key="fh_kind")
+                p["kinds"] = ["raw"] if kind_lab.startswith("raw") else ["reclass"] if kind_lab.startswith("reclass") else ["raw", "reclass"]
+            else:
+                c1, c2, c3 = st.columns(3)
+                p["scen"] = c1.selectbox("Scénario climatique", list(coast.SCENARIOS), key="cs_scen", format_func=lambda x: coast.SCENARIOS[x])
+                p["year"] = c2.selectbox("Horizon", list(coast.YEARS[p["scen"]]), key="cs_year", format_func=lambda y: "Historique" if y == "hist" else y)
+                p["sub"] = c3.selectbox("Subsidence", list(coast.SUBSIDENCE), key="cs_sub", format_func=lambda x: coast.SUBSIDENCE[x])
+            params[k] = p
+    with st.expander("Diagnostic des sources (à lancer en cas de problème)"):
+        if "debordement" in sel:
+            st.markdown("**JRC / GloFAS (débordement)**")
+            rp_t = st.selectbox("Période de retour testée", list(fhz.RPS), index=4, key="fh_diag_rp", format_func=_rp_fmt)
+            if st.button("Tester l'accès aux tuiles JRC", key="fh_diag_go"):
+                with st.spinner("Contrôle du catalogue, des noms de fichiers et du téléchargement…"):
+                    st.session_state["fh_diag"] = fhz.diagnose(int(rp_t))
+            if st.session_state.get("fh_diag"):
+                _stretch(st.dataframe, pd.DataFrame(st.session_state["fh_diag"]), hide_index=True)
+        if "submersion" in sel:
+            st.markdown("**WRI Aqueduct (submersion marine)**")
+            rp_c = st.selectbox("Période de retour testée", list(coast.RPS), index=5, key="cs_diag_rp", format_func=_rp_fmt)
+            if st.button("Tester l'accès au fichier Aqueduct", key="cs_diag_go"):
+                pc = params["submersion"]
+                with st.spinner("Recherche du fichier, téléchargement et lecture…"):
+                    st.session_state["cs_diag"] = coast.diagnose(pc["scen"], pc["sub"], pc["year"], int(rp_c))
+            if st.session_state.get("cs_diag"):
+                _stretch(st.dataframe, pd.DataFrame(st.session_state["cs_diag"]), hide_index=True)
+        st.caption("En cas d'ÉCHEC, copiez le tableau : il suffit à corriger le nom de fichier ou le format de lecture.")
+    active = [k for k in sel if params[k]["rps"]]
+    if not active:
+        st.caption("Choisissez au moins une période de retour.")
+        return
+    catalog = None
+    if "debordement" in active:
+        try:
+            catalog = _fh_catalog()
+        except fhz.TileError as e:
+            st.error(f"Catalogue des tuiles JRC indisponible : {e} (le débordement est ignoré).")
+            active.remove("debordement")
+            if not active:
+                return
+    notes = [f"{len(df)} point(s) lus."]
+    if "debordement" in active:
+        pf = params["debordement"]
+        pl = fhz.plan(df, lat_c, lon_c, catalog)
+        n_t = len(pl["tile_ids"])
+        mb = n_t * len(pf["rps"]) * ((30 if "raw" in pf["kinds"] else 0) + (3 if "reclass" in pf["kinds"] else 0))
+        notes.append(f"Débordement : {n_t} tuile(s), {n_t * len(pf['rps']) * len(pf['kinds'])} fichier(s), au plus ≈ {mb} Mo la première fois.")
+    if "submersion" in active:
+        notes.append(f"Submersion : {len(params['submersion']['rps'])} fichier(s) mondial(aux) à lire (taille à confirmer par le diagnostic).")
+    st.caption(" ".join(notes))
+    b1, b2, _sp = st.columns([1, 1, 2])
+    go = b1.button("Estimer la hauteur d'eau", type="primary", key="ex_go")
+    if b2.button("Estimer les dommages", type="primary", key="ex_dmg_go"):
+        st.session_state["ex_dmg_open"] = True
 
+    def run_hazard(k, force_raw=False):
+        p = params[k]
+        bar = st.progress(0.0)
+        prog = lambda i, n: bar.progress(min(1.0, i / max(1, n)))  # noqa: E731
+        with st.spinner(f"{_HAZARDS[k]['label']} : téléchargement et lecture…"):
+            if k == "debordement":
+                kinds_run = sorted(set(p["kinds"]) | ({"raw"} if force_raw else set()))
+                res_, summ_ = fhz.estimate_depths(df, lat_c, lon_c, p["rps"], kinds_run, catalog, on_progress=prog)
+            else:
+                kinds_run = ["raw"]
+                res_, summ_ = coast.estimate_depths(df, lat_c, lon_c, p["rps"], p["scen"], p["sub"], p["year"], on_progress=prog)
+        bar.empty()
+        res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
+        res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
+        st.session_state[_HAZARDS[k]["result"]] = (name, len(df), res_, summ_, list(p["rps"]), list(kinds_run))
+        st.session_state.pop("ex_dmg_result", None)               # les dommages dépendent des hauteurs : à recalculer
 
+    def ensure(names):
+        for k in names:
+            run_hazard(k, force_raw=True)
+
+    if go:
+        for k in active:
+            run_hazard(k)
+    hazards = [{"name": k, "label": _HAZARDS[k]["label"], "rps": params[k]["rps"], "col": _HAZARDS[k]["col"], "result": _HAZARDS[k]["result"]}
+               for k in active]
+    dmg_stored = _fh_damage_panel(df, name, hazards, ensure)
+
+    have = {}
+    for k in active:
+        r = st.session_state.get(_HAZARDS[k]["result"])
+        if r and r[0] == name and r[1] == len(df):
+            have[k] = r
+    if not have:
+        return
+    merged = None
+    cols_by_kind: dict[str, list] = {}
+    depth_cols_all: list[str] = []
+    status_cols: list[str] = []
+    for k, (_, _, res_k, summ_k, rps_k, kinds_k) in have.items():
+        new = [c for c in res_k.columns if merged is None or c not in merged.columns]
+        merged = res_k.copy() if merged is None else pd.concat([merged, res_k[new]], axis=1)
+        if k == "debordement":
+            for kind in kinds_k:
+                cs = [fhz.column_name(r, kind) for r in rps_k]
+                cols_by_kind.setdefault(kind, []).extend(cs)
+                depth_cols_all += cs
+            status_cols += ["debordement_tuile", "debordement_statut"]
+        else:
+            cs = [coast.column_name(r) for r in rps_k]
+            cols_by_kind.setdefault("raw", []).extend(cs)
+            depth_cols_all += cs
+            status_cols.append("submersion_statut")
+    with st.expander("Détail par aléa", expanded=False):
+        for k, (_, _, res_k, summ_k, rps_k, kinds_k) in have.items():
+            st.markdown(f"**{_HAZARDS[k]['label']}**")
+            m = st.columns(4)
+            m[0].metric("Points", summ_k["points"])
+            if k == "debordement":
+                m[1].metric("Dans une tuile", summ_k["points"] - summ_k["hors_tuile"])
+                m[2].metric("Hors tuile", summ_k["hors_tuile"])
+                m[3].metric("Points partiels", int(res_k["debordement_statut"].str.startswith("partiel").sum()))
+                for kk, v in list(summ_k["problemes"].items())[:6]:
+                    st.warning(f"{kk} : {v[0]}")
+            else:
+                m[1].metric("Coordonnées invalides", summ_k["invalides"])
+                m[2].metric("Scénarios en échec", len(summ_k["problemes"]))
+                for kk, v in list(summ_k["problemes"].items())[:6]:
+                    st.warning(f"{kk} : {v}")
+    damage = None
+    color_opts = list(depth_cols_all)
+    if dmg_stored is not None:
+        kinds_d: dict[str, str] = {}
+        pam_cols = []
+        for k, (out_h, _s) in dmg_stored[2].items():
+            if k not in have:
+                continue
+            new = [c for c in out_h.columns if c not in merged.columns]
+            merged = pd.concat([merged, out_h[new]], axis=1)
+            for c in out_h.columns:
+                if c.startswith(f"dommage_{k}_RP") or c == f"dommage_{k}_PAM_eur":
+                    kinds_d[c] = "ratio" if c.endswith("_ratio") else "eur"
+            if f"dommage_{k}_PAM_eur" in out_h.columns:
+                pam_cols.append(f"dommage_{k}_PAM_eur")
+        if len(pam_cols) >= 2:
+            merged["dommage_total_PAM_eur"] = merged[pam_cols].sum(axis=1, min_count=1)
+            kinds_d["dommage_total_PAM_eur"] = "eur"
+            st.metric("Perte annuelle moyenne cumulée, tous aléas (approx.)", f"{float(merged['dommage_total_PAM_eur'].sum()):,.0f} €".replace(",", " "))
+        damage = {"kinds": kinds_d, "edges": {c: dmg.class_edges(merged[c], kd) for c, kd in kinds_d.items()}}
+        color_opts += list(kinds_d)
+    flood_cols = [c for kd in ("raw", "reclass") for c in cols_by_kind.get(kd, []) if c.startswith("debordement_")]
+    c_a, c_b, c_c = st.columns([2, 1, 1])
+    color_col = c_a.selectbox("Colorer la carte selon", color_opts, key="ex_color")
+    is_flood_col = color_col in flood_cols
+    overlays = []
+    show_tiles = False
+    if "debordement" in have:
+        summ = have["debordement"][3]
+        show_tiles = c_b.checkbox("Afficher les tuiles extraites", value=False, key="ex_show_tiles")
+        show_vals = c_c.checkbox("… avec leurs valeurs (raster)", value=False, key="ex_show_vals", disabled=not (show_tiles and is_flood_col),
+                                 help="Colore chaque pixel de la tuile selon la légende, pour une colonne de débordement.")
+        if show_tiles and show_vals and not is_flood_col:
+            st.caption("Le raster des tuiles représente des hauteurs d'eau du débordement : choisissez une colonne de ce type.")
+        if show_tiles and show_vals and is_flood_col:
+            kind_sel = "reclass" if color_col.endswith("_reclass") else "raw"
+            ok_tiles = [t for t in summ.get("tuiles_detail", []) if t["statut"] == "ok" or color_col in
+                        [kk.split("|")[0] for kk in summ.get("fichiers_lus", {}) if kk.endswith(f"|{t['id']}")]]
+            for t in ok_tiles[:6]:
+                pth = summ.get("fichiers_lus", {}).get(f"{color_col}|{t['id']}")
+                if not pth or not Path(pth).exists():
+                    st.caption(f"Tuile ID{t['id']} : fichier absent du cache (cache vidé ?) ; relancez le calcul pour l'afficher.")
+                    continue
+                try:
+                    with st.spinner(f"Image de la tuile ID{t['id']}…"):
+                        overlays.append(_fh_preview(pth, kind_sel, Path(pth).stat().st_size))
+                except fhz.TileError as e:
+                    st.warning(f"Tuile ID{t['id']} : {e}")
+            if len(ok_tiles) > 6:
+                st.caption(f"Valeurs affichées pour 6 tuiles sur {len(ok_tiles)} (limite d'affichage de la carte).")
+    tiles = have["debordement"][3].get("tuiles_detail") if (show_tiles and "debordement" in have) else None
+    _fh_map(merged, cols_by_kind, color_col, tiles, overlays, damage)
+    out = merged.drop(columns=["lat_f", "lon_f"])
+    exposed = (out[depth_cols_all].apply(pd.to_numeric, errors="coerce").fillna(0) > 0).any(axis=1)
+    dmg_cols_out = [c for c in out.columns if c.startswith("dommage_")]
+    _cross_table(out, depth_cols_all + dmg_cols_out + status_cols, exposed, "ex_tbl", "Seulement les points exposés")
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_exposition.csv", "text/csv")
+    with d2:
+        n_c, mb_c = fhz.cache_info()
+        if st.button(f"Vider le cache et le CSV ({n_c} fichier(s) en cache, {mb_c} Mo)", key="ex_clear_cache", type="primary"):
+            n_del, mb_del = fhz.clear_cache()
+            st.session_state["ex_up_n"] = st.session_state.get("ex_up_n", 0) + 1
+            for kk in ("fh_result", "cs_result", "fh_diag", "cs_diag", "ex_color", "ex_show_tiles", "ex_show_vals", "ex_dmg_result", "ex_dmg_open"):
+                st.session_state.pop(kk, None)
+            st.session_state["ex_cache_msg"] = (f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Le fichier CSV chargé et les résultats "
+                                                "ont aussi été retirés ; les fichiers seront retéléchargés au prochain calcul.")
+            st.rerun()
+        if st.session_state.get("ex_cache_msg"):
+            st.caption(st.session_state.pop("ex_cache_msg"))
+    st.caption("0 = aucun aléa modélisé à ce point (pas une garantie d'absence de risque). Débordement : JRC / Copernicus EMS GloFAS, « Global "
+               "river flood hazard maps » v2.1.2, licence ODbL v1.0, cours d'eau de bassin inférieur à 500 km² non modélisés. Submersion : WRI "
+               "Aqueduct Floods v2, environ 1 km, niveau extrême d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
+               )
 
 def page_risques_climatiques():
     st.title("Risque climatiques")
