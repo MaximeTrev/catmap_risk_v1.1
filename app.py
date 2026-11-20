@@ -14,6 +14,7 @@ contient que l'interface. Points clés par rapport à la v1 :
 from __future__ import annotations
 
 import html
+import json
 import io
 import logging
 from pathlib import Path
@@ -43,7 +44,7 @@ from catmap import activity as act
 from catmap import georisques as gr
 from catmap import floodhazard as fhz
 import numpy as np
-from catmap import damage as dmg, wind
+from catmap import damage as dmg, wind, seismic as sm
 from catmap import coastalhazard as coast
 from catmap import copernicus as cop
 
@@ -3362,7 +3363,7 @@ def _wind_catalogue_reader():
                            f"copernicus_{key}_form.json", "application/json", key=f"cop_dl_{key}")
 
 
-def _wind_map(res, col):
+def _wind_map(res, col, cls_fn=None, palette=None, labels=None, popup_suffix="_gust", key="wd_map"):
     import folium
     pts = res.dropna(subset=["lat_f", "lon_f"])
     center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
@@ -3371,17 +3372,18 @@ def _wind_map(res, col):
     is_dmg = col.startswith("dommage_")
     kind = "ratio" if col.endswith("_ratio") else "eur"
     edges = dmg.class_edges(res[col], kind) if is_dmg else None
-    pal = dmg.DMG_COLORS if is_dmg else wind.GUST_COLORS
+    cls_fn = cls_fn or wind.gust_class
+    pal = dmg.DMG_COLORS if is_dmg else (palette or wind.GUST_COLORS)
     for _, r in shown.iterrows():
         v = pd.to_numeric(r.get(col), errors="coerce")
-        cls = dmg.damage_class(v, edges) if is_dmg else wind.gust_class(v)
-        txt = "".join(f"<div>{html_escape(c)} : {html_escape(r.get(c))}</div>" for c in [col] + [k for k in res.columns if k.endswith("_gust")][:8])
+        cls = dmg.damage_class(v, edges) if is_dmg else cls_fn(v)
+        txt = "".join(f"<div>{html_escape(c)} : {html_escape(r.get(c))}</div>" for c in [col] + [k for k in res.columns if k.endswith(popup_suffix)][:8])
         folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=pal[cls], fill_opacity=0.9,
                             tooltip=str(r.get("name") or ""),
                             popup=folium.Popup(f"<b>{html_escape(r.get('name') or '')}</b>{txt}", max_width=420)).add_to(m)
     if len(shown) > 1:
         m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
-    labels = dmg.legend_labels(edges, kind) if is_dmg else wind.GUST_LABELS
+    labels = dmg.legend_labels(edges, kind) if is_dmg else (labels or wind.GUST_LABELS)
     legend = "".join(f'<div><span style="background:{pal[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;margin-right:6px">'
                      f'</span>{lab}</div>' for k, lab in labels.items())
     legend += (f'<div><span style="background:{pal[None]};display:inline-block;width:12px;height:12px;border:1px solid #444;margin-right:6px">'
@@ -3389,7 +3391,7 @@ def _wind_map(res, col):
     m.get_root().html.add_child(folium.Element(
         f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;background:white;color:#222;padding:8px 10px;border:1px solid #888;'
         f'border-radius:4px;font-size:12px"><b>{html_escape(col)}</b>{legend}</div>'))
-    _ev_show_map(m, "wd_map")
+    _ev_show_map(m, key)
 
 
 _WIND_HAZ = {"vent": "Vent (toutes rafales, monde)", "tempete": "Tempête (événements européens)"}
@@ -3629,14 +3631,169 @@ def _wind_section():
                "d'observation = extrapolation. Fonction de dommage : Emanuel (2011), paramètres modifiables, à calibrer pour l'Europe.")
 
 
+def _seisme_section():
+    st.subheader("Séisme")
+    st.markdown("Accélération maximale du sol (PGA, en g) par période de retour, lue à l'emplacement de chaque point, puis dommages par une "
+                "fonction de vulnérabilité. Même logique que les autres onglets : colonnes `seisme_RP475_pga`, `dommage_seisme_RP475_eur`.")
+    df, lat_c, lon_c, name = _points_input("sm_")
+    if df is None:
+        return
+    _help_line("Jeu de données", "**GEM Global Seismic Hazard Map v2023.1** (GEM Foundation, licence CC BY-NC-SA 4.0 : usage non commercial). "
+               "*Périmètre* : monde entier, résolution 3 minutes d'arc (≈ 5 km). *Contenu* : un seul niveau, la PGA à 10 % de probabilité de "
+               "dépassement en 50 ans (période de retour 475 ans), sur sol rocheux. *Limites* : pas d'autre période de retour, pas d'effet de site "
+               "(sol meuble), résolution grossière.\n\n**ESHM20** (EFEHR / ETH Zurich, licence CC BY 4.0). *Périmètre* : Europe et pourtour "
+               "méditerranéen. *Contenu* : modèle européen 2020, courbes d'aléa permettant plusieurs périodes de retour. *Limites* : hors Europe, "
+               "aucune donnée ; accès par service web dont les paramètres restent à confirmer (voir ci-dessous).", wide=True,
+               label_style="font-size:.875rem")
+    ds = st.selectbox("Jeu de données", list(sm.DATASETS), key="sm_ds", label_visibility="collapsed", format_func=lambda k: sm.DATASETS[k]["label"])
+    avail = list(sm.DATASETS[ds]["rps"])
+    if ds == "eshm20":
+        st.warning("ESHM20 n'est pas encore branché : les paramètres de son service web (EFEHR) doivent d'abord être confirmés. Lisez sa description "
+                   "ci-dessous (aucune clé requise) et envoyez-la-moi.")
+        if st.button("Lire la description du service ESHM20", key="sm_openapi_go", type="primary"):
+            try:
+                st.session_state["sm_openapi"] = sm.fetch_openapi()
+            except sm.SeismicError as e:
+                st.error(str(e))
+        spec = st.session_state.get("sm_openapi")
+        if spec:
+            rows = sm.summarize_openapi(spec)
+            if rows:
+                _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
+            st.download_button("Télécharger la description brute (JSON)", json.dumps(spec, ensure_ascii=False, indent=1).encode("utf-8"),
+                               "efehr_openapi.json", "application/json", key="sm_openapi_dl")
+        return
+    all_rps = _checkbox_with_help("Toutes les périodes de retour disponibles", "Coche l'ensemble des périodes de retour que le jeu de données propose "
+                                  "(GEM : 475 ans uniquement).", key="sm_all", value=True)
+    rps = avail if all_rps else st.multiselect("Périodes de retour (années)", avail, default=avail, key="sm_rps", format_func=_rp_fmt)
+    with st.expander("Diagnostic de la source (à lancer en cas de problème)"):
+        if st.button("Tester le fichier GEM", key="sm_diag_go"):
+            with st.spinner("Téléchargement (≈ 35 Mo), extraction et lecture…"):
+                st.session_state["sm_diag"] = sm.diagnose()
+        if st.session_state.get("sm_diag"):
+            _stretch(st.dataframe, pd.DataFrame(st.session_state["sm_diag"]), hide_index=True)
+        st.caption("En cas d'ÉCHEC, copiez le tableau : il suffit à corriger l'adresse ou le format de lecture. Vous pouvez aussi déposer le raster "
+                   "dans data/seisme/ (si votre dépôt accepte les gros fichiers).")
+    if not rps:
+        st.caption("Choisissez au moins une période de retour.")
+        return
+    c1, c2, _sp = st.columns([1, 1, 2])
+    if c1.button("Estimer l'aléa sismique", type="primary", key="sm_go"):
+        try:
+            with st.spinner("Lecture de la carte GEM (téléchargement la première fois)…"):
+                res_, summ_ = sm.estimate_pga(df, lat_c, lon_c, ds, rps)
+            res_["lat_f"] = pd.to_numeric(res_[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            res_["lon_f"] = pd.to_numeric(res_[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            st.session_state["sm_result"] = {"name": name, "n": len(df), "df": res_, "summ": summ_, "rps": list(rps)}
+            st.session_state.pop("sm_dmg", None)
+        except sm.SeismicError as e:
+            st.error(str(e))
+    if c2.button("Estimer les dommages", type="primary", key="sm_dmg_go"):
+        st.session_state["sm_dmg_open"] = True
+    res = st.session_state.get("sm_result")
+    if st.session_state.get("sm_dmg_open") and (not res or res["name"] != name or res["n"] != len(df)):
+        st.caption("Estimez d'abord l'aléa sismique (bouton de gauche) : les dommages utilisent la PGA calculée.")
+    if not res or res["name"] != name or res["n"] != len(df):
+        return
+    out = res["df"]
+    summ = res["summ"]
+    m = st.columns(4)
+    m[0].metric("Points", summ["points"])
+    m[1].metric("PGA lue", summ["ok"])
+    m[2].metric("Sans donnée", summ["sans_donnee"])
+    m[3].metric("Coordonnées invalides", summ["invalides"])
+    if summ["sans_donnee"]:
+        st.warning(f"{summ['sans_donnee']} point(s) sans valeur (mer, zone non couverte ou hors de la carte) : voir la colonne seisme_statut.")
+    if st.session_state.get("sm_dmg_open"):
+        _seisme_damage(res)
+    merged = out.copy()
+    dm = st.session_state.get("sm_dmg")
+    col_opts = [sm.column_name(r) for r in res["rps"] if sm.column_name(r) in out.columns]
+    if dm and dm["name"] == name and dm["n"] == len(df):
+        o, sm_s = dm["out"], dm["summ"]
+        merged = pd.concat([merged, o[[c for c in o.columns if c not in merged.columns]]], axis=1)
+        col_opts += [c for c in o.columns if c.startswith("dommage_seisme_RP") or c == "dommage_seisme_PAM_eur"]
+        st.markdown("**Dommages : séisme**")
+        cols = st.columns(4)
+        for i, (c, v) in enumerate(list(sm_s["pertes_totales"].items())[:3]):
+            _kpi(cols[i], f"Perte totale RP{__import__('re').search(r'RP(' + chr(92) + 'd+)', c).group(1)}", _eur(v))
+        if sm_s["pam_totale"] is not None:
+            _kpi(cols[3], "Perte annuelle moyenne (approx.)", _eur(sm_s["pam_totale"]))
+        if sm_s.get("valeur_nulle"):
+            st.warning("La valeur exposée est nulle ou absente : les pertes en € sont nulles (les taux restent valables).")
+        if len(res["rps"]) < 2:
+            st.caption("Une seule période de retour : la perte annuelle moyenne n'est pas calculable (il en faut au moins deux).")
+    color_col = st.selectbox("Colorer la carte selon", col_opts, key="sm_color")
+    _wind_map(merged, color_col, cls_fn=sm.pga_class, palette=sm.PGA_COLORS, labels=sm.PGA_LABELS, popup_suffix="_pga", key="sm_map")
+    show = merged.drop(columns=["lat_f", "lon_f"])
+    _stretch(st.dataframe, show, hide_index=True)
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(show), "catmap_seisme.csv", "text/csv", key="sm_csv")
+    st.caption("GEM Global Seismic Hazard Map v2023.1, PGA à 475 ans sur sol rocheux, licence CC BY-NC-SA 4.0 (usage non commercial). Résolution ≈ 5 km : "
+               "à l'échelle d'un site, l'effet de sol (amplification) n'est pas pris en compte. Fonction de vulnérabilité à calibrer.")
+
+
+def _seisme_damage(res):
+    out_df = res["df"]
+    base_cols = [c for c in out_df.columns if not c.startswith(("seisme_", "dommage_")) and c not in ("lat_f", "lon_f")]
+    with st.container(border=True):
+        st.markdown("**Estimation des dommages sismiques** : perte = taux de dommage(PGA) × valeur exposée, avec une fonction lognormale "
+                    "`Φ(ln(PGA/θ)/β)`. Les paramètres par défaut sont **illustratifs** (aucune source) : calibrez-les selon le type de construction.")
+        c1, c2, c3 = st.columns(3)
+        theta = _num_help(c1, "PGA de mi-dommage θ (g)", "Accélération du sol pour laquelle 50 % de la valeur exposée est détruite. Plus elle est "
+                          "faible, plus le bâti est vulnérable (maçonnerie non armée, ancien) ; plus elle est élevée, plus il est résistant "
+                          "(parasismique récent).", min_value=0.05, max_value=3.0, value=0.6, step=0.05, key="sm_theta")
+        beta = _num_help(c2, "Dispersion β", "Incertitude de la fonction : plus β est grand, plus la courbe s'étale (dommages possibles à faible PGA, "
+                         "et partiels à forte PGA).", min_value=0.1, max_value=1.5, value=0.6, step=0.05, key="sm_beta")
+        default_cls = c3.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="sm_cls", index=list(dmg.CLASSES).index("commercial"),
+                                   format_func=lambda k: dmg.CLASS_LABELS[k])
+        d1, d2 = st.columns(2)
+        type_col = d1.selectbox("Colonne du type d'actif (facultatif)", ["(aucune)"] + base_cols, key="sm_typecol",
+                                index=_guess_col(base_cols, ("type", "categ", "activ", "naf")))
+        country_col = d2.selectbox("Colonne pays (ISO ou nom anglais)", ["(aucune)"] + base_cols, key="sm_ctry",
+                                   index=_guess_col(base_cols, ("pays_iso2", "pays_iso", "iso2", "iso3", "country", "pays")))
+        type_col = None if type_col == "(aucune)" else type_col
+        country_col = None if country_col == "(aucune)" else country_col
+        jrc, _err = _dmg_jrc_local()
+        jrc_ok = bool(jrc and jrc["maxdmg"] and country_col)
+        modes = (["jrc_area"] if jrc_ok else []) + ["area", "col", "const"]
+        mode = st.radio("Valeur exposée", modes, key="sm_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
+        if not jrc_ok:
+            st.caption("Valeurs de remplacement JRC par pays : placez le classeur JRC dans data/flood/ et choisissez une colonne pays.")
+        value_col = area_col = None
+        unit_value = const = 0.0
+        if mode == "col":
+            value_col = st.selectbox("Colonne de valeur (€)", base_cols, key="sm_valcol")
+        elif mode == "const":
+            const = st.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="sm_const")
+        else:
+            area_col = st.selectbox("Colonne de surface (m²)", base_cols, key="sm_area",
+                                    index=max(0, _guess_col(base_cols, ("surface", "area", "m2", "m²"), False) - 1))
+            if mode == "area":
+                unit_value = st.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="sm_unit")
+        if st.button("Calculer les dommages", type="primary", key="sm_dmg_calc"):
+            try:
+                curve = sm.vulnerability_curve(theta, beta)
+                base = out_df.reset_index(drop=True)
+                classes = dmg.asset_class_series(base, type_col, default_cls)
+                values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, "total")
+                cols = {r: sm.column_name(r) for r in res["rps"] if sm.column_name(r) in base.columns}
+                o, summ = dmg.estimate_damages(base, cols, {c: curve for c in classes.dropna().unique()}, classes, values, "Lognormale PGA", None, "seisme")
+                summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                st.session_state["sm_dmg"] = {"out": o, "summ": summ, "name": res["name"], "n": res["n"], "curve": curve}
+            except (dmg.DamageError, ValueError) as e:
+                st.error(str(e))
+
+
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Géorisques"])
+    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Séisme", "Géorisques"])
     with tabs[0]:
         _safe_tab(_exposition_section, "Débordement et submersion")
     with tabs[1]:
         _safe_tab(_wind_section, "Vent & tempête")
     with tabs[2]:
+        _safe_tab(_seisme_section, "Séisme")
+    with tabs[3]:
         _safe_tab(_georisques_section, "Géorisques")
 
 
