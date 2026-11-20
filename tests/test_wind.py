@@ -143,6 +143,29 @@ class TestCdsFlow(unittest.TestCase):
         self.assertEqual(wind.gust_class(30.0), 2)
         self.assertIsNone(wind.gust_class(float("nan")))
 
+    def test_tracks_fall_back_to_simpler_request(self):
+        class Strict(FakeClient):
+            def retrieve(self, dataset, request, target):
+                if dataset == wind.ST_DATASET and ("month" in request or "day" in request):
+                    self.calls.append((dataset, request))
+                    raise RuntimeError("400 Client Error: Bad Request ... invalid request Request has not produced a valid combination of values")
+                return super().retrieve(dataset, request, target)
+        class Strict400(FakeClient):
+            def retrieve(self, dataset, request, target):
+                raise RuntimeError("400 Client Error: Bad Request invalid request")
+        with tempfile.TemporaryDirectory() as t:
+            tr = wind.fetch_tracks(Strict(), "hodges", 2000, 2000, Path(t))
+            self.assertEqual(len(tr), 2)
+            with self.assertRaises(wind.WindError) as cm:
+                wind.fetch_tracks(Strict400(), "hodges", 2001, 2001, Path(t))
+            self.assertIn("variante 3", str(cm.exception))
+
+    def test_parallel_cells(self):
+        with tempfile.TemporaryDirectory() as t:
+            cells = [(40.0 + i, 2.0) for i in range(9)]
+            r = wind.ensure_cells(cells, 2000, 2000, FakeClient(), Path(t), workers=4)
+            self.assertEqual(sorted(r["done"]), sorted(cells))
+
     def test_emanuel(self):
         c = dmg.emanuel_curve()
         self.assertEqual(float(c.at(20)), 0.0)
