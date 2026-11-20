@@ -636,3 +636,15 @@ def legend_labels(edges: list, kind: str) -> dict:
         return {0: "Aucun dommage", 1: f"< {p[0]}", 2: f"{p[0]} à < {p[1]}", 3: f"{p[1]} à < {p[2]}", 4: f"≥ {p[2]}"}
     p = [_fmt_num(e) + " €" for e in edges]
     return {0: "Aucune perte", 1: f"< {p[0]}", 2: f"{p[0]} à < {p[1]}", 3: f"{p[1]} à < {p[2]}", 4: f"≥ {p[2]}"}
+
+
+# ───────────────────────────── vent ─────────────────────────────
+def emanuel_curve(v_thresh: float = 25.7, v_half: float = 74.7, vmax: float = 100.0) -> Curve:
+    """Fonction de dommage vent d'Emanuel (2011), telle qu'utilisée par CLIMADA pour les cyclones tropicaux : ``f = x³ / (1 + x³)`` avec
+    ``x = max(v − v_seuil, 0) / (v_mi − v_seuil)`` (rafale ou vitesse ``v`` en m/s). Les valeurs par défaut sont celles de la calibration
+    « États-Unis » de CLIMADA, à vérifier à la source avant tout usage opérationnel ; elles sont modifiables dans l'interface."""
+    if v_half <= v_thresh:
+        raise DamageError("Emanuel : la vitesse de mi-dommage doit dépasser le seuil.")
+    v = np.arange(0.0, float(vmax) + 1.0, 1.0)
+    x = np.clip(v - v_thresh, 0.0, None) / (v_half - v_thresh)
+    return Curve(v, x ** 3 / (1.0 + x ** 3), f"Emanuel (2011) : seuil {v_thresh:g} m/s, mi-dommage {v_half:g} m/s")
