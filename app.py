@@ -42,7 +42,8 @@ from catmap import websearch as ws
 from catmap import activity as act
 from catmap import georisques as gr
 from catmap import floodhazard as fhz
-from catmap import damage as dmg
+import numpy as np
+from catmap import damage as dmg, wind
 from catmap import coastalhazard as coast
 from catmap import copernicus as cop
 
@@ -3320,18 +3321,8 @@ def _exposition_section():
                "Aqueduct Floods v2, environ 1 km, niveau extrême d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
                )
 
-def _wind_section():
-    st.subheader("Vent & tempête (Copernicus, en préparation)")
-    st.markdown("**Vent** : rafale par période de retour, ajustée sur toutes les rafales de l'historique. **Tempête** : mêmes variables et périodes "
-                "de retour, mais calculées uniquement sur les rafales de tempêtes identifiées, avec le classement des tempêtes passées. Les deux "
-                "utiliseront les données Copernicus gratuites (licence CC-BY) et la même fonction de dommage vent (rafale en m/s).")
-    import os
-    ok_key = cop.key_present(_secrets(), dict(os.environ))
-    st.caption("Clé d'API Copernicus dans les secrets Streamlit : " + ("présente." if ok_key else
-               "absente. Créez un compte gratuit sur cds.climate.copernicus.eu, copiez votre clé d'API (page de votre profil) et ajoutez-la dans "
-               "les secrets sous `CDSAPI_KEY`. Elle n'est utile qu'à l'étape suivante."))
-    st.markdown("**Étape 1 : vérifier les paramètres réels des jeux de données** (aucune clé requise). Ce contrôle lit la description publique "
-                "du catalogue Copernicus afin de construire les requêtes avec les vrais noms de variables.")
+def _wind_catalogue_reader():
+    """Lecture facultative des descriptions du catalogue Copernicus (aucune clé requise)."""
     if st.button("Lire le catalogue Copernicus", key="cop_form_go", type="primary"):
         res = {}
         with st.spinner("Lecture des descriptions…"):
@@ -3341,10 +3332,9 @@ def _wind_section():
                 except cop.CopernicusError as e:
                     res[key] = {"error": str(e)}
         st.session_state["cop_forms"] = res
-    forms = st.session_state.get("cop_forms") or {}
     titles = {"timeseries": "ERA5 horaire en série temporelle (vent : toutes rafales, monde)",
               "storms": "Tempêtes européennes : trajectoires et empreintes de rafales"}
-    for key, item in forms.items():
+    for key, item in (st.session_state.get("cop_forms") or {}).items():
         st.markdown(f"**{titles.get(key, key)}** (`{cop.DATASETS[key]}`)")
         if "error" in item:
             st.error(f"Lecture impossible : {item['error']}")
@@ -3356,9 +3346,251 @@ def _wind_section():
             st.warning("Structure de formulaire non reconnue : téléchargez le JSON brut ci-dessous et envoyez-le.")
         st.download_button("Télécharger la description brute (JSON)", cop.pretty(item["form"]).encode("utf-8"),
                            f"copernicus_{key}_form.json", "application/json", key=f"cop_dl_{key}")
-    if forms:
-        st.caption("Envoyez-moi ces tableaux (ou les fichiers JSON) : ils donnent les noms exacts des variables de rafale, des formats et des "
-                   "filtres de dates, nécessaires pour écrire les requêtes sans supposition.")
+
+
+def _wind_map(res, col):
+    import folium
+    pts = res.dropna(subset=["lat_f", "lon_f"])
+    center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
+    m = _ev_base_map(center, 5)
+    shown = pts.head(3000)
+    is_dmg = col.startswith("dommage_")
+    kind = "ratio" if col.endswith("_ratio") else "eur"
+    edges = dmg.class_edges(res[col], kind) if is_dmg else None
+    pal = dmg.DMG_COLORS if is_dmg else wind.GUST_COLORS
+    for _, r in shown.iterrows():
+        v = pd.to_numeric(r.get(col), errors="coerce")
+        cls = dmg.damage_class(v, edges) if is_dmg else wind.gust_class(v)
+        txt = "".join(f"<div>{html_escape(c)} : {html_escape(r.get(c))}</div>" for c in [col] + [k for k in res.columns if k.endswith("_gust")][:8])
+        folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=pal[cls], fill_opacity=0.9,
+                            tooltip=str(r.get("name") or ""),
+                            popup=folium.Popup(f"<b>{html_escape(r.get('name') or '')}</b>{txt}", max_width=420)).add_to(m)
+    if len(shown) > 1:
+        m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
+    labels = dmg.legend_labels(edges, kind) if is_dmg else wind.GUST_LABELS
+    legend = "".join(f'<div><span style="background:{pal[k]};display:inline-block;width:12px;height:12px;border:1px solid #444;margin-right:6px">'
+                     f'</span>{lab}</div>' for k, lab in labels.items())
+    legend += (f'<div><span style="background:{pal[None]};display:inline-block;width:12px;height:12px;border:1px solid #444;margin-right:6px">'
+               f'</span>Pas de donnée</div>')
+    m.get_root().html.add_child(folium.Element(
+        f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;background:white;color:#222;padding:8px 10px;border:1px solid #888;'
+        f'border-radius:4px;font-size:12px"><b>{html_escape(col)}</b>{legend}</div>'))
+    _ev_show_map(m, "wd_map")
+
+
+_WIND_HAZ = {"vent": "Vent (toutes rafales, monde)", "tempete": "Tempête (événements européens)"}
+
+
+def _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, budget):
+    key = cop.get_key(_secrets(), dict(__import__("os").environ))
+    client = wind.make_client(key)
+    pc = wind.cells_of_points(df[lat_c], df[lon_c])
+    cells = list(dict.fromkeys(c for c in pc if c is not None))
+    if len(cells) > max_cells:
+        st.warning(f"{len(cells)} cellules ERA5 distinctes : seules les {max_cells} premières sont traitées (augmentez la limite ci-dessus).")
+        cells = cells[:max_cells]
+    bar = st.progress(0.0)
+    with st.spinner("Requêtes Copernicus (file d'attente possible, reprise automatique au prochain clic)…"):
+        got = wind.ensure_cells(cells, y0, y1, client, budget_s=budget, on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+    bar.empty()
+    daily = {c: wind.load_daily(wind.cell_path(c, y0, y1)) for c in got["done"]}
+    out = df.copy().reset_index(drop=True)
+    out["lat_f"] = pd.to_numeric(out[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    out["lon_f"] = pd.to_numeric(out[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    out["vent_cellule_era5"] = [f"{c[0]:+.2f};{c[1]:+.2f}" if c else None for c in pc]
+    info = {"cells": len(cells), "done": len(got["done"]), "pending": len(got["pending"]), "errors": {f"{c[0]},{c[1]}": m for c, m in got["errors"].items()}}
+    storms = peaks = None
+    if "vent" in sel and daily:
+        lev = wind.compute_vent(daily, rps)
+        for r in rps:
+            out[wind.column_name("vent", r)] = [lev.get(c, {}).get(r) if c else None for c in pc]
+    if "tempete" in sel and daily:
+        try:
+            with st.spinner("Trajectoires de tempêtes…"):
+                tracks = wind.fetch_tracks(client, algo, y0, y1)
+            storms = wind.extract_storms(tracks, list(daily))
+            if storms.empty:
+                info["tempete_msg"] = "Aucune tempête ne passe à proximité des points (ou aucune dans le domaine 25°O–35°E, 30–70°N)."
+            else:
+                lev, peaks = wind.compute_tempete(storms, daily, y1 - y0 + 1, rps)
+                for r in rps:
+                    out[wind.column_name("tempete", r)] = [lev.get(c, {}).get(r) if c else None for c in pc]
+                info["n_storms"] = len(storms)
+        except wind.WindError as e:
+            info["tempete_msg"] = f"Tempêtes : {e}"
+    st.session_state["wd_result"] = {"name": name, "n": len(df), "df": out, "rps": list(rps), "sel": list(sel), "cells": pc, "storms": storms,
+                                     "peaks": peaks, "info": info, "y": (y0, y1)}
+    st.session_state.pop("wd_dmg", None)
+
+
+def _wind_damage(res, df_cols, key_ok_jrc):
+    """Dommages vent : même fonction de dommage (Emanuel) pour le vent et la tempête ; perte par tempête pour le classement."""
+    base_cols = [c for c in df_cols if not c.endswith("_gust") and not c.startswith(("dommage_", "vent_")) and c not in ("lat_f", "lon_f")]
+    out_df = res["df"]
+    with st.container(border=True):
+        st.markdown("**Estimation des dommages vent** : perte = taux(rafale) × valeur exposée, avec la fonction d'Emanuel (2011) "
+                    "`x³/(1+x³)`. Même courbe pour le vent et la tempête ; seuls changent les niveaux de rafale par période de retour.")
+        c1, c2, c3 = st.columns(3)
+        v_t = c1.number_input("Seuil de dommage (m/s)", min_value=5.0, max_value=60.0, value=25.7, step=0.5, key="wd_vt",
+                              help="Valeur par défaut = calibration CLIMADA États-Unis pour les cyclones ; à ajuster pour l'Europe.")
+        v_h = c2.number_input("Rafale de mi-dommage (m/s)", min_value=20.0, max_value=150.0, value=74.7, step=0.5, key="wd_vh")
+        default_cls = c3.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="wd_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
+        d1, d2 = st.columns(2)
+        type_col = d1.selectbox("Colonne du type d'actif (facultatif)", ["(aucune)"] + base_cols, key="wd_typecol",
+                                index=_guess_col(base_cols, ("type", "categ", "activ", "naf")))
+        country_col = d2.selectbox("Colonne pays (ISO ou nom anglais)", ["(aucune)"] + base_cols, key="wd_ctry",
+                                   index=_guess_col(base_cols, ("pays_iso", "iso2", "iso3", "country", "pays")))
+        type_col = None if type_col == "(aucune)" else type_col
+        country_col = None if country_col == "(aucune)" else country_col
+        jrc, jerr = _dmg_jrc_local()
+        jrc_ok = bool(jrc and jrc["maxdmg"] and country_col)
+        modes = (["jrc_area"] if jrc_ok else []) + ["area", "col", "const"]
+        mode = st.radio("Valeur exposée", modes, key="wd_mode", format_func=lambda m: _DMG_VALUE_MODES[m])
+        if not jrc_ok:
+            st.caption("Valeurs de remplacement JRC par pays : placez le classeur JRC dans data/flood/ et choisissez une colonne pays.")
+        value_col = area_col = None
+        unit_value = const = 0.0
+        if mode == "col":
+            value_col = st.selectbox("Colonne de valeur (€)", base_cols, key="wd_valcol")
+        elif mode == "const":
+            const = st.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="wd_const")
+        else:
+            area_col = st.selectbox("Colonne de surface (m²)", base_cols, key="wd_area", index=max(0, _guess_col(base_cols, ("surface", "area", "m2", "m²"), False) - 1))
+            if mode == "area":
+                unit_value = st.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="wd_unit")
+        if st.button("Calculer les dommages", type="primary", key="wd_dmg_calc"):
+            try:
+                curve = dmg.emanuel_curve(v_t, v_h)
+                base = out_df.reset_index(drop=True)
+                classes = dmg.asset_class_series(base, type_col, default_cls)
+                values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, "total")
+                curves = {c: curve for c in classes.dropna().unique()}
+                per = {}
+                for hz in res["sel"]:
+                    cols = {r: wind.column_name(hz, r) for r in res["rps"] if wind.column_name(hz, r) in base.columns}
+                    if not cols:
+                        continue
+                    o, sm = dmg.estimate_damages(base, cols, curves, classes, values, "Emanuel (2011)", None, hz)
+                    sm["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                    per[hz] = (o, sm)
+                ranking = None
+                if res.get("storms") is not None and len(res["storms"]) and res.get("peaks"):
+                    cells = res["cells"]
+                    G = np.column_stack([res["peaks"].get(c, np.full(len(res["storms"]), np.nan)) if c else np.full(len(res["storms"]), np.nan)
+                                         for c in cells])
+                    loss = wind.event_losses(G, classes.to_numpy(), values.to_numpy(), curves)
+                    st_df = res["storms"].copy()
+                    st_df.insert(1, "nom_usuel", [wind.known_name(t) for t in st_df["peak_time"]])
+                    st_df["rafale_max_portefeuille_ms"] = np.nanmax(np.where(np.isfinite(G), G, -np.inf), axis=1) if G.size else np.nan
+                    st_df["rafale_max_portefeuille_ms"] = st_df["rafale_max_portefeuille_ms"].replace(-np.inf, np.nan)
+                    st_df["perte_portefeuille_eur"] = loss
+                    ranking = st_df.sort_values("perte_portefeuille_eur", ascending=False).reset_index(drop=True)
+                st.session_state["wd_dmg"] = {"per": per, "ranking": ranking, "curve": curve, "name": res["name"], "n": res["n"]}
+            except dmg.DamageError as e:
+                st.error(str(e))
+
+
+def _wind_section():
+    st.subheader("Vent et tempête")
+    st.markdown("**Vent** : rafale (m/s) par période de retour, ajustée sur les maxima annuels de toutes les rafales (ERA5, monde). **Tempête** : mêmes "
+                "variables et périodes de retour, calculées uniquement sur les rafales des tempêtes identifiées (trajectoires Copernicus, Europe), avec "
+                "le classement des tempêtes passées. Données Copernicus gratuites (licence CC-BY) ; même fonction de dommage vent pour les deux.")
+    import os
+    ok_key = cop.key_present(_secrets(), dict(os.environ))
+    st.caption("Clé d'API Copernicus dans les secrets Streamlit (`CDSAPI_KEY`) : " + ("présente." if ok_key else
+               "absente. Créez un compte gratuit sur cds.climate.copernicus.eu, copiez votre clé d'API (page de votre profil), acceptez les licences "
+               "des deux jeux de données sur leurs pages, puis ajoutez la clé dans les secrets."))
+    with st.expander("Catalogue Copernicus (contrôle des paramètres, sans clé)"):
+        _wind_catalogue_reader()
+    df, lat_c, lon_c, name = _points_input("wd_")
+    if df is None:
+        return
+    sel = st.multiselect("Aléas à analyser", list(_WIND_HAZ), default=["vent"], key="wd_sel", format_func=lambda k: _WIND_HAZ[k])
+    c1, c2, c3, c4 = st.columns(4)
+    rps = c1.multiselect("Périodes de retour (années)", list(wind.RPS), default=[100], key="wd_rps", format_func=_rp_fmt)
+    y0 = int(c2.number_input("Première année", min_value=1940, max_value=2020, value=1990, step=1, key="wd_y0",
+                             help="Plus la période est longue, plus les périodes de retour élevées sont fiables (≥ 30 ans requis)."))
+    y1 = int(c3.number_input("Dernière année", min_value=1950, max_value=2025, value=2023, step=1, key="wd_y1"))
+    algo = c4.selectbox("Algorithme de trajectoires (tempête)", list(wind.ALGORITHMS), key="wd_algo")
+    max_cells = int(st.number_input("Nombre maximal de cellules ERA5 (0,25°) à traiter", min_value=1, max_value=500, value=40, step=5, key="wd_maxc",
+                                    help="Une requête Copernicus par cellule distincte ; les cellules déjà téléchargées sont réutilisées."))
+    if not sel or not rps:
+        st.caption("Choisissez au moins un aléa et une période de retour.")
+        return
+    if y1 - y0 + 1 < 30:
+        st.warning("Moins de 30 ans de données : l'ajustement du vent sera refusé (résultats vides).")
+    cells_n = len({c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
+    st.caption(f"{len(df)} point(s), {cells_n} cellule(s) ERA5 distincte(s). Les requêtes sont en file d'attente chez Copernicus : un lot dure au plus "
+               "4 minutes ; s'il en reste, recliquez sur le bouton, les cellules déjà obtenues sont conservées.")
+    b1, b2, b3 = st.columns([1, 1, 1])
+    if b1.button("Tester une requête (1 cellule, 1 an)", key="wd_test"):
+        try:
+            client = wind.make_client(cop.get_key(_secrets(), dict(os.environ)))
+            cell = next(c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c)
+            t0 = __import__("time").time()
+            data = wind._retrieve(client, wind.TS_DATASET, wind.build_timeseries_request(cell[0], cell[1], y1, y1),
+                                  wind.CACHE_DIR / "tmp_test.dat")
+            ser = wind.parse_gust_series(data)
+            st.success(f"Requête OK en {__import__('time').time() - t0:.0f} s : {len(ser)} valeurs horaires, rafale max {ser.max():.1f} m/s.")
+        except (wind.WindError, cop.CopernicusError, StopIteration) as e:
+            st.error(f"Test en échec : {e}")
+    if b2.button("Lancer / reprendre le calcul", type="primary", key="wd_go"):
+        try:
+            _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, 240.0)
+        except (wind.WindError, cop.CopernicusError) as e:
+            st.error(str(e))
+    if b3.button("Vider le cache vent", key="wd_clear"):
+        n = wind.clear_cache()
+        st.session_state.pop("wd_result", None)
+        st.session_state.pop("wd_dmg", None)
+        st.caption(f"{n} fichier(s) supprimé(s).")
+    res = st.session_state.get("wd_result")
+    if not res or res["name"] != name or res["n"] != len(df):
+        return
+    info = res["info"]
+    st.caption(f"Cellules obtenues : {info['done']} / {info['cells']}." + (f" {info['pending']} en attente : relancez le calcul." if info["pending"] else ""))
+    for k, m in list(info["errors"].items())[:5]:
+        st.warning(f"Cellule {k} : {m}")
+    if info.get("tempete_msg"):
+        st.warning(info["tempete_msg"])
+    out = res["df"]
+    gust_cols = [wind.column_name(h, r) for h in res["sel"] for r in res["rps"] if wind.column_name(h, r) in out.columns]
+    if not gust_cols:
+        st.caption("Aucune valeur de rafale calculée pour le moment.")
+        return
+    if st.button("Estimer les dommages", type="primary", key="wd_dmg_go"):
+        st.session_state["wd_dmg_open"] = True
+    if st.session_state.get("wd_dmg_open"):
+        _wind_damage(res, list(out.columns), None)
+    dm = st.session_state.get("wd_dmg")
+    merged = out.copy()
+    col_opts = list(gust_cols)
+    if dm and dm["name"] == name and dm["n"] == len(df):
+        for hz, (o, sm) in dm["per"].items():
+            new = [c for c in o.columns if c not in merged.columns]
+            merged = pd.concat([merged, o[new]], axis=1)
+            col_opts += [c for c in o.columns if c.startswith(f"dommage_{hz}_RP") or c == f"dommage_{hz}_PAM_eur"]
+            st.markdown(f"**Dommages : {_WIND_HAZ[hz]}**")
+            cols = st.columns(4)
+            for i, (c, v) in enumerate(list(sm["pertes_totales"].items())[:3]):
+                _kpi(cols[i], f"Perte totale RP{__import__('re').search(r'RP(' + chr(92) + 'd+)', c).group(1)}", _eur(v))
+            if sm["pam_totale"] is not None:
+                _kpi(cols[3], "Perte annuelle moyenne (approx.)", _eur(sm["pam_totale"]))
+            if sm.get("valeur_nulle"):
+                st.warning("La valeur exposée est nulle ou absente : les pertes en € sont nulles (les taux restent valables).")
+    color_col = st.selectbox("Colorer la carte selon", col_opts, key="wd_color")
+    _wind_map(merged, color_col)
+    show = merged.drop(columns=["lat_f", "lon_f"])
+    _stretch(st.dataframe, show, hide_index=True)
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(show), "catmap_vent_tempete.csv", "text/csv", key="wd_csv")
+    if res.get("storms") is not None and len(res["storms"]):
+        st.markdown(f"**Tempêtes passées près du portefeuille** ({len(res['storms'])}, algorithme {algo})")
+        rk = dm["ranking"] if dm and dm.get("ranking") is not None else res["storms"].assign(nom_usuel=[wind.known_name(t) for t in res["storms"]["peak_time"]])
+        _stretch(st.dataframe, rk, hide_index=True)
+        st.download_button("Télécharger le classement (CSV)", _csv_bytes(rk), "catmap_tempetes.csv", "text/csv", key="wd_csv_storms")
+        st.caption("Le nom usuel (Lothar, Xynthia…) est rapproché par la date du pic, à ± 1 jour ; le jeu Copernicus ne fournit que des identifiants.")
+    st.caption("Rafales ERA5 à 0,25° (≈ 25 km) : lissées, elles sous-estiment souvent les extrêmes locaux. Périodes de retour supérieures à la durée "
+               "d'observation = extrapolation. Fonction de dommage : Emanuel (2011), paramètres modifiables, à calibrer pour l'Europe.")
 
 
 def page_risques_climatiques():
