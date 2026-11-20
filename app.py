@@ -3111,8 +3111,8 @@ def _exposition_section():
     df, lat_c, lon_c, name = _points_input("ex_")
     if df is None:
         return
-    common = st.checkbox("Mêmes périodes de retour pour tous les aléas sélectionnés", value=True, key="ex_common_rp",
-                         help="Décochez pour choisir des périodes de retour différentes pour chaque aléa.")
+    common = _checkbox_with_help("Mêmes périodes de retour pour tous les aléas sélectionnés",
+                                 "Décochez pour choisir des périodes de retour différentes pour chaque aléa.", key="ex_common_rp", value=True)
     union = sorted({r for k in sel for r in _HAZARDS[k]["rps"]})
     rps_common = None
     if common:
@@ -3528,7 +3528,17 @@ def _wind_section():
                        min_value=1940, max_value=2020, value=1990, step=1, key="wd_y0"))
     y1 = int(_num_help(c3, "Dernière année", "Dernière année de la période d'observation utilisée (ERA5 et trajectoires de tempêtes).",
                        min_value=1950, max_value=2025, value=2023, step=1, key="wd_y1"))
-    algo = c4.selectbox("Algorithme de trajectoires (tempête)", list(wind.ALGORITHMS), key="wd_algo")
+    with c4:
+        _help_line("Algo. tempête", "**Méthode de suivi des tempêtes** dans la réanalyse ERA5 (trajectoires Copernicus).\n\n"
+                   "**tempestextremes** (TempestExtremes) : suit les minima de pression au niveau de la mer. *Hypothèse* : une tempête est un "
+                   "minimum de pression fermé qui se déplace. *Avantage* : critère physique simple et robuste, peu de faux systèmes. "
+                   "*Inconvénient* : peut manquer les tempêtes faibles, rapides ou peu creusées ; dépend des seuils retenus.\n\n"
+                   "**hodges** (TRACK) : suit les maxima de tourbillon relatif à 850 hPa. *Hypothèse* : une tempête est un maximum de rotation "
+                   "dans la basse atmosphère. *Avantage* : détecte tôt les tempêtes en formation et les systèmes petits ou rapides. "
+                   "*Inconvénient* : plus sensible au bruit, avec davantage de systèmes faibles, donc plus de tempêtes à trier.\n\n"
+                   "Les deux listes se recoupent largement pour les grandes tempêtes ; l'écart se joue sur les événements moyens.", wide=True,
+                   label_style="font-size:.875rem")
+        algo = st.selectbox("Algo. tempête", list(wind.ALGORITHMS), key="wd_algo", label_visibility="collapsed")
     cells_n = len({c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
     max_cells = int(_num_help(st, "Nombre maximal de cellules ERA5 (0,25°) à traiter", "Les points d'une même maille de 0,25° × 0,25° sont regroupés : "
                               "une seule requête Copernicus par maille (environ 1 à 2 minutes chacune), et les mailles déjà téléchargées sont "
