@@ -119,6 +119,9 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 
 /* Exposition aux risques : boutons « Estimer » et « Vider le cache » en texte blanc */
 .st-key-cop_form_go button, .st-key-cop_form_go button p, .st-key-cop_form_go button span,
+.st-key-wd_go button, .st-key-wd_go button p, .st-key-wd_go button span,
+.st-key-wd_dmg_go button, .st-key-wd_dmg_go button p, .st-key-wd_dmg_go button span,
+.st-key-wd_dmg_calc button, .st-key-wd_dmg_calc button p, .st-key-wd_dmg_calc button span,
 .st-key-ex_go button, .st-key-ex_go button p, .st-key-ex_go button span,
 .st-key-ex_dmg_go button, .st-key-ex_dmg_go button p, .st-key-ex_dmg_go button span,
 .st-key-ex_clear_cache button, .st-key-ex_clear_cache button p, .st-key-ex_clear_cache button span,
