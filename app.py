@@ -3412,7 +3412,7 @@ def _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, bud
     out["lat_f"] = pd.to_numeric(out[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
     out["lon_f"] = pd.to_numeric(out[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
     out["vent_cellule_era5"] = [f"{c[0]:+.2f};{c[1]:+.2f}" if c else None for c in pc]
-    info = {"cells": len(cells), "done": len(got["done"]), "pending": len(got["pending"]), "errors": {f"{c[0]},{c[1]}": m for c, m in got["errors"].items()}}
+    info = {"cells": len(cells), "done": len(got["done"]), "pending": len(got["pending"]), "queue_full": got.get("queue_full", False), "errors": {f"{c[0]},{c[1]}": m for c, m in got["errors"].items()}}
     storms = peaks = None
     if "vent" in sel and daily:
         lev = wind.compute_vent(daily, rps)
@@ -3422,7 +3422,8 @@ def _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, bud
         try:
             with st.spinner("Trajectoires de tempêtes…"):
                 tracks = wind.fetch_tracks(client, algo, y0, y1)
-            storms = wind.extract_storms(tracks, list(daily))
+            info["tracks"] = wind.tracks_summary(tracks)
+            storms = wind.extract_storms(tracks, list(cells))
             if storms.empty:
                 info["tempete_msg"] = "Aucune tempête ne passe à proximité des points (ou aucune dans le domaine 25°O–35°E, 30–70°N)."
             else:
@@ -3528,16 +3529,18 @@ def _wind_section():
     y1 = int(_num_help(c3, "Dernière année", "Dernière année de la période d'observation utilisée (ERA5 et trajectoires de tempêtes).",
                        min_value=1950, max_value=2025, value=2023, step=1, key="wd_y1"))
     algo = c4.selectbox("Algorithme de trajectoires (tempête)", list(wind.ALGORITHMS), key="wd_algo")
-    max_cells = int(_num_help(st, "Nombre maximal de cellules ERA5 (0,25°) à traiter", "Une requête Copernicus par cellule distincte (environ 1 à 2 minutes "
-                              "chacune) ; les cellules déjà téléchargées sont réutilisées. Augmentez la limite pour traiter tous vos points, par lots.",
-                              min_value=1, max_value=500, value=40, step=5, key="wd_maxc"))
+    cells_n = len({c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
+    max_cells = int(_num_help(st, "Nombre maximal de cellules ERA5 (0,25°) à traiter", "Les points d'une même maille de 0,25° × 0,25° sont regroupés : "
+                              "une seule requête Copernicus par maille (environ 1 à 2 minutes chacune), et les mailles déjà téléchargées sont "
+                              "réutilisées. Par défaut, toutes les mailles de votre fichier ; diminuez pour limiter la durée.",
+                              min_value=1, max_value=max(500, cells_n), value=max(1, cells_n), step=5, key=f"wd_maxc_{cells_n}"))
     if not sel or not rps:
         st.caption("Choisissez au moins un aléa et une période de retour.")
         return
     if y1 - y0 + 1 < 30:
         st.warning("Moins de 30 ans de données : l'ajustement du vent sera refusé (résultats vides).")
-    cells_n = len({c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
-    st.caption(f"{len(df)} point(s), {cells_n} cellule(s) ERA5 distincte(s). Les requêtes sont en file d'attente chez Copernicus : un lot dure au plus "
+    n_cached = sum(wind.cell_path(c, y0, y1).exists() for c in {c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
+    st.caption(f"{len(df)} point(s) regroupés en {cells_n} maille(s) ERA5 de 0,25° ({n_cached} déjà en cache, {cells_n - n_cached} à télécharger). Les requêtes sont en file d'attente chez Copernicus : un lot dure au plus "
                "4 minutes ; s'il en reste, recliquez sur le bouton, les cellules déjà obtenues sont conservées.")
     b1, b2, b3 = st.columns([1, 1, 1])
     if b1.button("Tester une requête (1 cellule, 1 an)", key="wd_test"):
@@ -3568,8 +3571,14 @@ def _wind_section():
     st.caption(f"Cellules obtenues : {info['done']} / {info['cells']}." + (f" {info['pending']} en attente : relancez le calcul." if info["pending"] else ""))
     for k, m in list(info["errors"].items())[:5]:
         st.warning(f"Cellule {k} : {m}")
+    if info.get("queue_full"):
+        st.warning("La file d'attente Copernicus est pleine (des requêtes précédentes sont encore en cours chez eux) : attendez quelques minutes, "
+                   "puis relancez le calcul. Les requêtes sont envoyées une par une.")
     if info.get("tempete_msg"):
         st.warning(info["tempete_msg"])
+    if info.get("tracks"):
+        with st.expander("Diagnostic des trajectoires de tempêtes"):
+            _stretch(st.dataframe, pd.DataFrame({"élément": list(info["tracks"]), "valeur": [str(v) for v in info["tracks"].values()]}), hide_index=True)
     out = res["df"]
     gust_cols = [wind.column_name(h, r) for h in res["sel"] for r in res["rps"] if wind.column_name(h, r) in out.columns]
     if not gust_cols:
