@@ -1205,6 +1205,19 @@ def _help_line(label_html: str, text: str, *, icon_first: bool = False, left: bo
     st.markdown(f'<div style="display:flex;align-items:center;gap:.45rem;flex-wrap:nowrap">{inner}</div>', unsafe_allow_html=True)
 
 
+def _num_help(container, label: str, help_text: str, **kw):
+    """``number_input`` dont l'infobulle s'affiche au survol (pastille « ? » en CSS pur, comme ailleurs dans l'app) :
+    l'infobulle native de Streamlit ne réagit pas sur ces champs."""
+    with container if container is not st else _NullCtx():
+        _help_line(html.escape(label), help_text, label_style="font-size:.875rem")
+        return container.number_input(label, label_visibility="collapsed", **kw)
+
+
+class _NullCtx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
 def _checkbox_with_help(label: str, help_text: str, *, key: str, value: bool = False, left: bool = False, wide: bool = False) -> bool:
     """Case à cocher + « ? » collé au texte (infobulle au survol uniquement)."""
     try:
@@ -2901,9 +2914,10 @@ def _fh_damage_jrc_ui():
 
 def _guess_col(cols, words, default_none=True):
     """Index (dans ["(aucune)"] + cols) de la 1re colonne dont le nom contient un des mots ; 0 = « (aucune) »."""
-    for i, c in enumerate(cols):
-        if any(w in str(c).lower() for w in words):
-            return i + 1
+    for w in words:                                      # priorité à l'ordre des mots : le 1er mot reconnu gagne
+        for i, c in enumerate(cols):
+            if w in str(c).lower():
+                return i + 1
     return 0 if default_none else 1
 
 
@@ -2935,13 +2949,13 @@ def _fh_damage_panel(df, name, hazards, ensure):
             hz = None if is_jrc else _fh_damage_hazus_ui()
             c1, c2, c3 = st.columns(3)
             cls_main = list(dmg.CLASSES) if is_jrc else ["industrial", "commercial", "residential"]
-            default_cls = c1.selectbox("Type d'actif par défaut", cls_main, key="fh_dmg_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
+            default_cls = c1.selectbox("Type d'actif par défaut", cls_main, key="fh_dmg_cls", index=cls_main.index("commercial"), format_func=lambda k: dmg.CLASS_LABELS[k])
             type_col = c2.selectbox("Colonne décrivant le type d'actif (facultatif)", ["(aucune)"] + base_cols, key="fh_dmg_typecol",
                                     index=_guess_col(base_cols, ("type", "categ", "activ", "naf")),
                                     help="Libellés reconnus : industriel / usine, commercial / magasin / bureau, résidentiel / logement… "
                                          "Les autres lignes reçoivent le type par défaut.")
             country_col = c3.selectbox("Colonne pays (code ISO 2/3 lettres ou nom anglais)", ["(aucune)"] + base_cols, key="fh_dmg_ctrycol",
-                                       index=_guess_col(base_cols, ("pays_iso", "iso2", "iso3", "country", "pays")),
+                                       index=_guess_col(base_cols, ("pays_iso2", "pays_iso", "iso2", "iso3", "country", "pays")),
                                        help="Sert à choisir la courbe du bon continent (approche JRC) et la valeur de remplacement du pays.")
             type_col = None if type_col == "(aucune)" else type_col
             country_col = None if country_col == "(aucune)" else country_col
@@ -2985,9 +2999,9 @@ def _fh_damage_panel(df, name, hazards, ensure):
                     if opts:
                         occ[cls] = col.selectbox(f"Occupation Hazus – {dmg.CLASS_LABELS[cls].lower()}", opts, key=f"fh_hz_occ_{cls}",
                                                  format_func=lambda o: f"{o} – {occs[o]}" if occs.get(o) else o)
-                floor_h = st.number_input("Hauteur du plancher au-dessus du terrain (m)", min_value=0.0, max_value=3.0, value=0.0, step=0.1,
-                                          key="fh_hz_floor", help="Les fonctions Hazus sont relatives au plancher du rez-de-chaussée ; "
-                                          "0 = plancher au niveau du terrain.")
+                floor_h = _num_help(st, "Hauteur du plancher au-dessus du terrain (m)", "Les fonctions Hazus sont relatives au plancher du "
+                                    "rez-de-chaussée ; 0 = plancher au niveau du terrain.", min_value=0.0, max_value=3.0, value=0.0, step=0.1,
+                                    key="fh_hz_floor")
             ready = (jrc is not None and bool(jrc["curves"])) if is_jrc else hz is not None
             if st.button("Calculer les dommages", type="primary", key="fh_dmg_calc", disabled=not ready):
                 def _depths_ok(h):
@@ -3431,15 +3445,16 @@ def _wind_damage(res, df_cols, key_ok_jrc):
         st.markdown("**Estimation des dommages vent** : perte = taux(rafale) × valeur exposée, avec la fonction d'Emanuel (2011) "
                     "`x³/(1+x³)`. Même courbe pour le vent et la tempête ; seuls changent les niveaux de rafale par période de retour.")
         c1, c2, c3 = st.columns(3)
-        v_t = c1.number_input("Seuil de dommage (m/s)", min_value=5.0, max_value=60.0, value=25.7, step=0.5, key="wd_vt",
-                              help="Valeur par défaut = calibration CLIMADA États-Unis pour les cyclones ; à ajuster pour l'Europe.")
-        v_h = c2.number_input("Rafale de mi-dommage (m/s)", min_value=20.0, max_value=150.0, value=74.7, step=0.5, key="wd_vh")
-        default_cls = c3.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="wd_cls", format_func=lambda k: dmg.CLASS_LABELS[k])
+        v_t = _num_help(c1, "Seuil de dommage (m/s)", "Rafale en dessous de laquelle le taux de dommage est nul. Valeur par défaut = calibration "
+                        "CLIMADA États-Unis pour les cyclones ; à ajuster pour l'Europe.", min_value=5.0, max_value=60.0, value=25.7, step=0.5, key="wd_vt")
+        v_h = _num_help(c2, "Rafale de mi-dommage (m/s)", "Rafale pour laquelle 50 % de la valeur exposée est détruite (fonction d'Emanuel).",
+                        min_value=20.0, max_value=150.0, value=74.7, step=0.5, key="wd_vh")
+        default_cls = c3.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="wd_cls", index=list(dmg.CLASSES).index("commercial"), format_func=lambda k: dmg.CLASS_LABELS[k])
         d1, d2 = st.columns(2)
         type_col = d1.selectbox("Colonne du type d'actif (facultatif)", ["(aucune)"] + base_cols, key="wd_typecol",
                                 index=_guess_col(base_cols, ("type", "categ", "activ", "naf")))
         country_col = d2.selectbox("Colonne pays (ISO ou nom anglais)", ["(aucune)"] + base_cols, key="wd_ctry",
-                                   index=_guess_col(base_cols, ("pays_iso", "iso2", "iso3", "country", "pays")))
+                                   index=_guess_col(base_cols, ("pays_iso2", "pays_iso", "iso2", "iso3", "country", "pays")))
         type_col = None if type_col == "(aucune)" else type_col
         country_col = None if country_col == "(aucune)" else country_col
         jrc, jerr = _dmg_jrc_local()
@@ -3508,12 +3523,14 @@ def _wind_section():
     sel = st.multiselect("Aléas à analyser", list(_WIND_HAZ), default=["vent"], key="wd_sel", format_func=lambda k: _WIND_HAZ[k])
     c1, c2, c3, c4 = st.columns(4)
     rps = c1.multiselect("Périodes de retour (années)", list(wind.RPS), default=[100], key="wd_rps", format_func=_rp_fmt)
-    y0 = int(c2.number_input("Première année", min_value=1940, max_value=2020, value=1990, step=1, key="wd_y0",
-                             help="Plus la période est longue, plus les périodes de retour élevées sont fiables (≥ 30 ans requis)."))
-    y1 = int(c3.number_input("Dernière année", min_value=1950, max_value=2025, value=2023, step=1, key="wd_y1"))
+    y0 = int(_num_help(c2, "Première année", "Plus la période est longue, plus les périodes de retour élevées sont fiables (≥ 30 ans requis).",
+                       min_value=1940, max_value=2020, value=1990, step=1, key="wd_y0"))
+    y1 = int(_num_help(c3, "Dernière année", "Dernière année de la période d'observation utilisée (ERA5 et trajectoires de tempêtes).",
+                       min_value=1950, max_value=2025, value=2023, step=1, key="wd_y1"))
     algo = c4.selectbox("Algorithme de trajectoires (tempête)", list(wind.ALGORITHMS), key="wd_algo")
-    max_cells = int(st.number_input("Nombre maximal de cellules ERA5 (0,25°) à traiter", min_value=1, max_value=500, value=40, step=5, key="wd_maxc",
-                                    help="Une requête Copernicus par cellule distincte ; les cellules déjà téléchargées sont réutilisées."))
+    max_cells = int(_num_help(st, "Nombre maximal de cellules ERA5 (0,25°) à traiter", "Une requête Copernicus par cellule distincte (environ 1 à 2 minutes "
+                              "chacune) ; les cellules déjà téléchargées sont réutilisées. Augmentez la limite pour traiter tous vos points, par lots.",
+                              min_value=1, max_value=500, value=40, step=5, key="wd_maxc"))
     if not sel or not rps:
         st.caption("Choisissez au moins un aléa et une période de retour.")
         return
