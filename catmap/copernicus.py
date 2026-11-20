@@ -84,3 +84,13 @@ def key_present(secrets: dict, env: Optional[dict] = None) -> bool:
         if str(env.get(name) or secrets.get(name) or "").strip():
             return True
     return False
+
+
+def get_key(secrets: dict, env: Optional[dict] = None) -> str:
+    """Valeur de la clé d'API Copernicus (secrets puis environnement). Ne jamais l'afficher ni la journaliser."""
+    env = env or {}
+    for name in ("CDSAPI_KEY", "CDS_API_KEY", "cdsapi_key"):
+        v = str(secrets.get(name) or env.get(name) or "").strip()
+        if v:
+            return v
+    return ""
