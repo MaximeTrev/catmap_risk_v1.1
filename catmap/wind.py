@@ -242,6 +242,7 @@ def build_tracks_request(algorithm: str, y0: int, y1: int, variant: int = 0) -> 
 TRACK_VARIANTS = (0, 1, 2, 3)
 
 
+_QUEUE_FULL = re.compile(r"maximum number (of )?queued|queued requests|sequentially", re.I)
 _TOO_BIG = re.compile(r"too large|cost|limit|exceed|too many|request is larger", re.I)
 
 
@@ -266,7 +267,7 @@ def fetch_daily(client, lat: float, lon: float, y0: int, y1: int, cache_dir: Pat
         data = _retrieve(client, TS_DATASET, build_timeseries_request(lat, lon, y0, y1), cache_dir / f"tmp_{lat}_{lon}_{y0}_{y1}.dat")
         return daily_max(parse_gust_series(data))
     except WindError as e:
-        if _TOO_BIG.search(str(e)) and (y1 - y0 + 1) > 2 * min_span:
+        if _TOO_BIG.search(str(e)) and not _QUEUE_FULL.search(str(e)) and (y1 - y0 + 1) > 2 * min_span:
             mid = (y0 + y1) // 2
             a = fetch_daily(client, lat, lon, y0, mid, cache_dir, min_span)
             b = fetch_daily(client, lat, lon, mid + 1, y1, cache_dir, min_span)
@@ -279,10 +280,11 @@ def cell_path(cell: tuple[float, float], y0: int, y1: int, cache_dir: Path = CAC
 
 
 def ensure_cells(cells, y0: int, y1: int, client, cache_dir: Path = CACHE_DIR, budget_s: float = 240.0,
-                 on_progress: Optional[Callable[[int, int], None]] = None, workers: int = 4) -> dict:
-    """Récupère (avec cache disque) les séries journalières des cellules, ``workers`` requêtes à la fois (le CDS traite plusieurs
-    requêtes en parallèle). Aucun nouveau lot n'est lancé une fois le budget de temps consommé : relancer reprend là où on s'est arrêté.
-    Renvoie ``{"done": [...], "pending": [...], "errors": {cellule: message}}``."""
+                 on_progress: Optional[Callable[[int, int], None]] = None, workers: int = 1) -> dict:
+    """Récupère (avec cache disque) les séries journalières des cellules, une requête à la fois par défaut : le CDS refuse les
+    envois parallèles (« Maximum number queued requests … request data sequentially »). Aucun nouveau lot n'est lancé une fois le budget
+    de temps consommé, ni quand la file d'attente du CDS est pleine : relancer reprend là où on s'est arrêté.
+    Renvoie ``{"done": [...], "pending": [...], "errors": {cellule: message}, "queue_full": bool}``."""
     from concurrent.futures import ThreadPoolExecutor
     t0 = time.time()
     done, pending, errors = [], [], {}
@@ -296,27 +298,31 @@ def ensure_cells(cells, y0: int, y1: int, client, cache_dir: Path = CACHE_DIR, b
             save_daily(cell_path(cell, y0, y1, cache_dir), fetch_daily(client, cell[0], cell[1], y0, y1, cache_dir))
             return cell, None
         except WindError as e:
-            return cell, str(e)
+            return cell, ("QUEUE" if _QUEUE_FULL.search(str(e)) else str(e))
 
+    queue_full = False
     n_total, n_seen = len(cells), len(done)
     if on_progress:
         on_progress(n_seen, n_total)
     w = max(1, int(workers))
     for i in range(0, len(todo), w):
         batch = todo[i:i + w]
-        if time.time() - t0 > budget_s:
+        if queue_full or time.time() - t0 > budget_s:
             pending += batch
             continue
         with ThreadPoolExecutor(max_workers=w) as ex:
             for cell, err in ex.map(one, batch):
                 if err is None:
                     done.append(cell)
+                elif err == "QUEUE":
+                    queue_full = True
+                    pending.append(cell)
                 else:
                     errors[cell] = err
         n_seen += len(batch)
         if on_progress:
             on_progress(n_seen, n_total)
-    return {"done": done, "pending": pending, "errors": errors}
+    return {"done": done, "pending": pending, "errors": errors, "queue_full": queue_full}
 
 
 def cache_info(cache_dir: Path = CACHE_DIR) -> tuple[int, float]:
@@ -508,3 +514,13 @@ def compute_tempete(storms: pd.DataFrame, daily_by_cell: dict, n_years: float, r
         except WindError:
             levels[c] = {r: None for r in rps}
     return levels, peaks
+
+
+def tracks_summary(tracks: pd.DataFrame, domain=STORM_DOMAIN) -> dict:
+    """Résumé des trajectoires lues, pour diagnostiquer un résultat vide (colonnes, étendues, tempêtes dans le domaine)."""
+    lon0, lon1, lat0, lat1 = domain
+    inside = tracks[(tracks["lon"].between(lon0, lon1)) & (tracks["lat"].between(lat0, lat1))]
+    return {"lignes": int(len(tracks)), "tempetes": int(tracks["storm"].nunique()), "tempetes_dans_domaine": int(inside["storm"].nunique()),
+            "periode": f"{tracks['time'].min():%Y-%m-%d} → {tracks['time'].max():%Y-%m-%d}",
+            "lon": f"{tracks['lon'].min():.1f} → {tracks['lon'].max():.1f}", "lat": f"{tracks['lat'].min():.1f} → {tracks['lat'].max():.1f}",
+            "rafale_dans_fichier": bool(tracks["gust"].notna().any())}
