@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 """Test de fumée de app.py avec un faux module Streamlit (exécuté seulement si Streamlit n'est pas installé).
 
 Il exécute réellement les 3 pages, une recherche (Overpass simulé), les téléchargements et le
@@ -568,6 +570,32 @@ class TestAppSmoke(unittest.TestCase):
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
         self.assertEqual(set(st.session_state["cop_forms"]), {"timeseries", "storms"})
         self.assertFalse([c for c in st.calls if c[0] == "info"])
+
+    def test_wind_end_to_end_with_fake_cds(self):
+        from catmap import wind as w
+        from tests.test_wind import FakeClient
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long;surface\nA;48,0;2,0;1000\nB;48,1;2,1;2000\n".encode()
+
+        with tempfile.TemporaryDirectory() as t:
+            cache = Path(t)
+            app, st = self.load({"wd_csv_0": Up(), "wd_sel": ["vent", "tempete"], "wd_rps": [10, 100], "wd_y0": 2000, "wd_y1": 2000,
+                                 "button:Lancer / reprendre le calcul": True, "button:Estimer les dommages": True,
+                                 "wd_mode": "area", "wd_unit": 1000.0, "button:Calculer les dommages": True})
+            st.session_state["wd_dmg_open"] = True
+            app._secrets = lambda: {"CDSAPI_KEY": "k"}
+            with mock.patch.object(w, "make_client", return_value=FakeClient()), mock.patch.object(w, "fetch_tracks", return_value=w.parse_tracks(
+                        b"track_id,time,lon,lat,gust\ns1,2000-01-02 00:00,2,48,30\ns1,2000-01-02 06:00,3,49,35\n")):
+                app._wind_section()
+        w.clear_cache()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+        res = st.session_state["wd_result"]
+        self.assertEqual(res["info"]["done"], res["info"]["cells"])
+        self.assertIn("vent_cellule_era5", res["df"].columns)
+        self.assertIsNotNone(res["storms"], res["info"])
+        self.assertEqual(len(res["storms"]), 1)
 
     def test_wind_tab_reports_unreachable_catalogue(self):
         from catmap import copernicus as cop
