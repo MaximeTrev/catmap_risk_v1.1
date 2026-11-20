@@ -166,6 +166,22 @@ class TestCdsFlow(unittest.TestCase):
             r = wind.ensure_cells(cells, 2000, 2000, FakeClient(), Path(t), workers=4)
             self.assertEqual(sorted(r["done"]), sorted(cells))
 
+    def test_queue_full_is_pending_not_error(self):
+        class Full(FakeClient):
+            def retrieve(self, dataset, request, target):
+                raise RuntimeError("400 Bad Request The job has been rejected Maximum number queued requests for this dataset has been reached. "
+                                   "Please configure your scripts to request data sequentially")
+        with tempfile.TemporaryDirectory() as t:
+            r = wind.ensure_cells([(40.0, 2.0), (41.0, 2.0)], 2000, 2000, Full(), Path(t))
+            self.assertTrue(r["queue_full"])
+            self.assertEqual(len(r["pending"]), 2)
+            self.assertFalse(r["errors"])
+
+    def test_tracks_summary(self):
+        tr = wind.parse_tracks(b"track_id,time,lon,lat,gust\ns1,2000-01-02 00:00,2,48,30\ns2,2000-01-03 00:00,100,10,35\n")
+        sm = wind.tracks_summary(tr)
+        self.assertEqual((sm["tempetes"], sm["tempetes_dans_domaine"]), (2, 1))
+
     def test_emanuel(self):
         c = dmg.emanuel_curve()
         self.assertEqual(float(c.at(20)), 0.0)
