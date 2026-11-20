@@ -225,10 +225,21 @@ def build_timeseries_request(lat: float, lon: float, y0: int, y1: int) -> dict:
             "date": [f"{int(y0)}-01-01/{int(y1)}-12-31"], "data_format": "csv"}
 
 
-def build_tracks_request(algorithm: str, y0: int, y1: int) -> dict:
-    return {"product": "windstorm_track", "variable": "all", "tracking_algorithm": [algorithm],
-            "year": [str(y) for y in range(int(y0), int(y1) + 1)], "month": [f"{m:02d}" for m in range(1, 13)],
-            "day": [f"{d:02d}" for d in range(1, 32)]}
+def build_tracks_request(algorithm: str, y0: int, y1: int, variant: int = 0) -> dict:
+    """Requête de trajectoires. Le CDS refuse (400 « valid combination ») les champs qu'un produit n'utilise pas ; comme le jeu de
+    contraintes réel n'est pas lisible ici, on essaie des variantes de la plus simple à la plus complète (voir ``TRACK_VARIANTS``)."""
+    req = {"product": "windstorm_track", "variable": "all", "tracking_algorithm": [algorithm],
+           "year": [str(y) for y in range(int(y0), int(y1) + 1)]}
+    if variant >= 1:
+        req["month"] = [f"{m:02d}" for m in range(1, 13)]
+    if variant >= 2:
+        req["day"] = [f"{d:02d}" for d in range(1, 32)]
+    if variant == 3:
+        req["event_aggregation"] = "single_event"
+    return req
+
+
+TRACK_VARIANTS = (0, 1, 2, 3)
 
 
 _TOO_BIG = re.compile(r"too large|cost|limit|exceed|too many|request is larger", re.I)
@@ -241,7 +252,7 @@ def _retrieve(client, dataset: str, request: dict, tmp: Path) -> bytes:
         path = Path(str(out)) if out is not None and Path(str(out)).exists() else tmp
         data = path.read_bytes()
     except Exception as e:                                       # noqa: BLE001
-        raise WindError(f"{type(e).__name__}: {str(e)[:300]}") from e
+        raise WindError(f"{type(e).__name__}: {str(e)[:900]}") from e
     finally:
         tmp.unlink(missing_ok=True)
     if not data:
@@ -268,26 +279,43 @@ def cell_path(cell: tuple[float, float], y0: int, y1: int, cache_dir: Path = CAC
 
 
 def ensure_cells(cells, y0: int, y1: int, client, cache_dir: Path = CACHE_DIR, budget_s: float = 240.0,
-                 on_progress: Optional[Callable[[int, int], None]] = None) -> dict:
-    """Récupère (avec cache disque) les séries journalières des cellules. S'arrête quand le budget de temps est consommé : relancer reprend
-    là où on s'est arrêté. Renvoie ``{"done": [...], "pending": [...], "errors": {cellule: message}}``."""
+                 on_progress: Optional[Callable[[int, int], None]] = None, workers: int = 4) -> dict:
+    """Récupère (avec cache disque) les séries journalières des cellules, ``workers`` requêtes à la fois (le CDS traite plusieurs
+    requêtes en parallèle). Aucun nouveau lot n'est lancé une fois le budget de temps consommé : relancer reprend là où on s'est arrêté.
+    Renvoie ``{"done": [...], "pending": [...], "errors": {cellule: message}}``."""
+    from concurrent.futures import ThreadPoolExecutor
     t0 = time.time()
     done, pending, errors = [], [], {}
     cells = list(dict.fromkeys(cells))
-    for i, cell in enumerate(cells, start=1):
-        p = cell_path(cell, y0, y1, cache_dir)
-        if p.exists():
-            done.append(cell)
-        elif time.time() - t0 > budget_s:
-            pending.append(cell)
-        else:
-            try:
-                save_daily(p, fetch_daily(client, cell[0], cell[1], y0, y1, cache_dir))
-                done.append(cell)
-            except WindError as e:
-                errors[cell] = str(e)
+    todo = []
+    for cell in cells:
+        (done if cell_path(cell, y0, y1, cache_dir).exists() else todo).append(cell)
+
+    def one(cell):
+        try:
+            save_daily(cell_path(cell, y0, y1, cache_dir), fetch_daily(client, cell[0], cell[1], y0, y1, cache_dir))
+            return cell, None
+        except WindError as e:
+            return cell, str(e)
+
+    n_total, n_seen = len(cells), len(done)
+    if on_progress:
+        on_progress(n_seen, n_total)
+    w = max(1, int(workers))
+    for i in range(0, len(todo), w):
+        batch = todo[i:i + w]
+        if time.time() - t0 > budget_s:
+            pending += batch
+            continue
+        with ThreadPoolExecutor(max_workers=w) as ex:
+            for cell, err in ex.map(one, batch):
+                if err is None:
+                    done.append(cell)
+                else:
+                    errors[cell] = err
+        n_seen += len(batch)
         if on_progress:
-            on_progress(i, len(cells))
+            on_progress(n_seen, n_total)
     return {"done": done, "pending": pending, "errors": errors}
 
 
@@ -344,7 +372,17 @@ def fetch_tracks(client, algorithm: str, y0: int, y1: int, cache_dir: Path = CAC
         if p.exists() and p.stat().st_size:
             frames.append(parse_tracks(p.read_bytes()))
             continue
-        data = _retrieve(client, ST_DATASET, build_tracks_request(algorithm, a, b), Path(cache_dir) / f"tmp_tracks_{algorithm}_{a}_{b}.dat")
+        data, errs = None, []
+        for v in TRACK_VARIANTS:
+            try:
+                data = _retrieve(client, ST_DATASET, build_tracks_request(algorithm, a, b, v), Path(cache_dir) / f"tmp_tracks_{algorithm}_{a}_{b}.dat")
+                break
+            except WindError as e:
+                errs.append(f"variante {v} : {e}")
+                if not re.search(r"valid combination|invalid request|400|Bad Request", str(e), re.I):
+                    raise
+        if data is None:
+            raise WindError("trajectoires refusées par Copernicus avec toutes les variantes de requête. " + " || ".join(errs)[:1800])
         tr = parse_tracks(data)
         p.parent.mkdir(parents=True, exist_ok=True)
         tr.to_csv(p, index=False)
