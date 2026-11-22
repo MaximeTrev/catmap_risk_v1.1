@@ -620,15 +620,28 @@ class TestAppSmoke(unittest.TestCase):
         r = dm["out"]["dommage_seisme_RP475_ratio"]
         self.assertGreater(r.iloc[0], r.iloc[1])                       # PGA 0,4 g > 0,05 g
 
-    def test_seisme_eshm20_shows_not_ready(self):
+    def test_seisme_eshm20_flow_with_fake_service(self):
+        from catmap import seismic as smc
+
         class Up:
             name = "pts.csv"
-            def getvalue(self): return b"nom;lat;long\nA;45,0;5,0\n"
+            def getvalue(self): return b"nom;lat;long;surface\nA;46,2;6,15;1000\nB;46,21;6,16;1000\n"
 
-        app, st = self.load({"sm_csv_0": Up(), "sm_ds": "eshm20"})
-        app._seisme_section()
-        self.assertTrue([c for c in st.calls if c[0] == "warning" and "ESHM20" in c[1][0]])
-        self.assertNotIn("sm_result", st.session_state)
+        def fake_get(path, params, session=None, timeout=40):
+            if path == "/v1/models":
+                return [{"id": 7, "name": "ESHM20"}]
+            return {"imls": [0.01, 0.05, 0.1, 0.2, 0.4, 0.8], "poes": [0.2, 0.03, 0.008, 0.0021, 0.0004, 0.00005]}
+
+        with tempfile.TemporaryDirectory() as t:
+            app, st = self.load({"sm_csv_0": Up(), "sm_ds": "eshm20", "button:Estimer l'aléa sismique": True})
+            with mock.patch.object(smc, "_get_json", side_effect=fake_get), mock.patch.object(smc, "CACHE_DIR", Path(t)):
+                with mock.patch.object(smc, "estimate_pga", wraps=lambda *a, **k: smc._estimate_eshm(a[0], a[1], a[2], k.get("rps", a[4] if len(a) > 4 else []), None, Path(t), 50)):
+                    app._seisme_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+        res = st.session_state["sm_result"]
+        self.assertIn("seisme_RP475_pga", res["df"].columns)
+        self.assertIn("seisme_RP2475_pga", res["df"].columns)
+        self.assertAlmostEqual(res["df"]["seisme_RP475_pga"].iloc[0], 0.2, delta=0.02)
 
     def test_wind_tab_reports_unreachable_catalogue(self):
         from catmap import copernicus as cop
