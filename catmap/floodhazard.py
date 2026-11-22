@@ -434,6 +434,8 @@ def render_preview(path: Path, kind: str, max_px: int = 1000) -> tuple[np.ndarra
                 data = fh.read(page.databytecounts[seg])
                 arr, _, _ = page.decode(data, seg)
                 arr = np.squeeze(arr)
+                if arr.ndim == 1:                                   # bande d'une seule ligne (ou tuile d'une ligne) : np.squeeze a retiré l'axe
+                    arr = arr.reshape(-1, tw if tiled else W) if arr.size % (tw if tiled else W) == 0 else arr
                 if arr.ndim != 2:
                     raise TileError(f"organisation de fichier non gérée (dimensions {arr.shape})")
                 r0, c0 = ((seg // across) * th, (seg % across) * tw) if tiled else (seg * th, 0)
@@ -489,6 +491,8 @@ def sample_geotiff(path: Path, lons, lats) -> list[Optional[float]]:
                 data = fh.read(page.databytecounts[int(seg)])
                 arr, idx, _ = page.decode(data, int(seg))
                 arr = np.squeeze(arr)
+                if arr.ndim == 1:                                   # bande d'une seule ligne (ou tuile d'une ligne) : np.squeeze a retiré l'axe
+                    arr = arr.reshape(-1, tw if tiled else W) if arr.size % (tw if tiled else W) == 0 else arr
                 if arr.ndim != 2:
                     raise TileError(f"organisation de fichier non gérée (dimensions {arr.shape})")
                 for i in np.nonzero(inside & (seg_of == seg))[0]:
