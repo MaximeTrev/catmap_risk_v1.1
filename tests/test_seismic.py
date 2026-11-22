@@ -62,8 +62,6 @@ class TestSeismic(unittest.TestCase):
             with self.assertRaises(sm.SeismicError):
                 sm.gem_path(Path(t) / "c2", Sess(b"pas un zip"), data_dir=Path(t) / "none")
             with self.assertRaises(sm.SeismicError):
-                sm.estimate_pga(pd.DataFrame({"lat": [1], "long": [1]}), "lat", "long", "eshm20", [475])
-            with self.assertRaises(sm.SeismicError):
                 sm.estimate_pga(pd.DataFrame({"lat": [1], "long": [1]}), "lat", "long", "gem", [2475])
 
     def test_local_file_has_priority(self):
@@ -80,6 +78,60 @@ class TestSeismic(unittest.TestCase):
         self.assertLess(float(c.at(0.2)), float(c.at(0.8)))
         with self.assertRaises(ValueError):
             sm.vulnerability_curve(0, 0.6)
+
+    def test_strip_of_one_row_is_supported(self):
+        import tifffile
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "v2023_1_pga_475_rock_3min.tif"
+            arr = np.full((60, 100), 0.07, dtype="float32")
+            extra = [(33550, "d", 3, (0.1, 0.1, 0.0), True), (33922, "d", 6, (0, 0, 0, 20.0, 60.0, 0), True)]
+            tifffile.imwrite(str(p), arr, compression="deflate", photometric="minisblack", rowsperstrip=1, extratags=extra)   # bandes d'1 ligne
+            out, summ = sm.estimate_pga(pd.DataFrame({"lat": [55.0], "long": [25.0]}), "lat", "long", "gem", [475], tif=p)
+            self.assertAlmostEqual(out.loc[0, "seisme_RP475_pga"], 0.07, places=3)
+
+    def test_zip_in_data_dir(self):
+        with tempfile.TemporaryDirectory() as t:
+            raw = pga_tif(Path(t) / "src.tif")
+            d = Path(t) / "data"
+            d.mkdir()
+            with zipfile.ZipFile(d / "GEM-GSHM_PGA-475y-rock_v2023.zip", "w") as z:
+                z.writestr("v2023_1_pga_475_rock_3min.tif", raw)
+            p = sm.gem_path(Path(t) / "cache", Sess(b"", 500), data_dir=d)
+            self.assertTrue(p.exists())
+
+    def test_eshm_parsing_and_interpolation(self):
+        iml = [0.01, 0.05, 0.1, 0.2, 0.4, 0.8]
+        poe = [0.2, 0.03, 0.008, 0.0021, 0.0004, 0.00005]
+        for js in ({"imls": iml, "poes": poe}, {"curves": [{"x": iml, "y": poe}]}, [{"iml": a, "poe": b} for a, b in zip(iml, poe)],
+                   {"data": [[a, b] for a, b in zip(iml, poe)]}):
+            x, y = sm.parse_curve(js)
+            self.assertAlmostEqual(sm.pga_at_rp(x, y, 475), 0.2, delta=0.02)
+        self.assertIsNone(sm.pga_at_rp(*sm.parse_curve({"imls": iml, "poes": poe}), 1_000_000))   # hors courbe : pas d'extrapolation
+        with self.assertRaises(sm.SeismicError):
+            sm.parse_curve({"foo": "bar"})
+        self.assertEqual(sm.pick_eshm_model([{"id": 3, "name": "SHARE"}, {"id": 12, "title": "ESHM20 Europe"}])[0], 12)
+        self.assertIsNone(sm.pick_eshm_model([{"id": 3, "name": "SHARE"}]))
+
+    def test_eshm_estimate_cache_and_domain(self):
+        calls = []
+
+        def fake_get(path, params, session=None, timeout=40):
+            calls.append(path)
+            if path == "/v1/models":
+                return [{"id": 7, "name": "ESHM20"}] if params["lat"] > 30 else []
+            if params["lat"] < 30:
+                raise sm.SeismicError("EFEHR /v1/curves : HTTP 404 hors du domaine du modèle")
+            return {"imls": [0.01, 0.05, 0.1, 0.2, 0.4, 0.8], "poes": [0.2, 0.03, 0.008, 0.0021, 0.0004, 0.00005]}
+        from unittest import mock
+        df = pd.DataFrame({"lat": ["46,2", 46.21, -33.0], "long": [6.15, 6.16, 151.0]})
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(sm, "_get_json", side_effect=fake_get):
+            out, summ = sm.estimate_pga(df, "lat", "long", "eshm20", [100, 475, 2475], cache_dir=Path(t))
+            self.assertEqual(summ["ok"], 2)
+            self.assertIn("domaine", out.loc[2, "seisme_statut"])
+            n = len(calls)
+            sm.estimate_pga(df, "lat", "long", "eshm20", [475], cache_dir=Path(t))
+            self.assertEqual(len(calls), n)                                           # mailles en cache : aucune nouvelle requête
+            self.assertLess(out.loc[0, "seisme_RP100_pga"], out.loc[0, "seisme_RP475_pga"])
 
     def test_openapi_summary(self):
         spec = {"paths": {"/v1/curves": {"get": {"parameters": [{"name": "imt", "required": True, "schema": {"type": "string", "enum": ["PGA", "SA(0.2)"]}}]}},
