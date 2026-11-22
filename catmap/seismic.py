@@ -6,7 +6,8 @@ Jeux de données :
   à 10 % de probabilité de dépassement en 50 ans (période de retour 475 ans), sol rocheux (Vs30 760–800 m/s), raster ``v2023_1_pga_475_rock_3min.tif``
   (3 minutes d'arc ≈ 5 km). Le zip (≈ 35 Mo) est téléchargé à la demande et le raster extrait dans le cache ; un fichier déjà placé dans
   ``data/seisme/`` est utilisé en priorité (le raster de 173 Mo dépasse la limite des dépôts GitHub classiques).
-* **ESHM20 (Europe, EFEHR, CC BY 4.0)** : accès par service web ; paramètres non confirmés, voir ``fetch_openapi`` / ``summarize_openapi``.
+* **ESHM20 (Europe, EFEHR, CC BY 4.0)** : service web ``efehr-services.ethz.ch/hazard/api`` ; courbe d'aléa PGA par point (``/v1/curves``), d'où la PGA
+  pour toute période de retour comprise dans la courbe (interpolation log-log, sans extrapolation). Points regroupés par maille de 0,05°.
 
 NON vérifié depuis l'environnement de développement (réseau bloqué) : l'adresse de téléchargement du zip, l'organisation interne du TIFF (codec,
 tuiles) et l'unité exacte des valeurs (attendue : fraction de g). ``diagnose`` contrôle ces points sur des villes connues.
@@ -36,8 +37,9 @@ GEM_TIF = "v2023_1_pga_475_rock_3min.tif"
 GEM_RPS = (475,)
 ESHM_URL = "https://efehr-services.ethz.ch/hazard/api"
 ESHM_OPENAPI = ESHM_URL + "/openapi.json"
+ESHM_RPS = (50, 100, 200, 475, 975, 2475)
 DATASETS = {"gem": {"label": "GEM – carte mondiale (475 ans)", "rps": GEM_RPS},
-            "eshm20": {"label": "ESHM20 – Europe (plusieurs périodes de retour)", "rps": ()}}
+            "eshm20": {"label": "ESHM20 – Europe (plusieurs périodes de retour)", "rps": ESHM_RPS}}
 PGA_EDGES = [0.08, 0.16, 0.32]                                  # g : classes de la carte
 PGA_COLORS = {0: "#fff3b0", 1: "#fdae61", 2: "#f46d43", 3: "#a50026", None: "#9e9e9e"}
 PGA_LABELS = {0: "< 0,08 g", 1: "0,08 – 0,16 g", 2: "0,16 – 0,32 g", 3: "≥ 0,32 g"}
@@ -69,7 +71,11 @@ def gem_path(cache_dir: Path = CACHE_DIR, session=None, data_dir: Path = DATA_DI
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     zpath = cache_dir / "gem_pga475.zip"
-    if not (zpath.exists() and zipfile.is_zipfile(zpath)):
+    local_zip = next((p for p in sorted(Path(data_dir).glob("*.zip")) if "pga" in p.name.lower() or "gem" in p.name.lower()), None) \
+        if Path(data_dir).exists() else None
+    if local_zip is not None and zipfile.is_zipfile(local_zip):        # zip déposé dans data/seisme/ (35 Mo : accepté par git, pas par l'envoi web)
+        zpath = local_zip
+    elif not (zpath.exists() and zipfile.is_zipfile(zpath)):
         tmp = zpath.with_suffix(".part")
         try:
             r = (session or __import__("requests")).get(url, stream=True, timeout=120, headers={"User-Agent": "CatMap"})
@@ -117,10 +123,10 @@ def _extent(path: Path) -> Optional[tuple]:
 
 
 def estimate_pga(df: pd.DataFrame, lat_col: str, lon_col: str, dataset: str = "gem", rps=GEM_RPS, session=None,
-                 cache_dir: Path = CACHE_DIR, tif: Optional[Path] = None) -> tuple[pd.DataFrame, dict]:
-    """Ajoute ``seisme_RP475_pga`` (g) et ``seisme_statut``. Les rps non disponibles pour le jeu sont ignorés et signalés."""
-    if dataset != "gem":
-        raise SeismicError("seul le jeu GEM est branché pour l'instant ; ESHM20 attend la confirmation des paramètres de son service web.")
+                 cache_dir: Path = CACHE_DIR, tif: Optional[Path] = None, budget_s: float = 200.0) -> tuple[pd.DataFrame, dict]:
+    """Ajoute ``seisme_RP<rp>_pga`` (g) et ``seisme_statut``. Les périodes de retour non disponibles pour le jeu sont ignorées."""
+    if dataset == "eshm20":
+        return _estimate_eshm(df, lat_col, lon_col, rps, session, cache_dir, budget_s)
     rps = [r for r in rps if r in GEM_RPS]
     if not rps:
         raise SeismicError("aucune période de retour disponible pour ce jeu (GEM : 475 ans uniquement).")
@@ -149,8 +155,217 @@ def estimate_pga(df: pd.DataFrame, lat_col: str, lon_col: str, dataset: str = "g
     out[f"{RISK}_statut"] = status
     ok = np.array([s == "ok" for s in status])
     summary = {"points": len(out), "invalides": int((~valid).sum()), "ok": int(ok.sum()), "sans_donnee": int(len(out) - ok.sum() - (~valid).sum()),
-               "pga_max": float(np.nanmax(col)) if ok.any() else None, "fichier": str(path), "rps": rps}
+               "pga_max": float(np.nanmax(col)) if ok.any() else None, "fichier": str(path), "rps": rps, "en_attente": 0}
     return out, summary
+
+
+# ───────────────────────────── ESHM20 : service web EFEHR ─────────────────────────────
+# Routes (description lue dans le service) : GET /v1/models?lon&lat (modèles disponibles au point), GET /v1/curves?lon&lat&modelid&imt
+# (courbe d'aléa du point), GET /v1/maps?lon&lat&modelid&imt&poe&timespan. On utilise les courbes : elles donnent n'importe quelle période
+# de retour par interpolation. NON vérifié : forme exacte des réponses JSON ; ``parse_curve`` est tolérant et ``diagnose_eshm`` montre la réponse brute.
+def _get_json(path: str, params: dict, session=None, timeout: int = 40):
+    try:
+        r = (session or __import__("requests")).get(ESHM_URL + path, params=params, timeout=timeout,
+                                                      headers={"User-Agent": "CatMap", "Accept": "application/json"})
+    except Exception as e:                                      # noqa: BLE001
+        raise SeismicError(f"service EFEHR inaccessible ({type(e).__name__}: {str(e)[:150]})") from e
+    if r.status_code != 200:
+        raise SeismicError(f"EFEHR {path} : HTTP {r.status_code} {str(getattr(r, 'text', ''))[:200]}")
+    try:
+        return r.json()
+    except ValueError as e:
+        raise SeismicError(f"EFEHR {path} : réponse non JSON ({str(getattr(r, 'text', ''))[:120]})") from e
+
+
+def _records(js) -> list:
+    if isinstance(js, list):
+        return js
+    if isinstance(js, dict):
+        for k in ("models", "data", "results", "items"):
+            if isinstance(js.get(k), list):
+                return js[k]
+    return []
+
+
+def pick_eshm_model(js) -> Optional[tuple[int, str]]:
+    """(identifiant, nom) du modèle ESHM20 dans la réponse de ``/v1/models`` ; ``None`` s'il n'y figure pas."""
+    for m in _records(js):
+        if not isinstance(m, dict):
+            continue
+        text = " ".join(str(v) for v in m.values()).lower()
+        mid = next((m[k] for k in ("id", "model_id", "modelid", "modelId") if k in m), None)
+        if mid is not None and ("eshm20" in text or "eshm 20" in text or "eshm2020" in text):
+            try:
+                return int(mid), str(m.get("name") or m.get("title") or m.get("label") or "ESHM20")
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _num_list(v) -> Optional[list]:
+    if isinstance(v, list) and len(v) >= 5 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+        return [float(x) for x in v]
+    return None
+
+
+def _collect(js, found: list, depth: int = 0) -> None:
+    if depth > 6:
+        return
+    if isinstance(js, dict):
+        for k, v in js.items():
+            nl = _num_list(v)
+            if nl is not None:
+                found.append((str(k), nl))
+            else:
+                _collect(v, found, depth + 1)
+    elif isinstance(js, list):
+        if js and all(isinstance(x, dict) for x in js):                      # liste d'enregistrements : une colonne par champ numérique
+            keys = [k for k in js[0] if all(isinstance(x.get(k), (int, float)) and not isinstance(x.get(k), bool) for x in js)]
+            if len(js) >= 5 and len(keys) >= 2:
+                for k in keys:
+                    found.append((str(k), [float(x[k]) for x in js]))
+                return
+        if js and all(isinstance(x, (list, tuple)) and len(x) == 2 and all(isinstance(y, (int, float)) for y in x) for x in js) and len(js) >= 5:
+            found.append(("x", [float(x[0]) for x in js]))
+            found.append(("y", [float(x[1]) for x in js]))
+            return
+        for x in js:
+            _collect(x, found, depth + 1)
+
+
+def parse_curve(js) -> tuple[np.ndarray, np.ndarray]:
+    """Courbe d'aléa ``(niveaux de PGA croissants, probabilités décroissantes)`` extraite d'une réponse JSON de forme inconnue :
+    on cherche deux listes numériques de même longueur, l'une croissante (niveaux), l'autre décroissante positive (probabilités)."""
+    found: list = []
+    _collect(js, found)
+    for i, (kx, x) in enumerate(found):
+        if not all(b >= a for a, b in zip(x, x[1:])) or x[0] < 0:
+            continue
+        for ky, y in found:
+            if len(y) == len(x) and y is not x and all(b <= a for a, b in zip(y, y[1:])) and min(y) >= 0 and max(y) <= 1.0 + 1e-9 and y[0] > y[-1]:
+                return np.array(x, float), np.array(y, float)
+    raise SeismicError("courbe d'aléa non reconnue dans la réponse du service (listes numériques trouvées : "
+                       + ", ".join(f"{k}[{len(v)}]" for k, v in found[:8]) + ").")
+
+
+def pga_at_rp(iml: np.ndarray, poe: np.ndarray, rp: float) -> Optional[float]:
+    """PGA dont la probabilité annuelle de dépassement est ``1 − exp(−1/RP)`` (interpolation log-log, sans extrapolation)."""
+    target = 1.0 - math.exp(-1.0 / float(rp))
+    m = (iml > 0) & (poe > 0)
+    x, y = np.log(iml[m]), np.log(poe[m])
+    if len(x) < 2 or not (y.min() <= math.log(target) <= y.max()):
+        return None
+    order = np.argsort(y)
+    return float(math.exp(np.interp(math.log(target), y[order], x[order])))
+
+
+def _eshm_point(lon: float, lat: float, model_id: int, session=None, imt: str = "PGA"):
+    js = _get_json("/v1/curves", {"lon": round(lon, 4), "lat": round(lat, 4), "modelid": model_id, "imt": imt}, session)
+    return parse_curve(js)
+
+
+def _estimate_eshm(df, lat_col, lon_col, rps, session, cache_dir, budget_s):
+    import json as _json
+    import time
+    rps = [r for r in rps if r > 0]
+    if not rps:
+        raise SeismicError("choisissez au moins une période de retour.")
+    out = df.copy().reset_index(drop=True)
+    num = lambda c: pd.to_numeric(out[c].astype(str).str.replace(",", ".", regex=False), errors="coerce").to_numpy(float)  # noqa: E731
+    lat, lon = num(lat_col), num(lon_col)
+    valid = np.isfinite(lat) & np.isfinite(lon) & (abs(lat) <= 90) & (abs(lon) <= 180)
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = lambda la, lo: (round(round(la / 0.05) * 0.05, 2), round(round(lo / 0.05) * 0.05, 2))   # maille de 0,05° (≈ 5 km) : une requête par maille
+    cells = list(dict.fromkeys(key(a, b) for a, b, v in zip(lat, lon, valid) if v))
+    cfile = cache_dir / "eshm20_curves.json"
+    store = {}
+    if cfile.exists():
+        try:
+            store = _json.loads(cfile.read_text())
+        except ValueError:
+            store = {}
+    model_id = store.get("_model")
+    t0 = time.time()
+    errors: dict = {}
+    pending = 0
+    for c in cells:
+        k = f"{c[0]},{c[1]}"
+        if k in store:
+            continue
+        if time.time() - t0 > budget_s:
+            pending += 1
+            continue
+        try:
+            if model_id is None:
+                found = pick_eshm_model(_get_json("/v1/models", {"lon": c[1], "lat": c[0]}, session))
+                if found is None:
+                    store[k] = {"err": "hors du domaine du modèle ESHM20 (Europe)"}
+                    continue
+                model_id = store["_model"] = found[0]
+            iml, poe = _eshm_point(c[1], c[0], model_id, session)
+            store[k] = {"iml": iml.tolist(), "poe": poe.tolist()}
+        except SeismicError as e:
+            msg = str(e)
+            if "inaccessible" in msg or "HTTP 5" in msg or "HTTP 429" in msg:
+                errors[k] = msg
+                pending += 1
+            else:
+                store[k] = {"err": msg[:160]}
+    cfile.write_text(_json.dumps(store))
+    cols = {r: [np.nan] * len(out) for r in rps}
+    status = ["coordonnées invalides"] * len(out)
+    for i in range(len(out)):
+        if not valid[i]:
+            continue
+        c = key(lat[i], lon[i])
+        e = store.get(f"{c[0]},{c[1]}")
+        if e is None:
+            status[i] = "en attente (relancez le calcul)"
+        elif "err" in e:
+            status[i] = e["err"]
+        else:
+            iml, poe = np.array(e["iml"]), np.array(e["poe"])
+            got = 0
+            for r in rps:
+                v = pga_at_rp(iml, poe, r)
+                if v is not None:
+                    cols[r][i] = round(v, 4)
+                    got += 1
+            status[i] = "ok" if got == len(rps) else f"partiel : période(s) de retour hors de la courbe ({got}/{len(rps)})"
+    for r in rps:
+        out[column_name(r)] = cols[r]
+    out[f"{RISK}_statut"] = status
+    ok = np.array([s == "ok" or s.startswith("partiel") for s in status])
+    summary = {"points": len(out), "invalides": int((~valid).sum()), "ok": int(ok.sum()),
+               "sans_donnee": int(len(out) - ok.sum() - (~valid).sum() - sum(s.startswith("en attente") for s in status)),
+               "pga_max": float(np.nanmax(np.array(list(cols.values())))) if ok.any() else None, "fichier": "service EFEHR (courbes)",
+               "rps": rps, "en_attente": sum(x.startswith("en attente") for x in status), "erreurs": errors, "modele": model_id}
+    return out, summary
+
+
+def diagnose_eshm(lat: float = 46.2, lon: float = 6.15, session=None) -> list[dict]:
+    """Contrôle pas à pas du service EFEHR sur un point européen (Genève par défaut) ; montre un extrait de chaque réponse brute."""
+    rows = []
+    try:
+        js = _get_json("/v1/models", {"lon": lon, "lat": lat}, session)
+        rows.append({"étape": "modèles au point", "résultat": "OK", "détail": str(js)[:400]})
+        found = pick_eshm_model(js)
+        if found is None:
+            rows.append({"étape": "modèle ESHM20", "résultat": "ÉCHEC", "détail": "aucun modèle dont le nom contient « ESHM20 » dans la réponse ci-dessus"})
+            return rows
+        rows.append({"étape": "modèle ESHM20", "résultat": "OK", "détail": f"identifiant {found[0]} ({found[1]})"})
+        js = _get_json("/v1/curves", {"lon": lon, "lat": lat, "modelid": found[0], "imt": "PGA"}, session)
+        rows.append({"étape": "courbe PGA (brut)", "résultat": "OK", "détail": str(js)[:500]})
+        iml, poe = parse_curve(js)
+        rows.append({"étape": "lecture de la courbe", "résultat": "OK", "détail": f"{len(iml)} points ; PGA {iml[0]:g} à {iml[-1]:g} ; "
+                     f"probabilité {poe[0]:.3g} à {poe[-1]:.3g}"})
+        vals = {r: pga_at_rp(iml, poe, r) for r in ESHM_RPS}
+        rows.append({"étape": "PGA par période de retour", "résultat": "OK" if vals.get(475) else "À CONTRÔLER",
+                     "détail": " ; ".join(f"RP{r} : {'hors courbe' if v is None else round(v, 3)}" for r, v in vals.items())})
+    except SeismicError as e:
+        rows.append({"étape": "service EFEHR", "résultat": "ÉCHEC", "détail": str(e)})
+    return rows
 
 
 def diagnose(session=None, cache_dir: Path = CACHE_DIR) -> list[dict]:
