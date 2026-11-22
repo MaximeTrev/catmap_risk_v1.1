@@ -3642,49 +3642,54 @@ def _seisme_section():
                "*Périmètre* : monde entier, résolution 3 minutes d'arc (≈ 5 km). *Contenu* : un seul niveau, la PGA à 10 % de probabilité de "
                "dépassement en 50 ans (période de retour 475 ans), sur sol rocheux. *Limites* : pas d'autre période de retour, pas d'effet de site "
                "(sol meuble), résolution grossière.\n\n**ESHM20** (EFEHR / ETH Zurich, licence CC BY 4.0). *Périmètre* : Europe et pourtour "
-               "méditerranéen. *Contenu* : modèle européen 2020, courbes d'aléa permettant plusieurs périodes de retour. *Limites* : hors Europe, "
-               "aucune donnée ; accès par service web dont les paramètres restent à confirmer (voir ci-dessous).", wide=True,
+               "méditerranéen. *Contenu* : modèle européen 2020, courbes d'aléa permettant plusieurs périodes de retour (50 à 2475 ans proposées). *Limites* : hors Europe, "
+               "aucune donnée. Une requête par maille de 0,05° (≈ 5 km), via le service web EFEHR : plus lent que GEM.", wide=True,
                label_style="font-size:.875rem")
     ds = st.selectbox("Jeu de données", list(sm.DATASETS), key="sm_ds", label_visibility="collapsed", format_func=lambda k: sm.DATASETS[k]["label"])
     avail = list(sm.DATASETS[ds]["rps"])
-    if ds == "eshm20":
-        st.warning("ESHM20 n'est pas encore branché : les paramètres de son service web (EFEHR) doivent d'abord être confirmés. Lisez sa description "
-                   "ci-dessous (aucune clé requise) et envoyez-la-moi.")
-        if st.button("Lire la description du service ESHM20", key="sm_openapi_go", type="primary"):
+    all_rps = _checkbox_with_help("Toutes les périodes de retour disponibles", "Coche l'ensemble des périodes de retour que le jeu de données propose "
+                                  "(GEM : 475 ans uniquement ; ESHM20 : 50, 100, 200, 475, 975 et 2475 ans, dans la limite de la courbe d'aléa du point).",
+                                  key="sm_all", value=True)
+    rps = avail if all_rps else st.multiselect("Périodes de retour (années)", avail, default=avail, key="sm_rps", format_func=_rp_fmt)
+    with st.expander("Diagnostic de la source (à lancer en cas de problème)"):
+        if ds == "gem":
+            if st.button("Tester le fichier GEM", key="sm_diag_go"):
+                with st.spinner("Téléchargement (≈ 35 Mo), extraction et lecture…"):
+                    st.session_state["sm_diag"] = sm.diagnose()
+        else:
+            if st.button("Tester le service ESHM20 (point de Genève)", key="sm_diag_eshm_go"):
+                with st.spinner("Interrogation du service EFEHR…"):
+                    st.session_state["sm_diag"] = sm.diagnose_eshm()
+        if st.session_state.get("sm_diag"):
+            _stretch(st.dataframe, pd.DataFrame(st.session_state["sm_diag"]), hide_index=True)
+        st.caption("En cas d'ÉCHEC, copiez le tableau : il suffit à corriger l'adresse ou le format de lecture. Pour GEM, vous pouvez aussi "
+                   "déposer le raster dans data/seisme/ (si votre dépôt accepte les gros fichiers).")
+    with st.expander("Description du service web EFEHR (ESHM20)"):
+        if st.button("Lire la description du service", key="sm_openapi_go", type="primary"):
             try:
                 st.session_state["sm_openapi"] = sm.fetch_openapi()
             except sm.SeismicError as e:
                 st.error(str(e))
         spec = st.session_state.get("sm_openapi")
         if spec:
-            rows = sm.summarize_openapi(spec)
-            if rows:
-                _stretch(st.dataframe, pd.DataFrame(rows), hide_index=True)
-            st.download_button("Télécharger la description brute (JSON)", json.dumps(spec, ensure_ascii=False, indent=1).encode("utf-8"),
-                               "efehr_openapi.json", "application/json", key="sm_openapi_dl")
-        return
-    all_rps = _checkbox_with_help("Toutes les périodes de retour disponibles", "Coche l'ensemble des périodes de retour que le jeu de données propose "
-                                  "(GEM : 475 ans uniquement).", key="sm_all", value=True)
-    rps = avail if all_rps else st.multiselect("Périodes de retour (années)", avail, default=avail, key="sm_rps", format_func=_rp_fmt)
-    with st.expander("Diagnostic de la source (à lancer en cas de problème)"):
-        if st.button("Tester le fichier GEM", key="sm_diag_go"):
-            with st.spinner("Téléchargement (≈ 35 Mo), extraction et lecture…"):
-                st.session_state["sm_diag"] = sm.diagnose()
-        if st.session_state.get("sm_diag"):
-            _stretch(st.dataframe, pd.DataFrame(st.session_state["sm_diag"]), hide_index=True)
-        st.caption("En cas d'ÉCHEC, copiez le tableau : il suffit à corriger l'adresse ou le format de lecture. Vous pouvez aussi déposer le raster "
-                   "dans data/seisme/ (si votre dépôt accepte les gros fichiers).")
+            rows_ = sm.summarize_openapi(spec)
+            if rows_:
+                _stretch(st.dataframe, pd.DataFrame(rows_), hide_index=True)
     if not rps:
         st.caption("Choisissez au moins une période de retour.")
         return
     c1, c2, _sp = st.columns([1, 1, 2])
     if c1.button("Estimer l'aléa sismique", type="primary", key="sm_go"):
         try:
-            with st.spinner("Lecture de la carte GEM (téléchargement la première fois)…"):
+            with st.spinner("Lecture de l'aléa sismique (GEM : téléchargement la première fois ; ESHM20 : une requête par maille, reprise au clic suivant)…"):
                 res_, summ_ = sm.estimate_pga(df, lat_c, lon_c, ds, rps)
+            if summ_.get("en_attente"):
+                st.warning(f"{summ_['en_attente']} point(s) en attente : relancez le calcul (les mailles déjà obtenues sont conservées).")
+            for k_, m_ in list((summ_.get("erreurs") or {}).items())[:3]:
+                st.warning(f"Maille {k_} : {m_}")
             res_["lat_f"] = pd.to_numeric(res_[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
             res_["lon_f"] = pd.to_numeric(res_[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-            st.session_state["sm_result"] = {"name": name, "n": len(df), "df": res_, "summ": summ_, "rps": list(rps)}
+            st.session_state["sm_result"] = {"name": name, "n": len(df), "df": res_, "summ": summ_, "rps": list(summ_["rps"]), "ds": ds}
             st.session_state.pop("sm_dmg", None)
         except sm.SeismicError as e:
             st.error(str(e))
@@ -3702,6 +3707,11 @@ def _seisme_section():
     m[1].metric("PGA lue", summ["ok"])
     m[2].metric("Sans donnée", summ["sans_donnee"])
     m[3].metric("Coordonnées invalides", summ["invalides"])
+    if summ.get("en_attente"):
+        st.warning(f"{summ['en_attente']} point(s) en attente : le temps imparti est écoulé. Relancez « Estimer l'aléa sismique » : les mailles déjà "
+                   "obtenues sont conservées.")
+    for k_, m_ in list((summ.get("erreurs") or {}).items())[:3]:
+        st.warning(f"Maille {k_} : {m_}")
     if summ["sans_donnee"]:
         st.warning(f"{summ['sans_donnee']} point(s) sans valeur (mer, zone non couverte ou hors de la carte) : voir la colonne seisme_statut.")
     if st.session_state.get("sm_dmg_open"):
@@ -3728,8 +3738,8 @@ def _seisme_section():
     show = merged.drop(columns=["lat_f", "lon_f"])
     _stretch(st.dataframe, show, hide_index=True)
     st.download_button("Télécharger le résultat (CSV)", _csv_bytes(show), "catmap_seisme.csv", "text/csv", key="sm_csv")
-    st.caption("GEM Global Seismic Hazard Map v2023.1, PGA à 475 ans sur sol rocheux, licence CC BY-NC-SA 4.0 (usage non commercial). Résolution ≈ 5 km : "
-               "à l'échelle d'un site, l'effet de sol (amplification) n'est pas pris en compte. Fonction de vulnérabilité à calibrer.")
+    st.caption("GEM Global Seismic Hazard Map v2023.1 (PGA à 475 ans, sol rocheux, CC BY-NC-SA 4.0, usage non commercial) ou ESHM20 (EFEHR, CC BY 4.0). "
+               "Résolution ≈ 5 km : l'effet de sol (amplification) n'est pas pris en compte. Fonction de vulnérabilité à calibrer.")
 
 
 def _seisme_damage(res):
