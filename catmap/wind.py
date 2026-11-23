@@ -524,3 +524,106 @@ def tracks_summary(tracks: pd.DataFrame, domain=STORM_DOMAIN) -> dict:
             "periode": f"{tracks['time'].min():%Y-%m-%d} → {tracks['time'].max():%Y-%m-%d}",
             "lon": f"{tracks['lon'].min():.1f} → {tracks['lon'].max():.1f}", "lat": f"{tracks['lat'].min():.1f} → {tracks['lat'].max():.1f}",
             "rafale_dans_fichier": bool(tracks["gust"].notna().any())}
+
+
+# ───────────────────────────── contrôle visuel des ajustements ─────────────────────────────
+RP_GRID = np.array([1.05, 1.2, 1.5, 2, 3, 5, 7, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500, 1000])
+
+
+def _verdict(flags: list[str]) -> str:
+    """Appréciation indicative (seuils heuristiques propres à CatMap, pas des critères normatifs)."""
+    return "Satisfaisant" if not flags else ("À examiner" if len(flags) == 1 else "Peu fiable")
+
+
+def fit_annual(annual: pd.Series, boot: int = 300, seed: int = 0, rp_check: float = 100.0) -> dict:
+    """Ajustement GEV (moments L) des maxima annuels d'une cellule, avec points empiriques, courbe, intervalle de confiance par bootstrap
+    (rééchantillonnage des maxima annuels, ``boot`` tirages ; 0 = sans) et indicateurs de qualité."""
+    x = np.sort(annual.to_numpy(float))
+    n = len(x)
+    if n < 8:
+        raise WindError("moins de 8 maxima annuels : ajustement non évaluable.")
+    p = gev_fit(x)
+    F = np.arange(1, n + 1) / (n + 1.0)                                   # position de tracé de Weibull
+    T_emp = 1.0 / (1.0 - F)
+    q_fit = np.array([gev_return_level(p, t) for t in T_emp])
+    ppcc = float(np.corrcoef(x, q_fit)[0, 1])
+    rmse = float(np.sqrt(np.mean((x - q_fit) ** 2)))
+    curve = np.array([gev_return_level(p, t) for t in RP_GRID])
+    lo = hi = None
+    ci_rel = None
+    if boot:
+        rng = np.random.default_rng(seed)
+        sims = []
+        for _ in range(int(boot)):
+            try:
+                pb = gev_fit(rng.choice(x, size=n, replace=True))
+                sims.append([gev_return_level(pb, t) for t in RP_GRID])
+            except WindError:
+                continue
+        if len(sims) >= 30:
+            sims = np.array(sims)
+            lo, hi = np.percentile(sims, 5, axis=0), np.percentile(sims, 95, axis=0)
+            i = int(np.argmin(abs(RP_GRID - rp_check)))
+            ci_rel = float((hi[i] - lo[i]) / max(curve[i], 1e-9))
+    flags = []
+    if n < 30:
+        flags.append(f"seulement {n} maxima annuels (< 30)")
+    if ppcc < 0.97:
+        flags.append(f"points et loi peu alignés (corrélation {ppcc:.3f} < 0,97)")
+    if abs(p["k"]) >= 0.4:
+        flags.append(f"paramètre de forme k = {p['k']:.2f}, proche des bornes (instable)")
+    if ci_rel is not None and ci_rel > 0.5:
+        flags.append(f"intervalle à 90 % large à {rp_check:g} ans (± {100 * ci_rel / 2:.0f} % autour de la valeur, seuil d'alerte ± 25 %)")
+    return {"kind": "annual", "n": n, "params": p, "x": x, "T_emp": T_emp, "q_fit": q_fit, "ppcc": ppcc, "rmse": rmse, "T": RP_GRID, "curve": curve,
+            "lo": lo, "hi": hi, "ci_rel": ci_rel, "flags": flags, "verdict": _verdict(flags), "years": n}
+
+
+def fit_storms(peaks, n_years: float, per_year: float = 1.0, boot: int = 300, seed: int = 0, rp_check: float = 100.0) -> dict:
+    """Ajustement GPD des rafales de tempête au-dessus d'un seuil (≈ ``per_year`` dépassements par an) : points, courbe, intervalle bootstrap, indicateurs."""
+    x = np.sort(np.asarray([v for v in peaks if v is not None and np.isfinite(v)], float))[::-1]
+    if len(x) < 20 or n_years <= 0:
+        raise WindError("moins de 20 tempêtes : ajustement non évaluable.")
+    k = int(min(len(x) - 1, max(10, round(per_year * n_years))))
+    u = float(x[k])
+    exc = x[:k] - u
+    exc = exc[exc > 0]
+    if len(exc) < 8:
+        raise WindError("moins de 8 dépassements du seuil : ajustement non évaluable.")
+    lam = len(exc) / n_years
+    p = gpd_fit(exc)
+    rank = np.arange(1, len(exc) + 1)
+    T_emp = n_years / rank                                                 # période de retour empirique des dépassements
+    q_fit = np.array([gpd_return_level(p, u, lam, t) for t in T_emp])
+    obs = x[:len(exc)]
+    ppcc = float(np.corrcoef(obs, q_fit)[0, 1])
+    rmse = float(np.sqrt(np.mean((obs - q_fit) ** 2)))
+    grid = RP_GRID[RP_GRID >= 1.0 / lam]
+    curve = np.array([gpd_return_level(p, u, lam, t) for t in grid])
+    lo = hi = None
+    ci_rel = None
+    if boot and len(grid):
+        rng = np.random.default_rng(seed)
+        sims = []
+        for _ in range(int(boot)):
+            try:
+                pb = gpd_fit(rng.choice(exc, size=len(exc), replace=True))
+                sims.append([gpd_return_level(pb, u, lam, t) for t in grid])
+            except WindError:
+                continue
+        if len(sims) >= 30:
+            sims = np.array(sims)
+            lo, hi = np.percentile(sims, 5, axis=0), np.percentile(sims, 95, axis=0)
+            i = int(np.argmin(abs(grid - rp_check)))
+            ci_rel = float((hi[i] - lo[i]) / max(curve[i], 1e-9))
+    flags = []
+    if len(exc) < 20:
+        flags.append(f"seulement {len(exc)} dépassements du seuil (< 20)")
+    if ppcc < 0.97:
+        flags.append(f"points et loi peu alignés (corrélation {ppcc:.3f} < 0,97)")
+    if abs(p["k"]) >= 0.4:
+        flags.append(f"paramètre de forme k = {p['k']:.2f}, proche des bornes (instable)")
+    if ci_rel is not None and ci_rel > 0.5:
+        flags.append(f"intervalle à 90 % large à {rp_check:g} ans (± {100 * ci_rel / 2:.0f} % autour de la valeur, seuil d'alerte ± 25 %)")
+    return {"kind": "storms", "n": len(exc), "params": {**p, "u": u, "lambda": lam}, "x": obs, "T_emp": T_emp, "q_fit": q_fit, "ppcc": ppcc,
+            "rmse": rmse, "T": grid, "curve": curve, "lo": lo, "hi": hi, "ci_rel": ci_rel, "flags": flags, "verdict": _verdict(flags),
+            "years": float(n_years)}
