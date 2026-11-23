@@ -21,9 +21,17 @@ class TestCoastal(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_names_and_columns(self):
-        self.assertEqual(ch.candidate_names("historical", "nosub", "hist", 10), ["inuncoast_historical_nosub_hist_rp0010_0.tif"])
+        self.assertEqual(ch.candidate_names("historical", "nosub", "hist", 10)[0], "inuncoast_historical_nosub_hist_rp0010_0.tif")
+        self.assertIn("inuncoast_historical_nosub_hist_rp0010_5.tif", ch.candidate_names("historical", "nosub", "hist", 10))
         self.assertEqual(ch.candidate_names("rcp8p5", "wtsub", "2050", 100)[0], "inuncoast_rcp8p5_wtsub_2050_rp0100_0_perc_50.tif")
         self.assertEqual(ch.column_name(100), "submersion_RP100_raw")
+
+    def test_listing_is_used_first(self):
+        xml = ("<ListBucketResult><Key>AqueductFloodTool/download/v2/inuncoast_historical_nosub_hist_rp0100_5.tif</Key>"
+               "<Key>AqueductFloodTool/download/v2/inuncoast_historical_nosub_hist_rp0100_0_perc_50.tif</Key></ListBucketResult>")
+        sess = Sess({ch.S3_HOST: Resp(200, xml.encode(), {})})
+        self.assertEqual(ch.list_remote_names("historical", "nosub", "hist", 100, sess)[0], "inuncoast_historical_nosub_hist_rp0100_0_perc_50.tif")
+        self.assertEqual(ch.list_remote_names("historical", "nosub", "hist", 100, Sess({})), [])
 
     def test_estimate_values_and_partial_failure(self):
         body = make_tif(Path(self.tmp.name) / "src.tif", arr())
