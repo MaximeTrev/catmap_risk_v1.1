@@ -282,9 +282,42 @@ def _collect(js, found: list, depth: int = 0) -> None:
             _collect(x, found, depth + 1)
 
 
+def annual_from_window(poe, years: float):
+    """Probabilité annuelle équivalente à une probabilité de dépassement ``poe`` sur ``years`` ans : ``1 − (1 − poe)^(1/years)``."""
+    poe = np.clip(np.asarray(poe, float), 0.0, 1.0)
+    return 1.0 - (1.0 - poe) ** (1.0 / float(years))
+
+
+def pick_curve(curves: list) -> dict:
+    """Parmi les courbes renvoyées par ``/v1/curves`` (plusieurs agrégations du modèle), retient la moyenne arithmétique si elle est proposée,
+    sinon le quantile 0,5, sinon la première."""
+    kind = lambda c: str(c.get("aggregation_type") or "").lower()          # noqa: E731
+    for c in curves:
+        if "arith" in kind(c) or "mean" in kind(c):
+            return c
+    for c in curves:
+        if c.get("aggregation_level") == 0.5:
+            return c
+    return curves[0]
+
+
 def parse_curve(js) -> tuple[np.ndarray, np.ndarray]:
-    """Courbe d'aléa ``(niveaux de PGA croissants, probabilités décroissantes)`` extraite d'une réponse JSON de forme inconnue :
-    on cherche deux listes numériques de même longueur, l'une croissante (niveaux), l'autre décroissante positive (probabilités)."""
+    """Courbe d'aléa ``(niveaux de PGA croissants, probabilités annuelles décroissantes)``.
+
+    Format réel du service EFEHR (observé) : ``{"curves": [{"investigation_time": 50, "aggregation_type": …, "points": [{"iml", "poe"}, …]}, …]}`` ;
+    ``poe`` est la probabilité de dépassement sur ``investigation_time`` ans, convertie ici en probabilité annuelle. Pour toute autre forme,
+    on cherche deux listes numériques de même longueur (niveaux croissants, probabilités décroissantes), supposées annuelles."""
+    if isinstance(js, dict) and isinstance(js.get("curves"), list) and js["curves"] and isinstance(js["curves"][0], dict) \
+            and isinstance(js["curves"][0].get("points"), list):
+        c = pick_curve(js["curves"])
+        pts = [q for q in c["points"] if isinstance(q, dict) and "iml" in q and "poe" in q]
+        if len(pts) >= 2:
+            iml = np.array([float(q["iml"]) for q in pts])
+            poe = np.array([float(q["poe"]) for q in pts])
+            order = np.argsort(iml)
+            iml, poe = iml[order], poe[order]
+            T = c.get("investigation_time")
+            return iml, (annual_from_window(poe, T) if T else poe)
     found: list = []
     _collect(js, found)
     for i, (kx, x) in enumerate(found):
@@ -406,6 +439,12 @@ def diagnose_eshm(lat: float = 46.2, lon: float = 6.15, session=None) -> list[di
         rows.append({"étape": "modèle ESHM20", "résultat": "OK", "détail": f"identifiant {found[0]} ({found[1]})"})
         js = _get_json("/v1/curves", {"lon": lon, "lat": lat, "modelid": found[0], "imt": "PGA"}, session)
         rows.append({"étape": "courbe PGA (brut)", "résultat": "OK", "détail": str(js)[:500]})
+        cs = js.get("curves") if isinstance(js, dict) else None
+        if isinstance(cs, list):
+            sel_ = pick_curve(cs) if cs and isinstance(cs[0], dict) else {}
+            rows.append({"étape": "agrégations proposées", "résultat": "OK",
+                         "détail": " ; ".join(f"{c.get('aggregation_type')} {c.get('aggregation_level')}" for c in cs if isinstance(c, dict))
+                         + f" — retenue : {sel_.get('aggregation_type')} {sel_.get('aggregation_level')}, durée {sel_.get('investigation_time')} ans"})
         iml, poe = parse_curve(js)
         rows.append({"étape": "lecture de la courbe", "résultat": "OK", "détail": f"{len(iml)} points ; PGA {iml[0]:g} à {iml[-1]:g} ; "
                      f"probabilité {poe[0]:.3g} à {poe[-1]:.3g}"})
