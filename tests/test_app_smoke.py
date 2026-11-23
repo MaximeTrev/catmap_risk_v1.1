@@ -61,6 +61,8 @@ def make_fakes(script):
     if not hasattr(st, "number_input"):
         st.number_input = lambda label, *a, **k: k.get("value", 0.0)
     st.line_chart = rec("line_chart")
+    st.altair_chart = rec("altair_chart")
+    st.rerun = rec("rerun")
     st.progress = lambda *a, **k: mock.MagicMock()
     st.selectbox = lambda label, options, **k: script.get(k.get("key"), options[0])
     st.button = lambda label, **k: script.get("button:" + label, False) and not k.get("disabled")
@@ -642,6 +644,40 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("seisme_RP475_pga", res["df"].columns)
         self.assertIn("seisme_RP2475_pga", res["df"].columns)
         self.assertAlmostEqual(res["df"]["seisme_RP475_pga"].iloc[0], 0.2, delta=0.02)
+
+    def test_wind_fit_viewer(self):
+        import pandas as pd
+        import numpy as np
+        if importlib.util.find_spec("altair") is None:                  # altair vient avec Streamlit ; ici on le simule pour exécuter le code de tracé
+            sys.modules["altair"] = mock.MagicMock()
+            self.addCleanup(sys.modules.pop, "altair", None)
+        rng = np.random.default_rng(1)
+        cells = [(48.0, 2.0), (45.0, 5.0)]
+        fd = {c: {"annual": pd.Series(rng.gumbel(25, 3, 40), index=range(1984, 2024)), "peaks": 20 + rng.exponential(4, 200)} for c in cells}
+        res = {"name": "pts", "n": 2, "sel": ["vent", "tempete"], "cells": cells, "fitdata": fd, "n_years": 40,
+               "storms": pd.DataFrame({"storm": ["a"]}), "df": pd.DataFrame({"name": ["A", "B"]})}
+        for kind in ("vent", "tempete"):
+            app, st = self.load({"wd_fit_kind": kind, "button:Visualiser les lois ajustées": True})
+            st.session_state.pop("wd_fit_open", None)
+            app._wind_fit_viewer(res, "hodges")
+            self.assertFalse([c for c in st.calls if c[0] == "error"])
+            self.assertTrue([c for c in st.calls if c[0] == "altair_chart"], kind)
+            self.assertTrue(isinstance(st.session_state["wd_fit_table"][1], pd.DataFrame))
+
+    def test_auto_resume_logic(self):
+        app, st = self.load({})
+        with mock.patch("time.sleep") as sl:
+            self.assertTrue(app._auto_resume("t", 5, 3))                       # reste du travail : relance demandée
+            self.assertEqual([c[0] for c in st.calls].count("rerun"), 1)
+            self.assertTrue(st.session_state["t_job"])
+            self.assertTrue(app._auto_resume("t", 4, 4, queue_full=True))      # progrès + file pleine : attente puis relance
+            self.assertEqual(sl.call_args_list[-1][0][0], 45)
+            for _ in range(5):                                                 # plus aucun progrès : arrêt après max_stall essais
+                last = app._auto_resume("t", 4, 4, max_stall=3)
+            self.assertFalse(last)
+            self.assertFalse(st.session_state["t_job"])
+            self.assertFalse(app._auto_resume("t", 0, 9))                      # terminé : pas de relance
+            self.assertFalse(st.session_state["t_job"])
 
     def test_wind_tab_reports_unreachable_catalogue(self):
         from catmap import copernicus as cop
