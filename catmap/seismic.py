@@ -61,6 +61,67 @@ def pga_class(v):
 
 
 # ───────────────────────────── fichier GEM ─────────────────────────────
+ZENODO_RECORD = "8409647"
+TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def _zenodo_files(session=None) -> list[tuple[str, str, int]]:
+    """Fichiers du dépôt Zenodo (nom, adresse, taille) d'après l'API publique ; liste vide si indisponible."""
+    try:
+        r = (session or __import__("requests")).get(f"https://zenodo.org/api/records/{ZENODO_RECORD}", timeout=60, headers={"User-Agent": "CatMap"})
+        if r.status_code != 200:
+            return []
+        out = []
+        for f in (r.json().get("files") or []):
+            links = f.get("links") or {}
+            url = links.get("self") or links.get("download")
+            name = f.get("key") or f.get("filename") or ""
+            if url and name:
+                out.append((name, url, int(f.get("size") or 0)))
+        return out
+    except Exception:                                           # noqa: BLE001
+        return []
+
+
+def _download_gem(cache_dir: Path, session, url: str) -> Path:
+    """Télécharge le jeu GEM : essaie les fichiers listés par l'API Zenodo (zip de préférence, plus léger, sinon le .tif), puis l'adresse devinée.
+    Vérifie le contenu réel (zip ou TIFF) et non le seul code HTTP ; renvoie le chemin du zip ou du .tif obtenu."""
+    files = _zenodo_files(session)
+    zips = [f for f in files if f[0].lower().endswith(".zip")]
+    tifs = [f for f in files if f[0].lower().endswith((".tif", ".tiff")) and "pga" in f[0].lower()]
+    cands = [(n, u) for n, u, _ in zips + tifs] + [("gem.zip", url)]
+    errors = []
+    for name, u in dict.fromkeys(cands):
+        tmp = Path(cache_dir) / (Path(name).name + ".part")
+        try:
+            r = (session or __import__("requests")).get(u, stream=True, timeout=180, headers={"User-Agent": "CatMap"})
+            if r.status_code != 200:
+                errors.append(f"{name} : HTTP {r.status_code}")
+                continue
+            head = b""
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    if not head:
+                        head = chunk[:200]
+                    f.write(chunk)
+        except Exception as e:                                   # noqa: BLE001
+            errors.append(f"{name} : {type(e).__name__} {str(e)[:100]}")
+            tmp.unlink(missing_ok=True)
+            continue
+        if head[:4] in TIFF_MAGIC:
+            dest = Path(cache_dir) / (Path(name).name if name.lower().endswith((".tif", ".tiff")) else GEM_TIF)
+            tmp.replace(dest)
+            return dest
+        if zipfile.is_zipfile(tmp):
+            dest = Path(cache_dir) / "gem_pga475.zip"
+            tmp.replace(dest)
+            return dest
+        errors.append(f"{name} : contenu ni zip ni TIFF (début : {head[:80]!r})")
+        tmp.unlink(missing_ok=True)
+    raise SeismicError("téléchargement GEM impossible. " + " | ".join(errors)[:900] +
+                       " — vous pouvez déposer le zip (35 Mo) dans data/seisme/ sur GitHub.")
+
+
 def gem_path(cache_dir: Path = CACHE_DIR, session=None, data_dir: Path = DATA_DIR, url: str = GEM_ZIP_URL) -> Path:
     """Chemin du raster GEM : data/seisme/, sinon cache, sinon téléchargement du zip Zenodo puis extraction."""
     for d in (Path(data_dir), Path(cache_dir)):
@@ -76,22 +137,10 @@ def gem_path(cache_dir: Path = CACHE_DIR, session=None, data_dir: Path = DATA_DI
     if local_zip is not None and zipfile.is_zipfile(local_zip):        # zip déposé dans data/seisme/ (35 Mo : accepté par git, pas par l'envoi web)
         zpath = local_zip
     elif not (zpath.exists() and zipfile.is_zipfile(zpath)):
-        tmp = zpath.with_suffix(".part")
-        try:
-            r = (session or __import__("requests")).get(url, stream=True, timeout=120, headers={"User-Agent": "CatMap"})
-            if r.status_code != 200:
-                raise SeismicError(f"téléchargement GEM : HTTP {r.status_code} ({url})")
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
-                    f.write(chunk)
-        except SeismicError:
-            raise
-        except Exception as e:                                   # noqa: BLE001
-            raise SeismicError(f"téléchargement GEM impossible ({type(e).__name__}: {str(e)[:150]})") from e
-        if not zipfile.is_zipfile(tmp):
-            tmp.unlink(missing_ok=True)
-            raise SeismicError("le fichier téléchargé n'est pas une archive zip valide.")
-        tmp.replace(zpath)
+        got = _download_gem(cache_dir, session, url)
+        if got.suffix.lower() in (".tif", ".tiff"):                      # le dépôt fournit directement le raster
+            return got
+        zpath = got
     try:
         with zipfile.ZipFile(zpath) as z:
             names = [n for n in z.namelist() if n.lower().endswith((".tif", ".tiff")) and "pga" in n.lower()] or \
@@ -436,3 +485,24 @@ def summarize_openapi(spec: dict) -> list[dict]:
                 rows.append({"route": f"{method.upper()} {path}", "paramètre": "", "type": "", "obligatoire": False, "valeurs": "",
                              "description": str(op.get("summary") or "")[:150]})
     return rows
+
+
+def load_eshm_curves(cache_dir: Path = CACHE_DIR) -> dict:
+    """Courbes d'aléa ESHM20 déjà obtenues (cache disque) : ``{"lat,lon": (iml, poe)}``."""
+    import json as _json
+    f = Path(cache_dir) / "eshm20_curves.json"
+    if not f.exists():
+        return {}
+    try:
+        store = _json.loads(f.read_text())
+    except ValueError:
+        return {}
+    return {k: (np.array(v["iml"], float), np.array(v["poe"], float)) for k, v in store.items()
+            if isinstance(v, dict) and "iml" in v and "poe" in v}
+
+
+def curve_vs_rp(iml: np.ndarray, poe: np.ndarray) -> pd.DataFrame:
+    """Courbe d'aléa en (période de retour, PGA) : ``RP = −1 / ln(1 − poe)`` (poe = probabilité annuelle de dépassement)."""
+    m = (iml > 0) & (poe > 0) & (poe < 1)
+    rp = -1.0 / np.log1p(-poe[m])
+    return pd.DataFrame({"rp": rp, "pga": iml[m]}).sort_values("rp").reset_index(drop=True)
