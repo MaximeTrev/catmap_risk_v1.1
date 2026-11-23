@@ -78,6 +78,12 @@ def resolve_url(scenario: str, sub: str, year: str, rp: int, session=None) -> st
         try:
             r = fhz._http_get(session, url, stream=True, headers={"Range": "bytes=0-0", "User-Agent": "CatMap"}, timeout=60)
             code = r.status_code
+            if code not in (200, 206) and not tried:             # corps de la première erreur : distingue clé absente / accès refusé / blocage réseau
+                try:
+                    body = str(getattr(r, "text", ""))[:160].replace("\n", " ")
+                except Exception:                              # noqa: BLE001
+                    body = ""
+                tried.append(f"réponse du serveur à {url} : HTTP {code} « {body} »")
             try:
                 r.close()
             except Exception:                                  # noqa: BLE001
