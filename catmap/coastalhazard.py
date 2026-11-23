@@ -39,18 +39,41 @@ def column_name(rp: int) -> str:
     return f"{RISK}_RP{int(rp)}_raw"
 
 
+S3_HOST = "https://wri-projects.s3.amazonaws.com/"
+S3_PREFIX = "AqueductFloodTool/download/v2/"
+
+
 def candidate_names(scenario: str, sub: str, year: str, rp: int) -> list[str]:
-    """Noms de fichier plausibles, dans l'ordre d'essai (l'historique est confirmé ; les futurs sont à valider par ``resolve_url``)."""
+    """Noms de fichier plausibles, dans l'ordre d'essai. Les suffixes réels (``_0``, ``_5``, ``_0_perc_50``…) ne sont pas confirmés : la liste est
+    large, et ``list_remote_names`` interroge en priorité le listing public du dépôt."""
     base = f"inuncoast_{scenario}_{sub}_{year}_rp{int(rp):04d}"
     if scenario == "historical":
-        return [f"{base}_0.tif"]
-    return [f"{base}_0_perc_50.tif", f"{base}_0.tif", f"{base}_0_perc_05.tif", f"{base}_0_perc_95.tif"]
+        return [f"{base}_0.tif", f"{base}_5.tif", f"{base}_0_perc_50.tif", f"{base}_0_perc_05.tif", f"{base}_0_perc_95.tif", f"{base}.tif"]
+    return [f"{base}_0_perc_50.tif", f"{base}_0.tif", f"{base}_5.tif", f"{base}_0_perc_05.tif", f"{base}_0_perc_95.tif", f"{base}.tif"]
+
+
+def list_remote_names(scenario: str, sub: str, year: str, rp: int, session=None) -> list[str]:
+    """Noms réellement présents dans le dépôt S3 (listing XML public), pour le préfixe du scénario ; liste vide si le listing est indisponible.
+    Ordre de préférence : médiane (``_perc_50``), puis ``_0``, puis les autres."""
+    import re
+    prefix = f"{S3_PREFIX}inuncoast_{scenario}_{sub}_{year}_rp{int(rp):04d}"
+    try:
+        r = fhz._http_get(session, S3_HOST, params={"prefix": prefix, "max-keys": "50"}, headers={"User-Agent": "CatMap"}, timeout=60)
+        if r.status_code != 200:
+            return []
+        keys = re.findall(r"<Key>([^<]+\.tif)</Key>", r.text)
+    except Exception:                                          # noqa: BLE001
+        return []
+    names = [k.rsplit("/", 1)[-1] for k in keys]
+    pref = lambda n: (0 if "perc_50" in n else 1 if n.endswith("_0.tif") else 2, n)   # noqa: E731
+    return sorted(names, key=pref)
 
 
 def resolve_url(scenario: str, sub: str, year: str, rp: int, session=None) -> str:
     """Première URL qui répond (requête partielle d'1 octet) ; ``TileError`` si aucun nom n'existe."""
     tried = []
-    for name in candidate_names(scenario, sub, year, rp):
+    listed = list_remote_names(scenario, sub, year, rp, session)
+    for name in list(dict.fromkeys(listed + candidate_names(scenario, sub, year, rp))):
         url = BASE_URL + name
         try:
             r = fhz._http_get(session, url, stream=True, headers={"Range": "bytes=0-0", "User-Agent": "CatMap"}, timeout=60)
