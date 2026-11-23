@@ -44,14 +44,15 @@ class TestSeismic(unittest.TestCase):
             cache = Path(t) / "cache"
             df = pd.DataFrame({"name": list("ABCDE"), "lat": ["59,5", 55.0, 50.2, 40.0, 59.5], "long": ["20,5", 25.0, 29.8, 25.0, 60.0]})
             out, summ = sm.estimate_pga(df, "lat", "long", "gem", [475], session=sess, cache_dir=cache)
-            self.assertEqual(len(sess.urls), 1)
+            n_urls = len(sess.urls)                                                      # API Zenodo (illisible ici) + adresse devinée
+            self.assertGreaterEqual(n_urls, 1)
             self.assertAlmostEqual(out.loc[0, "seisme_RP475_pga"], 0.4, places=3)        # virgule décimale acceptée
             self.assertAlmostEqual(out.loc[1, "seisme_RP475_pga"], 0.05, places=3)
             self.assertIn("sans donnée", out.loc[2, "seisme_statut"])
             self.assertIn("hors du raster", out.loc[3, "seisme_statut"])
             self.assertEqual(summ["ok"], 2)
             sm.estimate_pga(df, "lat", "long", "gem", [475], session=sess, cache_dir=cache)
-            self.assertEqual(len(sess.urls), 1)                                          # cache réutilisé
+            self.assertEqual(len(sess.urls), n_urls)                                     # cache réutilisé
             rows = sm.diagnose(sess, cache)
             self.assertEqual(rows[0]["résultat"], "OK")
 
@@ -63,6 +64,18 @@ class TestSeismic(unittest.TestCase):
                 sm.gem_path(Path(t) / "c2", Sess(b"pas un zip"), data_dir=Path(t) / "none")
             with self.assertRaises(sm.SeismicError):
                 sm.estimate_pga(pd.DataFrame({"lat": [1], "long": [1]}), "lat", "long", "gem", [2475])
+
+    def test_html_instead_of_zip_gives_readable_error(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaises(sm.SeismicError) as cm:
+                sm.gem_path(Path(t) / "c", Sess(b"<html>blocked</html>"), data_dir=Path(t) / "none")
+            self.assertIn("ni zip ni TIFF", str(cm.exception))
+
+    def test_direct_tif_download(self):
+        with tempfile.TemporaryDirectory() as t:
+            raw = pga_tif(Path(t) / "src.tif")
+            p = sm.gem_path(Path(t) / "c", Sess(raw), data_dir=Path(t) / "none")
+            self.assertTrue(p.name.endswith(".tif") or p.suffix == ".tif")
 
     def test_local_file_has_priority(self):
         with tempfile.TemporaryDirectory() as t:
