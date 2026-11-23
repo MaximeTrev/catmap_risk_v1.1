@@ -182,6 +182,25 @@ class TestCdsFlow(unittest.TestCase):
         sm = wind.tracks_summary(tr)
         self.assertEqual((sm["tempetes"], sm["tempetes_dans_domaine"]), (2, 1))
 
+    def test_fit_diagnostics(self):
+        rng = np.random.default_rng(3)
+        a = pd.Series(rng.gumbel(25, 3, 60), index=range(1960, 2020))
+        f = wind.fit_annual(a, boot=60)
+        self.assertEqual(len(f["T_emp"]), 60)
+        self.assertTrue(np.all(np.diff(f["curve"]) > 0))
+        self.assertTrue(np.all(f["lo"] <= f["hi"]))
+        self.assertGreater(f["ppcc"], 0.97)
+        short = wind.fit_annual(pd.Series(rng.gumbel(25, 3, 12), index=range(2000, 2012)), boot=0)
+        self.assertTrue(any("< 30" in x for x in short["flags"]))
+        self.assertIn(short["verdict"], ("À examiner", "Peu fiable"))
+        with self.assertRaises(wind.WindError):
+            wind.fit_annual(pd.Series([1.0, 2.0, 3.0]))
+        st = wind.fit_storms(20 + rng.exponential(4, 300), 34, boot=60)
+        self.assertEqual(st["kind"], "storms")
+        self.assertTrue(np.all(st["T"] >= 1.0 / st["params"]["lambda"] - 1e-9))
+        with self.assertRaises(wind.WindError):
+            wind.fit_storms([25.0] * 5, 34)
+
     def test_emanuel(self):
         c = dmg.emanuel_curve()
         self.assertEqual(float(c.at(20)), 0.0)
