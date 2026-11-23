@@ -45,6 +45,7 @@ from catmap import georisques as gr
 from catmap import floodhazard as fhz
 import numpy as np
 from catmap import damage as dmg, wind, seismic as sm
+from catmap.references import refs_md
 from catmap import coastalhazard as coast
 from catmap import copernicus as cop
 
@@ -2942,6 +2943,10 @@ def _fh_damage_panel(df, name, hazards, ensure):
         with st.container(border=True):
             st.markdown("**Estimation des dommages** : perte = taux de dommage(hauteur d'eau) × valeur exposée, pour chaque scénario. "
                         "Les hauteurs d'eau (raw) des scénarios choisis sont estimées automatiquement si elles ne le sont pas déjà.")
+            _help_line("Approche : méthode et références", "**JRC** : courbes profondeur-dommage par continent et catégorie d'actif, avec valeurs de "
+                       "remplacement par pays (Huizinga et al. 2017). **FEMA Hazus** : fonctions profondeur-dommage riveraines américaines "
+                       "(structure seule). Dans les deux cas : perte = taux(hauteur d'eau) × valeur exposée.\n\n" + refs_md("jrc_damage", "hazus", "aal"),
+                       wide=True, label_style="font-size:.875rem")
             method = st.radio("Approche", ["JRC – courbes mondiales par continent (Huizinga et al. 2017)",
                                            "FEMA Hazus – fonctions riverines (États-Unis)"], key="fh_dmg_method")
             is_jrc = method.startswith("JRC")
@@ -3044,6 +3049,7 @@ def _fh_damage_panel(df, name, hazards, ensure):
                         summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
                         summ["points_exposes"] = int((res_h[list(depth_cols.values())].apply(pd.to_numeric, errors="coerce").fillna(0) > 0)
                                                      .any(axis=1).sum())
+                        summ["points_lus"] = int(res_h[list(depth_cols.values())].apply(pd.to_numeric, errors="coerce").notna().any(axis=1).sum())
                         fallback = max(fallback, summ.get("repli_global", 0))
                         per[h["name"]] = (out, summ)
                     if fallback:
@@ -3062,12 +3068,16 @@ def _fh_damage_panel(df, name, hazards, ensure):
         _, summ = per[h["name"]]
         st.markdown(f"**Dommages : {h['label']}**")
         cols = st.columns(4)
+        no_data = summ.get("points_lus") == 0
         for i, (c, v) in enumerate(list(summ["pertes_totales"].items())[:3]):
-            _kpi(cols[i], f"Perte totale {__import__('re').search(r'RP' + chr(92) + 'd+', c).group(0)}", _eur(v))
-        if summ["pam_totale"] is not None:
+            _kpi(cols[i], f"Perte totale {__import__('re').search(r'RP' + chr(92) + 'd+', c).group(0)}", "n/d (aucune hauteur lue)" if no_data else _eur(v))
+        if summ["pam_totale"] is not None and not no_data:
             _kpi(cols[3], "Perte annuelle moyenne (approx.)", _eur(summ["pam_totale"]))
         n_exp = summ.get("points_exposes")
-        if n_exp is not None:
+        if no_data:
+            st.error(f"{h['label']} : aucune hauteur d'eau n'a pu être lue (fichier introuvable ou lecture en échec : voir « Scénarios en échec » "
+                     "dans le détail ci-dessous). Les pertes ne sont donc PAS calculées : cela ne signifie pas qu'il n'y a pas de risque.")
+        elif n_exp is not None:
             st.caption(f"{n_exp} point(s) sur {summ['points']} avec une hauteur d'eau > 0 dans au moins un scénario.")
             if n_exp == 0:
                 st.warning(f"{h['label']} : aucun point n'a de hauteur d'eau > 0, donc les pertes sont nulles. Soit vos points ne sont pas "
@@ -3105,6 +3115,11 @@ def _exposition_section():
     st.subheader("Débordement et submersion")
     st.markdown("Sélectionnez un ou plusieurs aléas : les points sont chargés une seule fois, les scénarios peuvent être communs ou propres à "
                 "chaque aléa, et l'estimation des dommages utilise les mêmes paramètres d'actif et de valeur pour tous les aléas choisis.")
+    _help_line("Méthodes et références des aléas et des dommages",
+               "**Débordement de cours d'eau** : hauteur d'eau lue dans les cartes mondiales JRC / GloFAS (aucun ajustement statistique par CatMap).\n\n"
+               "**Submersion marine** : hauteur d'eau lue dans les cartes WRI Aqueduct (idem).\n\n**Dommages** : taux de dommage = courbe profondeur-dommage "
+               "(JRC par continent, ou FEMA Hazus) × valeur exposée ; perte annuelle moyenne par intégration sur les périodes de retour.\n\n"
+               + refs_md("jrc_flood", "aqueduct", "jrc_damage", "hazus", "aal"), wide=True, label_style="font-size:.875rem")
     sel = st.multiselect("Aléas à analyser", list(_HAZARDS), default=["debordement"], key="ex_hazards", format_func=lambda k: _HAZARDS[k]["label"])
     if not sel:
         st.caption("Choisissez au moins un aléa.")
@@ -3123,6 +3138,13 @@ def _exposition_section():
     for k in sel:
         H = _HAZARDS[k]
         with st.expander(f"Paramètres : {H['label']}", expanded=True):
+            _meth = {"debordement": ("**Méthode** : aucune loi n'est ajustée par CatMap. Hauteur d'eau lue au point dans les cartes de débordement fluvial "
+                                     "JRC / GloFAS (simulation hydrodynamique, 90 m) précalculées par période de retour. Les petits cours d'eau "
+                                     "(bassins < 500 km²) ne sont pas modélisés.\n\n" + refs_md("jrc_flood")),
+                     "submersion": ("**Méthode** : aucune loi n'est ajustée par CatMap. Hauteur d'eau lue au point dans les cartes WRI Aqueduct de "
+                                    "submersion côtière (niveaux marins extrêmes issus d'une réanalyse de surcotes, ≈ 1 km) précalculées par période "
+                                    "de retour et scénario climatique.\n\n" + refs_md("aqueduct"))}[k]
+            _help_line("Méthode et références", _meth, wide=True, label_style="font-size:.875rem")
             if common:
                 rps_k = [r for r in rps_common if r in H["rps"]]
                 skipped = [r for r in rps_common if r not in H["rps"]]
@@ -3435,8 +3457,13 @@ def _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, bud
                 info["n_storms"] = len(storms)
         except wind.WindError as e:
             info["tempete_msg"] = f"Tempêtes : {e}"
+    fitdata = {}
+    for c in daily:
+        ann = wind.annual_maxima(daily[c])
+        fitdata[c] = {"annual": ann, "peaks": (peaks or {}).get(c)}
     st.session_state["wd_result"] = {"name": name, "n": len(df), "df": out, "rps": list(rps), "sel": list(sel), "cells": pc, "storms": storms,
-                                     "peaks": peaks, "info": info, "y": (y0, y1)}
+                                     "peaks": peaks, "info": info, "y": (y0, y1), "fitdata": fitdata, "n_years": y1 - y0 + 1}
+    st.session_state.pop("wd_fit_table", None)
     st.session_state.pop("wd_dmg", None)
 
 
@@ -3445,6 +3472,9 @@ def _wind_damage(res, df_cols, key_ok_jrc):
     base_cols = [c for c in df_cols if not c.endswith("_gust") and not c.startswith(("dommage_", "vent_")) and c not in ("lat_f", "lon_f")]
     out_df = res["df"]
     with st.container(border=True):
+        _help_line("Fonction de dommage : méthode et référence", "**Emanuel (2011)** : taux de dommage = x³ / (1 + x³), avec x = (v − v_seuil) / "
+                   "(v_mi − v_seuil) pour v > v_seuil ; calée à l'origine sur les cyclones américains, ici utilisée comme forme générique pour la "
+                   "rafale ; paramètres à recaler pour l'Europe.\n\n" + refs_md("emanuel"), wide=True, label_style="font-size:.875rem")
         st.markdown("**Estimation des dommages vent** : perte = taux(rafale) × valeur exposée, avec la fonction d'Emanuel (2011) "
                     "`x³/(1+x³)`. Même courbe pour le vent et la tempête ; seuls changent les niveaux de rafale par période de retour.")
         c1, c2, c3 = st.columns(3)
@@ -3508,6 +3538,138 @@ def _wind_damage(res, df_cols, key_ok_jrc):
                 st.error(str(e))
 
 
+def _auto_resume(prefix: str, pending: int, done: int, queue_full: bool = False, max_stall: int = 20, wait_queue: int = 45) -> bool:
+    """Reprise automatique d'un calcul par lots : renvoie True si un rerun a été demandé. Garde-fous : s'arrête si rien n'avance pendant
+    ``max_stall`` relances consécutives. Le travail déjà fait est conservé (cache disque), donc l'arrêt ne perd rien."""
+    import time
+    ss = st.session_state
+    if pending <= 0:
+        ss[f"{prefix}_job"] = False
+        ss[f"{prefix}_stall"] = 0
+        return False
+    prev = ss.get(f"{prefix}_prev", -1)
+    ss[f"{prefix}_stall"] = 0 if done > prev else ss.get(f"{prefix}_stall", 0) + 1
+    ss[f"{prefix}_prev"] = done
+    if ss[f"{prefix}_stall"] >= max_stall:
+        ss[f"{prefix}_job"] = False
+        st.warning(f"Reprise automatique arrêtée : aucune progression depuis {max_stall} tentatives. Vérifiez les erreurs ci-dessous, puis relancez.")
+        return False
+    ss[f"{prefix}_job"] = True
+    if queue_full:
+        st.caption(f"File d'attente du service pleine : nouvelle tentative automatique dans {wait_queue} s… ({pending} restant(s))")
+        time.sleep(wait_queue)
+    else:
+        st.caption(f"Reprise automatique du lot suivant… ({pending} restant(s))")
+        time.sleep(1)
+    st.rerun()
+    return True
+
+
+def _fit_step(step: int, n: int):
+    cur = st.session_state.get("wd_fit_idx", 0)
+    st.session_state["wd_fit_idx"] = (cur + step) % max(1, n)
+
+
+def _fit_chart(fit, unit="m/s", title=""):
+    import altair as alt
+    pts = pd.DataFrame({"T": fit["T_emp"], "rafale": fit["x"]})
+    cur = pd.DataFrame({"T": fit["T"], "rafale": fit["curve"]})
+    xs = alt.X("T:Q", scale=alt.Scale(type="log"), title="Période de retour (années)")
+    ys = alt.Y("rafale:Q", scale=alt.Scale(zero=False), title=f"Rafale ({unit})")
+    layers = []
+    if fit.get("lo") is not None:
+        band = pd.DataFrame({"T": fit["T"], "lo": fit["lo"], "hi": fit["hi"]})
+        layers.append(alt.Chart(band).mark_area(opacity=0.2).encode(x=xs, y=alt.Y("lo:Q", scale=alt.Scale(zero=False)), y2="hi:Q"))
+    layers.append(alt.Chart(cur).mark_line().encode(x=xs, y=ys))
+    layers.append(alt.Chart(pts).mark_point(filled=True, size=45).encode(x=xs, y=ys, tooltip=["T", "rafale"]))
+    try:
+        st.altair_chart(alt.layer(*layers).properties(height=320, title=title), use_container_width=True)
+    except Exception as e:                                       # noqa: BLE001  (repli : courbe seule, sans échelle logarithmique)
+        st.warning(f"Tracé avancé indisponible ({type(e).__name__}) : courbe simplifiée.")
+        st.line_chart(cur.set_index("T")["rafale"])
+
+
+def _wind_fit_viewer(res, algo):
+    """Contrôle visuel des lois ajustées : une loi par maille ERA5 (ajustement indépendant maille par maille)."""
+    fd = res.get("fitdata") or {}
+    if not fd:
+        return
+    if st.button("Visualiser les lois ajustées", key="wd_fit_go", type="primary"):
+        st.session_state["wd_fit_open"] = not st.session_state.get("wd_fit_open", False)
+    if not st.session_state.get("wd_fit_open"):
+        return
+    kinds = [k for k in ("vent", "tempete") if k in res["sel"] and (k == "vent" or res.get("storms") is not None and len(res["storms"]))]
+    if not kinds:
+        st.caption("Aucun ajustement à montrer.")
+        return
+    kind = st.radio("Loi à contrôler", kinds, key="wd_fit_kind", horizontal=True,
+                    format_func=lambda k: "Vent : GEV sur les maxima annuels" if k == "vent" else "Tempête : GPD sur les rafales de tempêtes")
+    tkey = (kind, res["name"], res["n"], res["n_years"], len(fd))
+    cached = st.session_state.get("wd_fit_table")
+    if not cached or cached[0] != tkey:
+        rows, fits = [], {}
+        for c, d in fd.items():
+            try:
+                f = wind.fit_annual(d["annual"], boot=0) if kind == "vent" else wind.fit_storms(d["peaks"], res["n_years"], boot=0)
+            except (wind.WindError, TypeError, ValueError) as e:
+                rows.append({"maille": f"{c[0]:+.2f} ; {c[1]:+.2f}", "points": 0, "n": 0, "k": None, "corrélation": None, "écart (m/s)": None,
+                             "avis": "Non évaluable", "alertes": str(e)})
+                continue
+            fits[c] = f
+            rows.append({"maille": f"{c[0]:+.2f} ; {c[1]:+.2f}", "points": 0, "n": f["n"], "k": round(f["params"]["k"], 2), "corrélation": round(f["ppcc"], 3),
+                         "écart (m/s)": round(f["rmse"], 2), "avis": f["verdict"], "alertes": " ; ".join(f["flags"])})
+        order = {"Peu fiable": 0, "Non évaluable": 1, "À examiner": 2, "Satisfaisant": 3}
+        cells_pts = pd.Series([f"{c[0]:+.2f} ; {c[1]:+.2f}" if c else None for c in res["cells"]]).value_counts()
+        tab = pd.DataFrame(rows)
+        tab["points"] = tab["maille"].map(cells_pts).fillna(0).astype(int)
+        tab = tab.sort_values("avis", key=lambda s_: s_.map(order)).reset_index(drop=True)
+        st.session_state["wd_fit_table"] = (tkey, tab, fits)
+        cached = st.session_state["wd_fit_table"]
+    _, tab, fits = cached
+    st.markdown("**Revue de toutes les mailles** (classées des moins fiables aux plus fiables). Une loi est ajustée **indépendamment sur chaque maille "
+                "ERA5 de 0,25°**, sans mise en commun spatiale : avec 30 à 35 ans de données, le paramètre de forme k est très incertain.")
+    cnt = tab["avis"].value_counts().to_dict()
+    st.caption(" · ".join(f"{k} : {v}" for k, v in cnt.items()))
+    _stretch(st.dataframe, tab, hide_index=True)
+    labels = list(tab["maille"])
+    idx = min(st.session_state.get("wd_fit_idx", 0), len(labels) - 1)
+    b1, b2, b3 = st.columns([1, 1, 4])
+    b1.button("◀ Précédente", key="wd_fit_prev", on_click=_fit_step, args=(-1, len(labels)))
+    b2.button("Suivante ▶", key="wd_fit_next", on_click=_fit_step, args=(1, len(labels)))
+    st.session_state["wd_fit_idx"] = idx
+    label = st.selectbox("Maille à examiner", labels, index=idx, key="wd_fit_sel")
+    if label != labels[idx]:
+        st.session_state["wd_fit_idx"] = idx = labels.index(label)
+    row = tab.iloc[idx]
+    lat_s, lon_s = (float(v) for v in row["maille"].split(";"))
+    cell = (round(lat_s, 2), round(lon_s, 2))
+    if cell not in fits:
+        st.warning(f"Maille {row['maille']} : {row['alertes']}")
+        return
+    d = fd[cell]
+    with st.spinner("Intervalle de confiance (bootstrap)…"):
+        f = wind.fit_annual(d["annual"]) if kind == "vent" else wind.fit_storms(d["peaks"], res["n_years"])
+    pts_here = [str(n_) for n_, c in zip(res["df"].get("name", res["df"].index), res["cells"]) if c == cell][:15]
+    p = f["params"]
+    m = st.columns(4)
+    m[0].metric("Avis indicatif", f["verdict"])
+    m[1].metric("Observations", f"{f['n']}")
+    m[2].metric("Forme k", f"{p['k']:.2f}")
+    m[3].metric("Corrélation points/loi", f"{f['ppcc']:.3f}")
+    if kind == "vent":
+        st.caption(f"GEV : position {p['xi']:.1f} m/s, échelle {p['alpha']:.1f} m/s, forme {p['k']:.2f} ; {f['n']} maxima annuels.")
+    else:
+        st.caption(f"GPD : seuil {p['u']:.1f} m/s, {p['lambda']:.2f} tempêtes dépassantes par an, échelle {p['alpha']:.1f} m/s, forme {p['k']:.2f}.")
+    _fit_chart(f, title=f"Maille {row['maille']} : points observés (périodes de retour empiriques), loi ajustée et intervalle à 90 %")
+    if f["flags"]:
+        st.warning("Points d'attention : " + " ; ".join(f["flags"]) + ".")
+    else:
+        st.caption("Aucun point d'attention automatique : points alignés sur la loi, forme stable, intervalle raisonnable.")
+    st.caption("Points du portefeuille dans cette maille : " + (", ".join(pts_here) if pts_here else "aucun") + ". Les seuils de l'avis (corrélation 0,97 ; "
+               "|k| < 0,4 ; ≥ 30 observations ; intervalle à 90 % < ± 25 % à 100 ans) sont des repères heuristiques de CatMap, pas des critères normatifs : "
+               "à croiser avec votre jugement. Au-delà de la durée d'observation, la courbe est une extrapolation.")
+
+
 def _wind_section():
     st.subheader("Vent et tempête")
     st.markdown("**Vent** : rafale (m/s) par période de retour, ajustée sur les maxima annuels de toutes les rafales (ERA5, monde). **Tempête** : mêmes "
@@ -3523,6 +3685,12 @@ def _wind_section():
     df, lat_c, lon_c, name = _points_input("wd_")
     if df is None:
         return
+    _help_line("Méthodes et références (vent, tempête, dommages)",
+               "**Vent** : rafale maximale annuelle en chaque maille ERA5 (0,25°), ajustée par une loi des valeurs extrêmes généralisée (GEV, moments L) "
+               "→ rafale par période de retour. Ajustement indépendant maille par maille.\n\n**Tempête** : rafale maximale de chaque tempête "
+               "identifiée par les trajectoires ; dépassements d'un seuil ajustés par une loi de Pareto généralisée (GPD, moments L) avec le nombre "
+               "moyen de tempêtes par an → rafale de tempête par période de retour.\n\n**Dommages** : fonction d'Emanuel (2011), même courbe pour les deux.\n\n"
+               + refs_md("era5", "gev", "gpd", "tracks", "emanuel"), wide=True, label_style="font-size:.875rem")
     sel = st.multiselect("Aléas à analyser", list(_WIND_HAZ), default=["vent"], key="wd_sel", format_func=lambda k: _WIND_HAZ[k])
     c1, c2, c3, c4 = st.columns(4)
     rps = c1.multiselect("Périodes de retour (années)", list(wind.RPS), default=[100], key="wd_rps", format_func=_rp_fmt)
@@ -3538,7 +3706,7 @@ def _wind_section():
                    "**hodges** (TRACK) : suit les maxima de tourbillon relatif à 850 hPa. *Hypothèse* : une tempête est un maximum de rotation "
                    "dans la basse atmosphère. *Avantage* : détecte tôt les tempêtes en formation et les systèmes petits ou rapides. "
                    "*Inconvénient* : plus sensible au bruit, avec davantage de systèmes faibles, donc plus de tempêtes à trier.\n\n"
-                   "Les deux listes se recoupent largement pour les grandes tempêtes ; l'écart se joue sur les événements moyens.", wide=True,
+                   "Les deux listes se recoupent largement pour les grandes tempêtes ; l'écart se joue sur les événements moyens.\n\n" + refs_md("tracks"), wide=True,
                    label_style="font-size:.875rem")
         algo = st.selectbox("Algo. tempête", list(wind.ALGORITHMS), key="wd_algo", label_visibility="collapsed")
     cells_n = len({c for c in wind.cells_of_points(df[lat_c], df[lon_c]) if c})
@@ -3566,10 +3734,26 @@ def _wind_section():
             st.success(f"Requête OK en {__import__('time').time() - t0:.0f} s : {len(ser)} valeurs horaires, rafale max {ser.max():.1f} m/s.")
         except (wind.WindError, cop.CopernicusError, StopIteration) as e:
             st.error(f"Test en échec : {e}")
-    if b2.button("Lancer / reprendre le calcul", type="primary", key="wd_go"):
+    auto = _checkbox_with_help("Poursuivre automatiquement jusqu'à la fin", "Enchaîne les lots sans cliquer à nouveau (un lot dure au plus 4 minutes) ; "
+                               "en cas de file d'attente pleine chez Copernicus, patiente puis réessaie. La page doit rester ouverte ; si vous la fermez, "
+                               "relancez plus tard : les mailles déjà obtenues sont conservées. Le bouton « Arrêter » interrompt la reprise.",
+                               key="wd_auto", value=True)
+    job = bool(st.session_state.get("wd_job"))
+    if job and st.button("Arrêter la reprise automatique", key="wd_stop"):
+        st.session_state["wd_job"] = False
+        job = False
+    clicked = b2.button("Lancer / reprendre le calcul", type="primary", key="wd_go")
+    if clicked:
+        st.session_state["wd_stall"], st.session_state["wd_prev"] = 0, -1
+    if clicked or (job and auto):
         try:
             _wind_compute(df, lat_c, lon_c, name, sel, rps, y0, y1, algo, max_cells, 240.0)
+            inf_ = st.session_state["wd_result"]["info"]
+            if auto and _auto_resume("wd", inf_["pending"], inf_["done"], inf_.get("queue_full", False)):
+                return
+            st.session_state["wd_job"] = False
         except (wind.WindError, cop.CopernicusError) as e:
+            st.session_state["wd_job"] = False
             st.error(str(e))
     if b3.button("Vider le cache vent", key="wd_clear"):
         n = wind.clear_cache()
@@ -3627,6 +3811,7 @@ def _wind_section():
         _stretch(st.dataframe, rk, hide_index=True)
         st.download_button("Télécharger le classement (CSV)", _csv_bytes(rk), "catmap_tempetes.csv", "text/csv", key="wd_csv_storms")
         st.caption("Le nom usuel (Lothar, Xynthia…) est rapproché par la date du pic, à ± 1 jour ; le jeu Copernicus ne fournit que des identifiants.")
+    _wind_fit_viewer(res, algo)
     st.caption("Rafales ERA5 à 0,25° (≈ 25 km) : lissées, elles sous-estiment souvent les extrêmes locaux. Périodes de retour supérieures à la durée "
                "d'observation = extrapolation. Fonction de dommage : Emanuel (2011), paramètres modifiables, à calibrer pour l'Europe.")
 
@@ -3643,7 +3828,7 @@ def _seisme_section():
                "dépassement en 50 ans (période de retour 475 ans), sur sol rocheux. *Limites* : pas d'autre période de retour, pas d'effet de site "
                "(sol meuble), résolution grossière.\n\n**ESHM20** (EFEHR / ETH Zurich, licence CC BY 4.0). *Périmètre* : Europe et pourtour "
                "méditerranéen. *Contenu* : modèle européen 2020, courbes d'aléa permettant plusieurs périodes de retour (50 à 2475 ans proposées). *Limites* : hors Europe, "
-               "aucune donnée. Une requête par maille de 0,05° (≈ 5 km), via le service web EFEHR : plus lent que GEM.", wide=True,
+               "aucune donnée. Une requête par maille de 0,05° (≈ 5 km), via le service web EFEHR : plus lent que GEM.\n\n" + refs_md("gem", "eshm20"), wide=True,
                label_style="font-size:.875rem")
     ds = st.selectbox("Jeu de données", list(sm.DATASETS), key="sm_ds", label_visibility="collapsed", format_func=lambda k: sm.DATASETS[k]["label"])
     avail = list(sm.DATASETS[ds]["rps"])
@@ -3679,7 +3864,16 @@ def _seisme_section():
         st.caption("Choisissez au moins une période de retour.")
         return
     c1, c2, _sp = st.columns([1, 1, 2])
-    if c1.button("Estimer l'aléa sismique", type="primary", key="sm_go"):
+    auto_sm = _checkbox_with_help("Poursuivre automatiquement jusqu'à la fin (ESHM20)", "Enchaîne les lots de requêtes au service ESHM20 sans "
+                                  "cliquer à nouveau. La page doit rester ouverte ; les mailles déjà obtenues sont conservées.", key="sm_auto", value=True)
+    job_sm = bool(st.session_state.get("sm_job"))
+    if job_sm and st.button("Arrêter la reprise automatique", key="sm_stop"):
+        st.session_state["sm_job"] = False
+        job_sm = False
+    go_sm = c1.button("Estimer l'aléa sismique", type="primary", key="sm_go")
+    if go_sm:
+        st.session_state["sm_stall"], st.session_state["sm_prev"] = 0, -1
+    if go_sm or (job_sm and auto_sm and ds == "eshm20"):
         try:
             with st.spinner("Lecture de l'aléa sismique (GEM : téléchargement la première fois ; ESHM20 : une requête par maille, reprise au clic suivant)…"):
                 res_, summ_ = sm.estimate_pga(df, lat_c, lon_c, ds, rps)
@@ -3691,7 +3885,11 @@ def _seisme_section():
             res_["lon_f"] = pd.to_numeric(res_[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
             st.session_state["sm_result"] = {"name": name, "n": len(df), "df": res_, "summ": summ_, "rps": list(summ_["rps"]), "ds": ds}
             st.session_state.pop("sm_dmg", None)
+            if ds == "eshm20" and auto_sm and _auto_resume("sm", summ_.get("en_attente", 0), summ_["ok"]):
+                return
+            st.session_state["sm_job"] = False
         except sm.SeismicError as e:
+            st.session_state["sm_job"] = False
             st.error(str(e))
     if c2.button("Estimer les dommages", type="primary", key="sm_dmg_go"):
         st.session_state["sm_dmg_open"] = True
@@ -3733,6 +3931,7 @@ def _seisme_section():
             st.warning("La valeur exposée est nulle ou absente : les pertes en € sont nulles (les taux restent valables).")
         if len(res["rps"]) < 2:
             st.caption("Une seule période de retour : la perte annuelle moyenne n'est pas calculable (il en faut au moins deux).")
+    _seisme_curve_viewer(res)
     color_col = st.selectbox("Colorer la carte selon", col_opts, key="sm_color")
     _wind_map(merged, color_col, cls_fn=sm.pga_class, palette=sm.PGA_COLORS, labels=sm.PGA_LABELS, popup_suffix="_pga", key="sm_map")
     show = merged.drop(columns=["lat_f", "lon_f"])
@@ -3742,10 +3941,49 @@ def _seisme_section():
                "Résolution ≈ 5 km : l'effet de sol (amplification) n'est pas pris en compte. Fonction de vulnérabilité à calibrer.")
 
 
+def _seisme_curve_viewer(res):
+    """Contrôle visuel des courbes d'aléa ESHM20 (une courbe par maille de 0,05°) ; GEM n'est pas ajusté (carte déjà calculée)."""
+    if res.get("ds", "gem") != "eshm20":
+        st.caption("GEM : aucune loi n'est ajustée par CatMap, la valeur est lue dans la carte d'aléa déjà calculée par GEM (475 ans). "
+                   "Pas de courbe à contrôler ; pour voir des courbes d'aléa, choisissez ESHM20.")
+        return
+    if st.button("Visualiser les courbes d'aléa", key="sm_curve_go", type="primary"):
+        st.session_state["sm_curve_open"] = not st.session_state.get("sm_curve_open", False)
+    if not st.session_state.get("sm_curve_open"):
+        return
+    curves = sm.load_eshm_curves()
+    if not curves:
+        st.caption("Aucune courbe en cache : lancez d'abord l'estimation ESHM20.")
+        return
+    key = st.selectbox("Maille (lat, lon, pas de 0,05°)", sorted(curves), key="sm_curve_sel")
+    cur = sm.curve_vs_rp(*curves[key])
+    if cur.empty:
+        st.warning("Courbe inexploitable pour cette maille.")
+        return
+    import altair as alt
+    pts = pd.DataFrame({"rp": res["rps"], "pga": [sm.pga_at_rp(*curves[key], r) for r in res["rps"]]}).dropna()
+    xs = alt.X("rp:Q", scale=alt.Scale(type="log"), title="Période de retour (années)")
+    ys = alt.Y("pga:Q", scale=alt.Scale(type="log"), title="PGA (g)")
+    try:
+        st.altair_chart(alt.layer(alt.Chart(cur).mark_line().encode(x=xs, y=ys),
+                                  alt.Chart(pts).mark_point(filled=True, size=70, color="#d62728").encode(x=xs, y=ys, tooltip=["rp", "pga"]))
+                        .properties(height=320, title=f"Courbe d'aléa ESHM20, maille {key} (points rouges : périodes de retour retenues)"),
+                        use_container_width=True)
+    except Exception as e:                                       # noqa: BLE001
+        st.warning(f"Tracé avancé indisponible ({type(e).__name__}) : courbe simplifiée.")
+        st.line_chart(cur.set_index("rp")["pga"])
+    st.caption("Courbe issue du modèle probabiliste ESHM20 (calcul d'aléa sismique par arbre logique), interpolée en log-log ; "
+               "aucune extrapolation hors de la courbe fournie. Ce n'est pas un ajustement CatMap : il n'y a pas de loi à valider, mais vous pouvez "
+               "contrôler la forme de la courbe et les points retenus.")
+
+
 def _seisme_damage(res):
     out_df = res["df"]
     base_cols = [c for c in out_df.columns if not c.startswith(("seisme_", "dommage_")) and c not in ("lat_f", "lon_f")]
     with st.container(border=True):
+        _help_line("Fonction de vulnérabilité : méthode", "**Lognormale** : taux de dommage = Φ(ln(PGA/θ)/β), forme usuelle des courbes de "
+                   "fragilité/vulnérabilité sismiques. θ (PGA de mi-dommage) et β (dispersion) sont **à calibrer** selon le type de construction : "
+                   "les valeurs par défaut sont illustratives et ne viennent d'aucune publication.", wide=True, label_style="font-size:.875rem")
         st.markdown("**Estimation des dommages sismiques** : perte = taux de dommage(PGA) × valeur exposée, avec une fonction lognormale "
                     "`Φ(ln(PGA/θ)/β)`. Les paramètres par défaut sont **illustratifs** (aucune source) : calibrez-les selon le type de construction.")
         c1, c2, c3 = st.columns(3)
