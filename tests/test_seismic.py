@@ -125,6 +125,20 @@ class TestSeismic(unittest.TestCase):
         self.assertEqual(sm.pick_eshm_model([{"id": 3, "name": "SHARE"}, {"id": 12, "title": "ESHM20 Europe"}])[0], 12)
         self.assertIsNone(sm.pick_eshm_model([{"id": 3, "name": "SHARE"}]))
 
+    def test_eshm_real_response_format(self):
+        pts = [{"iml": 0.0005, "poe": 0.9998}, {"iml": 0.05, "poe": 0.3}, {"iml": 0.1, "poe": 0.1}, {"iml": 0.2, "poe": 0.0235},
+               {"iml": 0.4, "poe": 0.004}, {"iml": 0.8, "poe": 0.0004}]
+        js = {"curves": [{"lon": 6.18, "lat": 46.2, "model_id": 81, "imt": "PGA", "aggregation_type": "quantile", "aggregation_level": 0.16,
+                          "investigation_time": 50, "points": [dict(p, poe=p["poe"] / 2) for p in pts]},
+                         {"lon": 6.18, "lat": 46.2, "model_id": 81, "imt": "PGA", "aggregation_type": "arithmetic", "aggregation_level": 0.5,
+                          "investigation_time": 50, "points": pts}]}
+        iml, poe = sm.parse_curve(js)
+        self.assertAlmostEqual(poe[2], 1 - 0.9 ** (1 / 50), places=6)                  # poe sur 50 ans -> probabilité annuelle
+        v = sm.pga_at_rp(iml, poe, 475)                                                  # 10 % en 50 ans = 475 ans -> 0,1 g
+        self.assertAlmostEqual(v, 0.1, delta=0.005)
+        self.assertEqual(sm.pick_curve(js["curves"])["aggregation_type"], "arithmetic")  # moyenne retenue, pas le quantile
+        self.assertAlmostEqual(sm.pga_at_rp(iml, poe, 2475), 0.2, delta=0.02)            # 2 % en 50 ans -> ~0,2 g
+
     def test_eshm_estimate_cache_and_domain(self):
         calls = []
 
