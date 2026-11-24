@@ -232,51 +232,64 @@ class TestCompact(unittest.TestCase):
         build_source(src)
         data = Path(t) / "data"
         data.mkdir()
-        info = hl.build_compact(src, data / hl.COMPACT_NAME, min_clim=0.0, progress=lambda *_: None)
+        info = hl.build_compact(src, data / hl.COMPACT_NAME, progress=lambda *_: None)
         return src, data, info
+
+    def test_layers_match_point_by_point_quantiles(self):
+        rng = np.random.default_rng(3)
+        A = rng.gamma(0.5, 0.2, (74, 6, 7)).astype(np.float32)
+        A[:, 0, 0] = np.nan
+        lay = hl.rp_layers(A, (2, 10, 50, 75, 100))
+        for (i, j) in ((1, 2), (5, 6), (3, 0)):
+            ref = hl.rp_levels(A[:, i, j], (2, 10, 50, 75, 100))
+            for rp in (2, 10, 50, 75):
+                self.assertAlmostEqual(float(lay[rp][i, j]), ref[rp], places=5)
+        self.assertTrue(np.isnan(lay[100]).all())
+        self.assertTrue(np.isnan(lay[2][0, 0]))
 
     def test_build_and_use_without_network(self):
         with tempfile.TemporaryDirectory() as t:
             src, data, info = self.build(t)
             self.assertEqual(info["annees"], 74)
-            self.assertLess(info["taille_mo"], 5)
+            self.assertLess(info["taille_mo"], 1)
 
             class NoNet:
                 def get(self, *a, **k):
                     raise AssertionError("aucun accès réseau attendu")
             kw = dict(session=NoNet(), cache_dir=Path(t) / "cache", data_dir=data)
-            out, s = hl.estimate(POINTS, "lat", "long", "annual", rps=(2, 10), use_trend=True, **kw)
-            self.assertEqual(s["source"], "compact")
-            self.assertEqual(s["en_attente"], 0)
+            out, s = hl.estimate(POINTS, "lat", "long", "annual", rps=(2, 10, 200), use_trend=True, **kw)
+            self.assertEqual(s["source"], "fichier précalculé")
+            self.assertEqual((s["en_attente"], s["rps"]), (0, [2, 10]))
             self.assertAlmostEqual(out["grele_RP2_freq_brut"].iloc[0], 0.3, places=2)
             self.assertAlmostEqual(out["grele_moy_freq"].iloc[0], 0.3, delta=0.02)          # moyenne des 74 années (1…5 × 0,1)
             self.assertEqual(out["grele_RP2_freq_brut"].iloc[2], 0.0)
             self.assertTrue(np.isnan(out["grele_RP2_freq"].iloc[3]))                         # hors grille
-            self.assertIn("hail_compact.npz", " ".join(r["détail"] for r in hl.diagnose(NoNet(), Path(t) / "c", data) if r["étape"] == "fichier compact"))
-            o2, s2 = hl.estimate(POINTS, "lat", "long", "clim", **kw)
+            # identique au calcul direct à partir des fichiers annuels
+            direct, _ = hl.estimate(POINTS, "lat", "long", "annual", rps=(2, 10), session=FakeZenodo(src), cache_dir=Path(t) / "c2",
+                                    data_dir=Path(t) / "nodata")
+            for c in ("grele_RP2_freq", "grele_RP10_freq"):
+                self.assertTrue(np.allclose(out[c + "_brut"].iloc[:3], direct[c].iloc[:3], rtol=2e-3, atol=1e-4), c)
+            rows = hl.diagnose(NoNet(), Path(t) / "c", data)
+            self.assertTrue([r for r in rows if r["étape"] == "fichier précalculé" and r["résultat"] == "OK"])
+            o2, _ = hl.estimate(POINTS, "lat", "long", "clim", **kw)
             self.assertAlmostEqual(o2["grele_moy_freq"].iloc[0], 0.3, delta=0.02)
-
-    def test_threshold_raised_then_error_if_still_too_big(self):
-        with tempfile.TemporaryDirectory() as t:
-            src = Path(t) / "src"
-            build_source(src, years=hl.YEARS[:3])
             with self.assertRaises(hl.HailError):
-                hl.build_compact(src, Path(t) / "c.npz", min_clim=0.01, max_mb=0.000001, progress=lambda *_: None)
+                hl.estimate(POINTS, "lat", "long", "annual", rps=(3,), **kw)                  # RP absente du fichier
 
-    def test_cell_below_threshold_is_zero_and_missing_is_nan(self):
-        with tempfile.TemporaryDirectory() as t:
-            src = Path(t) / "src"
-            build_source(src, years=hl.YEARS[:4])
-            hl.build_compact(src, Path(t) / "c.npz", min_clim=0.05, progress=lambda *_: None)
-            ser = hl.compact_series(Path(t) / "c.npz", [hl.cell_of(45, 0.25), hl.cell_of(45, 5), hl.cell_of(10, 5)])
-            self.assertTrue(np.all(ser[hl._cell_key(hl.cell_of(45, 0.25))] == 0))             # moyenne 0 < seuil : zéros
-            self.assertGreater(ser[hl._cell_key(hl.cell_of(45, 5))].max(), 0.09)
-            self.assertTrue(np.isnan(ser[hl._cell_key(hl.cell_of(10, 5))]).all())
-
-    def test_missing_files(self):
+    def test_missing_files_and_too_big(self):
         with tempfile.TemporaryDirectory() as t:
             with self.assertRaises(hl.HailError):
                 hl.build_compact(t, Path(t) / "x.npz", progress=lambda *_: None)
+            src = Path(t) / "src"
+            build_source(src)
+            with self.assertRaises(hl.HailError):
+                hl.build_compact(src, Path(t) / "y.npz", max_mb=0.000001, progress=lambda *_: None)
+
+    def test_incomplete_file_is_reported(self):
+        with tempfile.TemporaryDirectory() as t:
+            np.savez(Path(t) / hl.COMPACT_NAME, lat=np.zeros(2))
+            with self.assertRaises(hl.HailError):
+                hl.compact_fields(Path(t) / hl.COMPACT_NAME)
 
 
 class TestParallelDownload(unittest.TestCase):
