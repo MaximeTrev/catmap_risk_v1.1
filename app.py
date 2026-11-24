@@ -4073,10 +4073,10 @@ def _grele_section():
                                          "description annonce une moyenne annuelle : c'est donc un cumul sur 74 ans. Décochez seulement si votre diagnostic "
                                          "indique un rapport proche de 1. Sans effet si le fichier compact data/grele/hail_compact.npz est présent "
                                          "(la moyenne annuelle y est calculée à partir des 74 fichiers annuels).", key="gr_climtotal", value=True, wide=True)
-        st.caption("Aucun fichier compact (data/grele/hail_compact.npz) : les fichiers sont téléchargés depuis Zenodo (lent en séries annuelles : "
+        st.caption("Aucun fichier précalculé (data/grele/hail_compact.npz) : les fichiers sont téléchargés depuis Zenodo (lent en séries annuelles : "
                    "74 fichiers de 6,5 Mo). Voir tools/build_hail_compact.py pour le générer une fois.")
     else:
-        st.caption("Fichier compact data/grele/hail_compact.npz détecté : aucun téléchargement.")
+        st.caption("Fichier précalculé data/grele/hail_compact.npz détecté : aucun téléchargement (climatologie, tendance et périodes de retour déjà calculées).")
     use_trend = _checkbox_with_help("Tenir compte de la tendance 1950–2023", "Option : la fréquence est **majorée** si la tendance locale est significative "
                                     "à la hausse, **minorée** si elle l'est à la baisse. Facteur = (fréquence + pente × années) ÷ fréquence, borné. "
                                     "Seules les mailles dont la p-value et la tendance relative dépassent vos seuils sont ajustées. Les seuils sont à "
@@ -4211,6 +4211,10 @@ def _grele_series_viewer(res):
     if st.button("Visualiser les séries annuelles", key="gr_curve_go", type="primary"):
         st.session_state["gr_curve_open"] = not st.session_state.get("gr_curve_open", False)
     if not st.session_state.get("gr_curve_open"):
+        return
+    if res["summ"].get("source") == "fichier précalculé":
+        st.caption("Séries annuelles indisponibles avec le fichier précalculé (il ne contient que les niveaux de période de retour, la climatologie et la "
+                   "tendance). Pour les visualiser, retirez temporairement data/grele/hail_compact.npz.")
         return
     df = res["df"].dropna(subset=["lat_f", "lon_f"])
     cells = {}
