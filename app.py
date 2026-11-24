@@ -44,7 +44,7 @@ from catmap import activity as act
 from catmap import georisques as gr
 from catmap import floodhazard as fhz
 import numpy as np
-from catmap import damage as dmg, wind, seismic as sm
+from catmap import damage as dmg, wind, seismic as sm, hail as hl
 from catmap.references import refs_md
 from catmap import coastalhazard as coast
 from catmap import copernicus as cop
@@ -4032,9 +4032,267 @@ def _seisme_damage(res):
                 st.error(str(e))
 
 
+_GR_UNITS = {"dec": "par décennie", "an": "par an"}
+
+
+def _grele_section():
+    st.subheader("Grêle")
+    st.markdown("Fréquence annuelle de grêle très grosse (≥ 5 cm) à la maille ERA5 de 0,25° (≈ 28 km) de chaque point, puis dommages. Même logique que les "
+                "autres onglets : colonnes `grele_RP50_freq` (ou `grele_moy_freq`), `dommage_grele_RP50_eur`.")
+    df, lat_c, lon_c, name = _points_input("gr_")
+    if df is None:
+        return
+    _help_line("Jeu de données", "**Battaglioli et al. (2025)**, Nature Geoscience (ESSL). *Périmètre* : monde entier, maille ERA5 de 0,25° (≈ 28 km), 1950–2023. "
+               "*Contenu* : fréquence des événements de grêle d'au moins 5 cm, estimée par régression logistique (AR-CHaMo) sur la réanalyse ERA5 : "
+               "probabilité d'éclair × probabilité conditionnelle de grêle, toutes les 3 h. Calibrée sur l'Europe, les États-Unis et l'Australie.\n\n"
+               "*Limites* : c'est une **fréquence modélisée** (pas une observation), à l'échelle d'une maille et non d'un site ; elle ne donne pas la taille "
+               "des grêlons au-delà de 5 cm ni l'intensité des dégâts ; l'indépendance entre pas de temps est supposée. "
+               "*Licence* CC BY-NC-ND 4.0 : usage non commercial, les fichiers sont lus sans modification.\n\n" + refs_md("grele", "era5"), wide=True,
+               label_style="font-size:.875rem")
+    _help_line("Approche", "**Climatologie** : nombre moyen annuel d'événements ≥ 5 cm par maille (moyenne 1950–2023). *Hypothèse* : le climat est stationnaire. "
+               "*Avantage* : rapide (un seul fichier de 6,5 Mo), robuste. *Inconvénient* : pas de période de retour ; la perte obtenue est une perte "
+               "annuelle moyenne uniquement.\n\n**Séries annuelles** : lecture des 74 fichiers annuels à la maille du point, puis niveau annuel dépassé "
+               "une année sur RP (quantile empirique, positions de Weibull, sans loi ajustée ni extrapolation : la grêle ≥ 5 cm est souvent nulle "
+               "plusieurs années de suite, ce qui exclut les lois d'extrêmes usuelles). *Avantage* : périodes de retour et perte annuelle moyenne par "
+               "intégration comme pour les autres aléas. *Inconvénients* : plus long (74 fichiers de 6,5 Mo, lus un à un puis supprimés), "
+               "période de retour limitée à 75 ans, valeurs élevées incertaines avec 74 années.\n\n" + refs_md("grele", "weibull", "aal"), wide=True,
+               label_style="font-size:.875rem")
+    mode = st.selectbox("Approche", list(hl.MODES), key="gr_mode", label_visibility="collapsed", format_func=lambda k: hl.MODES[k])
+    rps = []
+    if mode == "annual":
+        all_rps = _checkbox_with_help("Toutes les périodes de retour disponibles", "Coche 2, 5, 10, 20 et 50 ans. Avec 74 années de données, "
+                                      "on ne va pas au-delà de 50 ans (maximum théorique : 75 ans, sans extrapolation).", key="gr_all", value=True)
+        rps = list(hl.RPS) if all_rps else st.multiselect("Périodes de retour (années)", list(hl.RPS), default=list(hl.RPS), key="gr_rps", format_func=_rp_fmt)
+        if not rps:
+            st.caption("Choisissez au moins une période de retour.")
+            return
+    use_trend = _checkbox_with_help("Tenir compte de la tendance 1950–2023", "Option : la fréquence est **majorée** si la tendance locale est significative "
+                                    "à la hausse, **minorée** si elle l'est à la baisse. Facteur = (fréquence + pente × années) ÷ fréquence, borné. "
+                                    "Seules les mailles dont la p-value et la tendance relative dépassent vos seuils sont ajustées. Les seuils sont à "
+                                    "étudier (tableau d'aide sous les résultats). Source : fichier de tendances de Battaglioli et al. (2025).\n\n"
+                                    + refs_md("grele"), key="gr_trend", value=False, wide=True)
+    trend_opts = None
+    if use_trend:
+        t1, t2, t3 = st.columns(3)
+        unit = t1.selectbox("Unité de la tendance (à vérifier dans le diagnostic)", list(_GR_UNITS), key="gr_unit", format_func=lambda k: _GR_UNITS[k])
+        p_max = _num_help(t2, "p-value maximale", "Seuil de significativité : seules les mailles dont la p-value de la tendance est inférieure ou égale "
+                          "à ce seuil sont ajustées (0,05 = 5 %). Plus il est bas, moins de mailles sont ajustées.", min_value=0.001, max_value=0.5,
+                          value=0.05, step=0.01, key="gr_pmax", format="%.3f")
+        rel_min = _num_help(t3, "Tendance relative minimale (%/décennie)", "Une tendance faible par rapport à la fréquence moyenne n'est pas retenue. "
+                            "0 = aucun seuil ; 10 = seules les mailles dont la fréquence varie d'au moins 10 % par décennie sont ajustées.",
+                            min_value=0.0, max_value=200.0, value=0.0, step=5.0, key="gr_rel")
+        t4, t5, t6 = st.columns(3)
+        years = _num_help(t4, "Années de projection", "Écart entre le milieu de la période (1986,5) et l'année visée : la climatologie est une moyenne "
+                          "1950–2023 ; la pente est appliquée sur ce nombre d'années (38 ≈ 2025). 0 = pas de projection (facteur 1).",
+                          min_value=0.0, max_value=100.0, value=38.0, step=1.0, key="gr_years")
+        fmin = _num_help(t5, "Facteur minimal", "Borne basse du facteur appliqué (minoration maximale). 0,5 = la fréquence ne peut pas être divisée par plus de 2.",
+                         min_value=0.1, max_value=1.0, value=0.5, step=0.05, key="gr_fmin")
+        fmax = _num_help(t6, "Facteur maximal", "Borne haute du facteur appliqué (majoration maximale). 2 = la fréquence ne peut pas être multipliée par plus de 2.",
+                         min_value=1.0, max_value=10.0, value=2.0, step=0.1, key="gr_fmax")
+        trend_opts = {"per_decade": unit == "dec", "years": float(years), "p_max": float(p_max), "rel_min_pct": float(rel_min),
+                      "fmin": float(fmin), "fmax": float(fmax)}
+    with st.expander("Diagnostic de la source (à lancer en cas de problème)"):
+        if st.button("Tester les fichiers (climatologie, tendances, une année)", key="gr_diag_go", type="primary"):
+            with st.spinner("Téléchargement (≈ 26 Mo) et lecture…"):
+                st.session_state["gr_diag"] = hl.diagnose()
+        if st.session_state.get("gr_diag"):
+            _stretch(st.dataframe, pd.DataFrame(st.session_state["gr_diag"]), hide_index=True)
+        st.caption("Le diagnostic donne les noms de variables, la grille, les unités et des valeurs à Mendoza, Dallas, Milan, Paris, Brisbane et "
+                   "Johannesbourg. En cas d'ÉCHEC, copiez le tableau. Vous pouvez aussi déposer les fichiers dans data/grele/ (Zenodo 17379738).")
+    c1, c2, _sp = st.columns([1, 1, 2])
+    auto = _checkbox_with_help("Poursuivre automatiquement jusqu'à la fin (séries annuelles)", "Enchaîne les lots de téléchargement (74 fichiers) sans "
+                               "cliquer à nouveau. La page doit rester ouverte ; les années déjà lues sont conservées.", key="gr_auto", value=True)
+    job = bool(st.session_state.get("gr_job"))
+    if job and st.button("Arrêter la reprise automatique", key="gr_stop"):
+        st.session_state["gr_job"] = False
+        job = False
+    go = c1.button("Estimer l'aléa grêle", type="primary", key="gr_go")
+    if go:
+        st.session_state["gr_stall"], st.session_state["gr_prev"] = 0, -1
+    if go or (job and auto and mode == "annual"):
+        try:
+            with st.spinner("Lecture de l'aléa grêle (téléchargement Zenodo la première fois, reprise au clic suivant)…"):
+                res_, summ_ = hl.estimate(df, lat_c, lon_c, mode, rps, use_trend, trend_opts)
+            if summ_.get("en_attente"):
+                st.warning(f"{summ_['en_attente']} année(s) restant à lire sur {len(hl.YEARS)} : relancez le calcul (les années déjà lues sont conservées).")
+            for k_, m_ in list((summ_.get("erreurs") or {}).items())[:3]:
+                st.warning(f"Année {k_} : {m_}")
+            res_["lat_f"] = pd.to_numeric(res_[lat_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            res_["lon_f"] = pd.to_numeric(res_[lon_c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            st.session_state["gr_result"] = {"name": name, "n": len(df), "df": res_, "summ": summ_, "mode": mode}
+            st.session_state["gr_trend_opts"] = trend_opts
+            st.session_state.pop("gr_dmg", None)
+            if mode == "annual" and auto and _auto_resume("gr", summ_.get("en_attente", 0), summ_.get("annees_ok", 0)):
+                return
+            st.session_state["gr_job"] = False
+        except hl.HailError as e:
+            st.session_state["gr_job"] = False
+            st.error(str(e))
+    if c2.button("Estimer les dommages", type="primary", key="gr_dmg_go"):
+        st.session_state["gr_dmg_open"] = True
+    res = st.session_state.get("gr_result")
+    if st.session_state.get("gr_dmg_open") and (not res or res["name"] != name or res["n"] != len(df)):
+        st.caption("Estimez d'abord l'aléa grêle (bouton de gauche) : les dommages utilisent la fréquence calculée.")
+    if not res or res["name"] != name or res["n"] != len(df):
+        return
+    out, summ = res["df"], res["summ"]
+    m = st.columns(4)
+    m[0].metric("Points", summ["points"])
+    m[1].metric("Fréquence lue", summ["ok"])
+    m[2].metric("Sans donnée", summ["sans_donnee"])
+    m[3].metric("Coordonnées invalides", summ["invalides"])
+    if summ.get("en_attente"):
+        st.warning(f"{summ['en_attente']} année(s) restant à lire : relancez « Estimer l'aléa grêle » (les années déjà lues sont conservées).")
+        return
+    if summ["sans_donnee"]:
+        st.warning(f"{summ['sans_donnee']} point(s) sans valeur (mer, zone non couverte ou hors de la grille) : voir la colonne grele_statut.")
+    if summ.get("tendance"):
+        st.caption(f"Tendance : {summ.get('hausse', 0)} point(s) majoré(s), {summ.get('baisse', 0)} minoré(s) ; facteur moyen "
+                   f"{'n/d' if summ.get('facteur_moyen') is None else round(summ['facteur_moyen'], 3)}. Colonnes d'origine : suffixe « _brut ».")
+        _grele_threshold_help(out, summ)
+    if st.session_state.get("gr_dmg_open"):
+        _grele_damage(res)
+    merged = out.copy()
+    dm = st.session_state.get("gr_dmg")
+    col_opts = list(summ["colonnes"])
+    if dm and dm["name"] == name and dm["n"] == len(df):
+        o, ds_ = dm["out"], dm["summ"]
+        merged = pd.concat([merged, o[[c for c in o.columns if c not in merged.columns]]], axis=1)
+        col_opts += [c for c in o.columns if c.startswith("dommage_grele_RP") and c.endswith("_eur") or c == "dommage_grele_PAM_eur"]
+        st.markdown("**Dommages : grêle**")
+        cols = st.columns(4)
+        for i, (c, v) in enumerate(list(ds_["pertes_totales"].items())[:3]):
+            _kpi(cols[i], f"Perte totale RP{__import__('re').search(r'RP(' + chr(92) + 'd+)', c).group(1)}", _eur(v))
+        if ds_["pam_totale"] is not None:
+            _kpi(cols[3], "Perte annuelle moyenne (approx.)", _eur(ds_["pam_totale"]))
+        if dm.get("valeur_nulle"):
+            st.warning("La valeur exposée est nulle ou absente : les pertes en € sont nulles (les taux restent valables).")
+        if res["mode"] == "annual" and len(summ["rps"]) < 2:
+            st.caption("Une seule période de retour : la perte annuelle moyenne n'est pas calculable (il en faut au moins deux).")
+    if res["mode"] == "annual":
+        _grele_series_viewer(res)
+    color_col = st.selectbox("Colorer la carte selon", col_opts, key="gr_color")
+    _wind_map(merged, color_col, cls_fn=hl.freq_class, palette=hl.FREQ_COLORS, labels=hl.FREQ_LABELS, popup_suffix="_freq", key="gr_map")
+    show = merged.drop(columns=["lat_f", "lon_f"])
+    _stretch(st.dataframe, show, hide_index=True)
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(show), "catmap_grele.csv", "text/csv", key="gr_csv")
+    st.caption("Grêle ≥ 5 cm : Battaglioli et al. (2025), Nature Geoscience, données ESSL (Zenodo 17379738, CC BY-NC-ND 4.0, usage non commercial). "
+               "Fréquence modélisée par maille de 0,25° : pas une mesure au site. Classes de la carte indicatives. Taux de dommage à calibrer.")
+
+
+def _grele_threshold_help(out, summ):
+    ref = hl.CLIM_COL + "_brut" if (hl.CLIM_COL + "_brut") in out.columns else hl.CLIM_COL
+    need = (ref, "grele_tendance", "grele_tendance_p")
+    if not all(c in out.columns for c in need):
+        return
+    with st.expander("Aide au choix du seuil de tendance"):
+        o = st.session_state.get("gr_trend_opts") or {}
+        tab = hl.threshold_table(out[ref], out["grele_tendance"], out["grele_tendance_p"], o.get("per_decade", True), o.get("years", 38.0),
+                                 o.get("fmin", 0.5), o.get("fmax", 2.0))
+        _stretch(st.dataframe, tab, hide_index=True)
+        st.caption("Nombre de points ajustés selon la p-value maximale et la tendance relative minimale : choisissez un seuil qui n'ajuste que des mailles "
+                   "où la tendance est nette. Calcul fait avec l'unité, les années de projection et les bornes saisies plus haut au dernier calcul.")
+
+
+def _grele_series_viewer(res):
+    """Contrôle visuel des séries annuelles lues à une maille, avec les niveaux de période de retour retenus."""
+    if st.button("Visualiser les séries annuelles", key="gr_curve_go", type="primary"):
+        st.session_state["gr_curve_open"] = not st.session_state.get("gr_curve_open", False)
+    if not st.session_state.get("gr_curve_open"):
+        return
+    df = res["df"].dropna(subset=["lat_f", "lon_f"])
+    cells = {}
+    for la, lo in zip(df["lat_f"], df["lon_f"]):
+        cells.setdefault(hl._cell_key(hl.cell_of(la, lo)), 0)
+        cells[hl._cell_key(hl.cell_of(la, lo))] += 1
+    have = set(hl.series_cache_cells())
+    keys = sorted(k for k in cells if k in have)
+    if not keys:
+        st.caption("Aucune série en cache : lancez d'abord l'estimation (séries annuelles).")
+        return
+    key = st.selectbox("Maille (lat, lon, pas de 0,25°)", keys, key="gr_curve_sel", format_func=lambda k: f"{k} ({cells[k]} point(s))")
+    la, lo = (float(x) for x in key.split(","))
+    ser = hl.load_series([(la, lo)])[key]
+    yrs = np.array(hl.YEARS)
+    data = pd.DataFrame({"année": yrs, "valeur": ser})
+    levels = pd.DataFrame([{"rp": r, "valeur": v} for r, v in hl.rp_levels(ser, res["summ"]["rps"]).items() if np.isfinite(v)])
+    emp = hl.empirical_curve(ser)
+    try:
+        import altair as alt
+        bars = alt.Chart(data).mark_bar().encode(x=alt.X("année:O", title="Année"), y=alt.Y("valeur:Q", title="Événements ≥ 5 cm par an"),
+                                                 tooltip=["année", "valeur"])
+        layers = [bars]
+        if len(levels):
+            layers.append(alt.Chart(levels).mark_rule(color="#d62728").encode(y="valeur:Q", tooltip=["rp", "valeur"]))
+        st.altair_chart(alt.layer(*layers).properties(height=280, title=f"Valeurs annuelles, maille {key} (traits rouges : niveaux des périodes de retour retenues)"),
+                        use_container_width=True)
+        pts = alt.Chart(emp).mark_point(filled=True).encode(x=alt.X("rp:Q", scale=alt.Scale(type="log"), title="Période de retour empirique (années)"),
+                                                           y=alt.Y("valeur:Q", title="Événements ≥ 5 cm par an"), tooltip=["rp", "valeur"])
+        st.altair_chart(pts.properties(height=280, title="Valeurs classées (positions de Weibull)"), use_container_width=True)
+    except Exception as e:                                       # noqa: BLE001
+        st.warning(f"Tracé avancé indisponible ({type(e).__name__}) : graphique simplifié.")
+        st.bar_chart(data.set_index("année")["valeur"])
+    st.caption("Valeurs annuelles issues du modèle de Battaglioli et al. (2025) à la maille choisie. Les niveaux de période de retour sont des quantiles "
+               "empiriques : aucune loi n'est ajustée, donc aucun ajustement à valider ; jugez surtout si le nombre d'années non nulles suffit pour "
+               "les périodes de retour retenues.")
+
+
+def _grele_damage(res):
+    out_df = res["df"]
+    base_cols = [c for c in out_df.columns if not c.startswith(("grele_", "dommage_")) and c not in ("lat_f", "lon_f")]
+    with st.container(border=True):
+        _help_line("Fonction de vulnérabilité : méthode", "**Linéaire plafonnée** : taux de dommage = min(1, taux par événement × fréquence annuelle). "
+                   "Le taux par événement est **à calibrer** : la valeur par défaut est illustrative, elle ne vient d'aucune publication. Une maille "
+                   "de 0,25° (≈ 28 km) est bien plus grande que l'emprise d'un orage de grêle : le taux moyen par événement et par site est donc "
+                   "faible. En mode climatologie, la perte obtenue est une perte annuelle moyenne ; en séries annuelles, la perte à chaque période de "
+                   "retour est celle d'une année où la fréquence atteint ce niveau.", wide=True, label_style="font-size:.875rem")
+        st.markdown("**Estimation des dommages de grêle** : perte = taux de dommage × valeur exposée, avec un taux par événement ≥ 5 cm saisi par vous "
+                    "(valeur par défaut **illustrative**, sans source).")
+        c1, c2 = st.columns(2)
+        ratio = _num_help(c1, "Taux de dommage par événement (%)", "Part de la valeur exposée détruite lors d'un événement de grêle ≥ 5 cm sur la maille. "
+                          "Dépend du bâti (toitures, vitrages, panneaux solaires, véhicules, cultures) : à calibrer sur vos sinistres.",
+                          min_value=0.01, max_value=100.0, value=1.0, step=0.1, key="gr_ratio", format="%.2f") / 100.0
+        default_cls = c2.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="gr_cls", index=list(dmg.CLASSES).index("commercial"),
+                                   format_func=lambda k: dmg.CLASS_LABELS[k])
+        d1, d2 = st.columns(2)
+        type_col = d1.selectbox("Colonne du type d'actif (facultatif)", ["(aucune)"] + base_cols, key="gr_typecol",
+                                index=_guess_col(base_cols, ("type", "categ", "activ", "naf")))
+        country_col = d2.selectbox("Colonne pays (ISO ou nom anglais)", ["(aucune)"] + base_cols, key="gr_ctry",
+                                   index=_guess_col(base_cols, ("pays_iso2", "pays_iso", "iso2", "iso3", "country", "pays")))
+        type_col = None if type_col == "(aucune)" else type_col
+        country_col = None if country_col == "(aucune)" else country_col
+        jrc, _err = _dmg_jrc_local()
+        jrc_ok = bool(jrc and jrc["maxdmg"] and country_col)
+        modes = (["jrc_area"] if jrc_ok else []) + ["area", "col", "const"]
+        mode = st.radio("Valeur exposée", modes, key="gr_vmode", format_func=lambda m: _DMG_VALUE_MODES[m])
+        if not jrc_ok:
+            st.caption("Valeurs de remplacement JRC par pays : placez le classeur JRC dans data/flood/ et choisissez une colonne pays.")
+        value_col = area_col = None
+        unit_value = const = 0.0
+        if mode == "col":
+            value_col = st.selectbox("Colonne de valeur (€)", base_cols, key="gr_valcol")
+        elif mode == "const":
+            const = st.number_input("Valeur exposée par point (€)", min_value=0.0, value=0.0, step=100000.0, key="gr_const")
+        else:
+            area_col = st.selectbox("Colonne de surface (m²)", base_cols, key="gr_area",
+                                    index=max(0, _guess_col(base_cols, ("surface", "area", "m2", "m²"), False) - 1))
+            if mode == "area":
+                unit_value = st.number_input("Valeur de remplacement (€/m²)", min_value=0.0, value=0.0, step=50.0, key="gr_unit_value")
+        if st.button("Calculer les dommages", type="primary", key="gr_dmg_calc"):
+            try:
+                base = out_df.reset_index(drop=True)
+                classes = dmg.asset_class_series(base, type_col, default_cls)
+                values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, "total")
+                o, summ = hl.estimate_damages(base, res["summ"], ratio, classes, values)
+                summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
+                st.session_state["gr_dmg"] = {"out": o, "summ": summ, "name": res["name"], "n": res["n"], "valeur_nulle": summ["valeur_nulle"]}
+            except (dmg.DamageError, ValueError) as e:
+                st.error(str(e))
+
+
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Séisme", "Géorisques"])
+    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
     with tabs[0]:
         _safe_tab(_exposition_section, "Débordement et submersion")
     with tabs[1]:
@@ -4042,6 +4300,8 @@ def page_risques_climatiques():
     with tabs[2]:
         _safe_tab(_seisme_section, "Séisme")
     with tabs[3]:
+        _safe_tab(_grele_section, "Grêle")
+    with tabs[4]:
         _safe_tab(_georisques_section, "Géorisques")
 
 
