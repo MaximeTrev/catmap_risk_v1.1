@@ -145,3 +145,13 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 .st-key-fh_clear_cache button, .st-key-fh_clear_cache button p, .st-key-fh_clear_cache button span {
     color: #ffffff !important;
 }
+
+/* Grêle : boutons en texte blanc */
+.st-key-gr_go button, .st-key-gr_go button p, .st-key-gr_go button span,
+.st-key-gr_dmg_go button, .st-key-gr_dmg_go button p, .st-key-gr_dmg_go button span,
+.st-key-gr_dmg_calc button, .st-key-gr_dmg_calc button p, .st-key-gr_dmg_calc button span,
+.st-key-gr_diag_go button, .st-key-gr_diag_go button p, .st-key-gr_diag_go button span,
+.st-key-gr_curve_go button, .st-key-gr_curve_go button p, .st-key-gr_curve_go button span,
+.st-key-gr_stop button, .st-key-gr_stop button p, .st-key-gr_stop button span {
+    color: #ffffff !important;
+}
