@@ -146,10 +146,15 @@ def _http_get(session, url: str, **kw):
 
 
 def load_catalog(session=None, url: str = TILE_EXTENTS_URL) -> Catalog:
-    try:
-        r = _http_get(session, url, headers={"User-Agent": "CatMap"})
-    except Exception as e:  # noqa: BLE001
-        raise TileError(f"catalogue des tuiles inaccessible ({type(e).__name__}: {str(e)[:150]})") from e
+    r, err = None, None
+    for attempt in range(2):                                   # un serveur lent répond souvent au second essai
+        try:
+            r = _http_get(session, url, headers={"User-Agent": "CatMap"}, timeout=30)
+            break
+        except Exception as e:  # noqa: BLE001
+            err = e
+    if r is None:
+        raise TileError(f"catalogue des tuiles inaccessible ({type(err).__name__}: {str(err)[:150]}) : le serveur JRC est peut-être trop lent, réessayez plus tard")
     if r.status_code != 200:
         raise TileError(f"catalogue des tuiles : HTTP {r.status_code}")
     try:
@@ -230,9 +235,13 @@ class Resolver:
             for cand in (f"RP{rp}", f"RP{rp:03d}", f"RP{rp:04d}"):
                 url = f"{self.base_url}{cand}/"
                 try:
-                    r = _http_get(self.session, url, headers={"User-Agent": "CatMap"})
+                    r = _http_get(self.session, url, headers={"User-Agent": "CatMap"}, timeout=45)
                 except Exception as e:  # noqa: BLE001
                     self.notes.append(f"{cand}: {type(e).__name__}")
+                    if type(e).__name__ in ("ReadTimeout", "ConnectTimeout", "Timeout", "ConnectionError"):
+                        # serveur lent ou injoignable : essayer d'autres graphies du nom ne sert à rien (3 délais d'attente de suite)
+                        self.folders[rp] = None
+                        raise TileError(f"serveur JRC trop lent ou injoignable pour le dossier RP{rp} ({type(e).__name__}) : réessayez plus tard") from e
                     continue
                 if r.status_code == 200:
                     lst = parse_listing(r.text)
