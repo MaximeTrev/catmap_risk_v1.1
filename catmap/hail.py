@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +42,7 @@ RISK = "grele"
 ZENODO_RECORD = "17379738"
 CACHE_DIR = Path(tempfile.gettempdir()) / "catmap_grele"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "grele"
+COMPACT_NAME = "hail_compact.npz"
 CLIM_FILE = "hail_ge5cm_climatology_1950_2023.nc"
 TREND_FILE = "hail_ge5cm_trends_1950_2023.nc"
 YEARS = tuple(range(1950, 2024))
@@ -223,42 +226,157 @@ def _local(name: str, cache_dir: Path, data_dir: Path) -> Optional[Path]:
     return None
 
 
+def _try_download(u: str, name: str, cache_dir: Path, session) -> tuple:
+    """Télécharge une adresse ; renvoie (chemin, None) ou (None, message d'erreur)."""
+    tmp = Path(cache_dir) / f"{name}.{threading.get_ident()}.part"
+    try:
+        r = (session or __import__("requests")).get(u, stream=True, timeout=(15, 120), headers={"User-Agent": "CatMap"})
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        head = b""
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                if not head:
+                    head = chunk[:200]
+                f.write(chunk)
+    except Exception as e:                                       # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        return None, f"{type(e).__name__} {str(e)[:100]}"
+    if head[:4] == HDF5_MAGIC or head[:3] == CDF_MAGIC:
+        dest = Path(cache_dir) / name
+        tmp.replace(dest)
+        return dest, None
+    tmp.unlink(missing_ok=True)
+    return None, f"contenu ni NetCDF ni HDF5 (début : {head[:60]!r})"
+
+
 def fetch_file(name: str, session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, urls: Optional[dict] = None) -> Path:
-    """Fichier du jeu : data/grele/, sinon cache, sinon téléchargement Zenodo (contenu vérifié : NetCDF/HDF5)."""
+    """Fichier du jeu : data/grele/, sinon cache, sinon téléchargement Zenodo (contenu vérifié : NetCDF/HDF5). Adresse directe d'abord (rapide) ;
+    l'API Zenodo (liste des fichiers) n'est interrogée qu'en cas d'échec."""
     p = _local(name, cache_dir, data_dir)
     if p:
         return p
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    urls = urls if urls is not None else _zenodo_files(session)
-    cands = [urls[name]] if name in urls else []
-    cands.append(f"https://zenodo.org/records/{ZENODO_RECORD}/files/{name}?download=1")
     errors = []
-    tmp = cache_dir / (name + ".part")
-    for u in dict.fromkeys(cands):
-        try:
-            r = (session or __import__("requests")).get(u, stream=True, timeout=180, headers={"User-Agent": "CatMap"})
-            if r.status_code != 200:
-                errors.append(f"HTTP {r.status_code}")
-                continue
-            head = b""
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
-                    if not head:
-                        head = chunk[:200]
-                    f.write(chunk)
-        except Exception as e:                                   # noqa: BLE001
-            errors.append(f"{type(e).__name__} {str(e)[:100]}")
-            tmp.unlink(missing_ok=True)
-            continue
-        if head[:4] == HDF5_MAGIC or head[:3] == CDF_MAGIC:
-            dest = cache_dir / name
-            tmp.replace(dest)
-            return dest
-        errors.append(f"contenu ni NetCDF ni HDF5 (début : {head[:60]!r})")
-        tmp.unlink(missing_ok=True)
+    path, err = _try_download(f"https://zenodo.org/records/{ZENODO_RECORD}/files/{name}?download=1", name, cache_dir, session)
+    if path:
+        return path
+    errors.append(err)
+    urls = urls if urls is not None else _zenodo_files(session)
+    if name in urls:
+        path, err = _try_download(urls[name], name, cache_dir, session)
+        if path:
+            return path
+        errors.append(err)
     raise HailError(f"téléchargement de {name} impossible : " + " | ".join(errors)[:600] +
                     f" — vous pouvez déposer le fichier dans data/grele/ (Zenodo {ZENODO_RECORD}).")
+
+
+# ───────────────────────────── fichier compact (précalculé) ─────────────────────────────
+# Les 74 fichiers annuels pèsent ≈ 480 Mo : les télécharger un à un est long. ``build_compact`` (outil ``tools/build_hail_compact.py``, à lancer une fois
+# sur un poste qui dispose des fichiers) en tire un seul fichier ``data/grele/hail_compact.npz`` : climatologie (moyenne annuelle), tendance, p-value
+# et valeurs annuelles des mailles où la grêle n'est pas négligeable. Quand il est présent, plus aucun téléchargement n'est nécessaire.
+_COMPACT_CACHE: dict = {}
+
+
+def compact_path(data_dir: Path = DATA_DIR) -> Optional[Path]:
+    p = Path(data_dir) / COMPACT_NAME
+    return p if p.is_file() and p.stat().st_size > 0 else None
+
+
+def _compact(path: Path) -> dict:
+    key = (str(path), path.stat().st_mtime)
+    if key not in _COMPACT_CACHE:
+        try:
+            with np.load(path) as z:
+                d = {k: z[k] for k in z.files}
+        except Exception as e:                                   # noqa: BLE001
+            raise HailError(f"fichier compact illisible ({type(e).__name__}: {str(e)[:100]}) : {path.name}") from e
+        miss = [k for k in ("lat", "lon", "years", "clim", "trend", "pvalue", "cells", "annual", "scale") if k not in d]
+        if miss:
+            raise HailError(f"fichier compact incomplet (manque : {', '.join(miss)}).")
+        _COMPACT_CACHE.clear()
+        _COMPACT_CACHE[key] = d
+    return _COMPACT_CACHE[key]
+
+
+def compact_years(path: Path) -> list:
+    return [int(y) for y in _compact(path)["years"]]
+
+
+def compact_fields(path: Path) -> dict:
+    d = _compact(path)
+    return {k: {"name": k, "lat": d["lat"].astype(float), "lon": d["lon"].astype(float), "z": d[k].astype(float), "attrs": {}}
+            for k in ("clim", "trend", "pvalue")}
+
+
+def compact_series(path: Path, cells: list) -> dict:
+    """``{clé de maille: valeurs annuelles (dans l'ordre de compact_years)}``. Maille absente du stock mais valide (grêle négligeable) : zéros ;
+    maille sans donnée : NaN."""
+    d = _compact(path)
+    la, lo, kept = d["lat"].astype(float), d["lon"].astype(float), d["cells"]
+    ann, scale = d["annual"], float(d["scale"])
+    out = {}
+    for c in cells:
+        i, j = int(np.abs(la - c[0]).argmin()), int(np.abs(lo - c[1]).argmin())
+        key = _cell_key(c)
+        if abs(la[i] - c[0]) > 0.13 or abs(lo[j] - c[1]) > 0.13 or not np.isfinite(d["clim"][i, j]):
+            out[key] = np.full(ann.shape[0], np.nan)
+            continue
+        pos = int(np.searchsorted(kept, i * len(lo) + j))
+        out[key] = ann[:, pos].astype(float) / scale if pos < len(kept) and kept[pos] == i * len(lo) + j else np.zeros(ann.shape[0])
+    return out
+
+
+def build_compact(src_dir, out_path, min_clim: float = 0.0005, max_mb: float = 90.0, progress=print) -> dict:
+    """Construit le fichier compact à partir des NetCDF d'origine déposés dans ``src_dir`` (climatologie, tendances, fichiers annuels).
+    Valeurs annuelles stockées en entiers 16 bits (précision 1/scale). Mailles conservées : moyenne annuelle ≥ ``min_clim`` événements/an ; le seuil est
+    relevé automatiquement jusqu'à ce que le fichier tienne sous ``max_mb`` Mo."""
+    src = Path(src_dir)
+    years = [y for y in YEARS if (src / annual_file(y)).is_file()]
+    if not years:
+        raise HailError(f"aucun fichier {annual_file(2000)} (etc.) dans {src}")
+    progress(f"{len(years)} fichier(s) annuel(s) trouvé(s)")
+    arrs, ref = [], None
+    for y in years:
+        f = field(read_dataset(src / annual_file(y)), contains=("hail", "prob"))
+        ref = ref or f
+        if f["z"].shape != ref["z"].shape:
+            raise HailError(f"grille différente en {y}")
+        arrs.append(f["z"].astype(np.float32))
+        if len(arrs) % 10 == 0:
+            progress(f"  {len(arrs)}/{len(years)} lus")
+    A = np.stack(arrs)
+    mean = np.nanmean(A, axis=0)
+    tds = read_dataset(src / TREND_FILE)
+    tr = field(tds, prefer=("trend_hail_ge5cm",), contains=("trend",))["z"]
+    pv = field(tds, prefer=("pvalue_hail_ge5cm",), contains=("pvalue", "p_value"))["z"]
+    cfile = field(read_dataset(src / CLIM_FILE), prefer=("hail_ge5cm",), contains=("hail",))["z"] if (src / CLIM_FILE).is_file() else None
+    if cfile is not None:
+        ok = np.isfinite(cfile) & (mean > 0)
+        progress(f"rapport climatologie du fichier ÷ moyenne des années : {float(np.median(cfile[ok] / mean[ok])):.1f} (≈ {len(years)} si la climatologie est un cumul)")
+    top = float(np.nanmax(A))
+    scale = float(10 ** math.floor(math.log10(65000.0 / top))) if top > 0 else 1.0
+    nlon = len(ref["lon"])
+    thr, info = float(min_clim), {}
+    for _ in range(6):
+        keep = np.isfinite(mean) & (mean >= thr)
+        flat = np.flatnonzero(keep.ravel()).astype(np.int32)
+        q = np.nan_to_num(A.reshape(len(years), -1)[:, flat] * scale, nan=0.0)
+        q = np.clip(np.rint(q), 0, 65535).astype(np.uint16)
+        mask = keep
+        np.savez_compressed(out_path, lat=ref["lat"].astype(np.float32), lon=ref["lon"].astype(np.float32), years=np.array(years, np.int16),
+                            clim=mean.astype(np.float32), trend=np.where(mask, tr, np.nan).astype(np.float32),
+                            pvalue=np.where(mask, pv, np.nan).astype(np.float32), cells=flat, annual=q, scale=np.float32(scale))
+        mb = Path(out_path).stat().st_size / 1e6
+        info = {"annees": len(years), "mailles_conservees": int(len(flat)), "mailles_total": int(np.isfinite(mean).sum()), "taille_mo": round(mb, 1),
+                "seuil_moyenne_annuelle": thr, "precision": 1.0 / scale}
+        progress(f"seuil {thr:g} événements/an : {len(flat)} mailles, {mb:.1f} Mo")
+        if mb <= max_mb:
+            return info
+        thr *= 3
+    raise HailError(f"fichier compact trop gros ({info.get('taille_mo')} Mo) même avec un seuil élevé.")
 
 
 # ───────────────────────────── points et mailles ─────────────────────────────
@@ -303,13 +421,13 @@ def _save_year(cache_dir: Path, year: int, d: dict) -> None:
 
 
 def ensure_years(cells: list, years=YEARS, session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, budget_s: float = 200.0,
-                 on_progress=None) -> dict:
-    """Garantit, pour chaque année, la valeur de chaque maille demandée. Une année déjà complète en cache n'est pas retéléchargée ; sinon le fichier de
-    l'année est téléchargé, les mailles lues puis le gros fichier supprimé (sauf s'il vient de data/grele/). Temps limité : reprise au prochain appel.
-    Renvoie ``{"done", "pending", "errors"}``."""
+                 on_progress=None, workers: int = 4) -> dict:
+    """Garantit, pour chaque année, la valeur de chaque maille demandée. Ordre : cache de séries ; fichier compact (data/grele/, instantané) ; sinon
+    téléchargement du fichier de l'année (``workers`` en parallèle), lecture des seules mailles demandées puis suppression du gros fichier (sauf s'il
+    vient de data/grele/). Temps limité : reprise au prochain appel. Renvoie ``{"done", "pending", "errors", "source"}``."""
     keys = [_cell_key(c) for c in cells]
     t0 = time.time()
-    done, errors, urls = 0, {}, None
+    done, errors, source = 0, {}, "cache"
     todo = []
     for y in years:
         have = _load_year(cache_dir, y)
@@ -317,28 +435,58 @@ def ensure_years(cells: list, years=YEARS, session=None, cache_dir: Path = CACHE
             done += 1
         else:
             todo.append(y)
-    for y in todo:
-        if time.time() - t0 > budget_s:
-            break
+    cp = compact_path(data_dir) if todo else None
+    if cp:
         try:
-            if urls is None and _local(annual_file(y), cache_dir, data_dir) is None:
-                urls = _zenodo_files(session)
-            path = fetch_file(annual_file(y), session, cache_dir, data_dir, urls)
-            f = field(read_dataset(path), contains=("hail", "prob"))
-            vals = sample(f, [c[0] for c in cells], [c[1] for c in cells])
-            have = _load_year(cache_dir, y)
-            have.update(dict(zip(keys, vals)))
-            _save_year(cache_dir, y, have)
-            if Path(path).parent == Path(cache_dir):
-                Path(path).unlink(missing_ok=True)
-            done += 1
+            cy = compact_years(cp)
+            ser = compact_series(cp, cells)
+            left = []
+            for y in todo:
+                if y in cy:
+                    have = _load_year(cache_dir, y)
+                    have.update({k: float(ser[k][cy.index(y)]) for k in keys})
+                    _save_year(cache_dir, y, have)
+                    done += 1
+                else:
+                    left.append(y)
+            todo, source = left, "compact"
         except HailError as e:
-            errors[str(y)] = str(e)[:400]
-            if len(errors) >= 3:                               # même cause probable : inutile d'insister
-                break
-        if on_progress:
-            on_progress(done, len(years))
-    return {"done": done, "pending": len(years) - done, "errors": errors}
+            errors["compact"] = str(e)[:300]
+    if todo:
+        source = "zenodo" if source == "cache" else source + "+zenodo"
+        stop = threading.Event()
+        la, lo = [c[0] for c in cells], [c[1] for c in cells]
+
+        def work(y):
+            if stop.is_set() or time.time() - t0 > budget_s:
+                return y, None
+            path = None
+            try:
+                path = fetch_file(annual_file(y), session, cache_dir, data_dir)
+                vals = sample(field(read_dataset(path), contains=("hail", "prob")), la, lo)
+                have = _load_year(cache_dir, y)
+                have.update(dict(zip(keys, vals)))
+                _save_year(cache_dir, y, have)
+                return y, None
+            except HailError as e:
+                return y, str(e)[:400]
+            finally:
+                if path is not None and Path(path).parent == Path(cache_dir):
+                    Path(path).unlink(missing_ok=True)
+
+        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+            n = 0
+            for fut in as_completed([ex.submit(work, y) for y in todo]):
+                y, err = fut.result()
+                n += 1
+                if err:
+                    errors[str(y)] = err
+                    if len(errors) >= 3:                       # même cause probable : inutile d'insister
+                        stop.set()
+                if on_progress:
+                    on_progress(done + n, len(years))
+        done = sum(all(k in _load_year(cache_dir, y) for k in keys) for y in years)
+    return {"done": done, "pending": len(years) - done, "errors": errors, "source": source}
 
 
 def load_series(cells: list, years=YEARS, cache_dir: Path = CACHE_DIR) -> dict:
@@ -406,7 +554,8 @@ def threshold_table(freq, trend, pvalue, per_decade: bool = True, years: float =
 
 # ───────────────────────────── estimation de l'aléa ─────────────────────────────
 def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", rps=RPS, use_trend: bool = False, trend_opts: Optional[dict] = None,
-             session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, budget_s: float = 200.0) -> tuple[pd.DataFrame, dict]:
+             session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, budget_s: float = 200.0,
+             clim_total: bool = True) -> tuple[pd.DataFrame, dict]:
     """Ajoute la fréquence de grêle ≥ 5 cm (événements par an et par maille). Mode ``clim`` : ``grele_moy_freq`` ; mode ``annual`` : ``grele_RP<rp>_freq``.
     Avec la tendance : la colonne utilisée pour les dommages est ajustée, la valeur d'origine est conservée dans ``…_freq_brut``."""
     if mode not in MODES:
@@ -420,10 +569,17 @@ def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", r
     status = ["coordonnées invalides"] * len(out)
     base: dict = {}
     clim_vals = None
+    cp = compact_path(data_dir)
+    cfields = compact_fields(cp) if cp else None
+    summ["source"] = "fichier compact" if cp else "Zenodo"
     if mode == "clim" or use_trend:
-        cf = field(read_dataset(fetch_file(CLIM_FILE, session, cache_dir, data_dir)), prefer=("hail_ge5cm",), contains=("hail",))
+        if cfields:                                          # moyenne annuelle déjà calculée à partir des 74 fichiers annuels
+            cf, div = cfields["clim"], 1.0
+        else:
+            cf = field(read_dataset(fetch_file(CLIM_FILE, session, cache_dir, data_dir)), prefer=("hail_ge5cm",), contains=("hail",))
+            div = float(len(YEARS)) if clim_total else 1.0     # le fichier de climatologie est un cumul 1950–2023 (rapport ≈ 64 constaté vs année 2000)
         clim_vals = np.full(len(out), np.nan)
-        clim_vals[idx] = sample(cf, lat[idx], lon[idx])
+        clim_vals[idx] = sample(cf, lat[idx], lon[idx]) / div
     if mode == "clim":
         base[CLIM_COL] = clim_vals
         summ["colonnes"] = [CLIM_COL]
@@ -432,7 +588,7 @@ def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", r
         if len(rps) == 0:
             raise HailError("aucune période de retour exploitable (maximum : 75 ans avec 74 années).")
         res = ensure_years(cells, YEARS, session, cache_dir, data_dir, budget_s)
-        summ.update({"en_attente": res["pending"], "erreurs": res["errors"], "annees_ok": res["done"], "rps": list(rps)})
+        summ.update({"en_attente": res["pending"], "erreurs": res["errors"], "annees_ok": res["done"], "rps": list(rps), "source": res["source"]})
         for r in rps:
             base[column_name(r)] = np.full(len(out), np.nan)
         if res["pending"] == 0:
@@ -444,9 +600,12 @@ def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", r
                     base[column_name(r)][i] = lv[k][r]
         summ["colonnes"] = [column_name(r) for r in rps]
     if use_trend:
-        tf = read_dataset(fetch_file(TREND_FILE, session, cache_dir, data_dir))
-        tr = field(tf, prefer=("trend_hail_ge5cm",), contains=("trend",))
-        pv = field(tf, prefer=("pvalue_hail_ge5cm",), contains=("pvalue", "p_value"))
+        if cfields:
+            tr, pv = cfields["trend"], cfields["pvalue"]
+        else:
+            tf = read_dataset(fetch_file(TREND_FILE, session, cache_dir, data_dir))
+            tr = field(tf, prefer=("trend_hail_ge5cm",), contains=("trend",))
+            pv = field(tf, prefer=("pvalue_hail_ge5cm",), contains=("pvalue", "p_value"))
         tval, pval = np.full(len(out), np.nan), np.full(len(out), np.nan)
         tval[idx], pval[idx] = sample(tr, lat[idx], lon[idx]), sample(pv, lat[idx], lon[idx])
         o = dict(trend_opts or {})
@@ -520,10 +679,17 @@ def _describe(f: dict, label: str, extra_attrs=True) -> dict:
 def diagnose(session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR) -> list[dict]:
     """Télécharge (si besoin) la climatologie, la tendance et UNE année, et décrit leur contenu : sert à confirmer noms de variables, grille, unités."""
     rows = []
-    files = _zenodo_files(session)
-    rows.append({"étape": "liste des fichiers Zenodo", "résultat": "OK" if files else "À CONTRÔLER",
-                 "détail": f"{len(files)} fichier(s) dont {sum(n.startswith('prob_hail_ge5cm_') for n in files)} annuel(s)" if files else
-                 "API Zenodo indisponible : adresse directe utilisée en secours"})
+    cp = compact_path(data_dir)
+    if cp:
+        try:
+            yrs = compact_years(cp)
+            d = _compact(cp)
+            rows.append({"étape": "fichier compact", "résultat": "OK", "détail": f"{cp.name} ({cp.stat().st_size / 1e6:.1f} Mo) : {len(yrs)} années "
+                         f"({yrs[0]}–{yrs[-1]}), {len(d['cells'])} mailles conservées, précision {1 / float(d['scale']):g}. "
+                         "Plus aucun téléchargement n'est nécessaire."})
+        except HailError as e:
+            rows.append({"étape": "fichier compact", "résultat": "ÉCHEC", "détail": str(e)})
+    files = {}
     fl = {}
     for label, name, prefer, cont in (("climatologie", CLIM_FILE, ("hail_ge5cm",), ("hail",)), ("année 2000", annual_file(2000), (), ("hail", "prob"))):
         try:
@@ -556,8 +722,15 @@ def diagnose(session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DI
         if "climatologie" in got and "année 2000" in got:
             c, a = got["climatologie"], got["année 2000"]
             ok = np.isfinite(c) & np.isfinite(a) & (c > 0)
-            rows.append({"étape": "cohérence année 2000 / climatologie", "résultat": "OK" if ok.any() and 0.05 < float(np.mean(a[ok] / c[ok])) < 20 else "À CONTRÔLER",
-                         "détail": "rapport moyen (année 2000 ÷ climatologie) sur les villes de contrôle : "
-                                   + (f"{np.mean(a[ok] / c[ok]):.2f}" if ok.any() else "non calculable")
-                                   + " ; attendu : de l'ordre de 1 si les fichiers annuels sont des nombres d'événements par an."})
+            r = float(np.mean(c[ok] / a[ok])) if ok.any() else float("nan")
+            if not ok.any():
+                verdict, txt = "À CONTRÔLER", "non calculable"
+            elif 0.2 < r < 5:
+                verdict, txt = "OK", f"climatologie ÷ année 2000 = {r:.1f} : la climatologie est une moyenne annuelle."
+            elif 20 < r < 200:
+                verdict, txt = "OK", (f"climatologie ÷ année 2000 = {r:.1f} (≈ {len(YEARS)} ans) : la climatologie du fichier est un CUMUL sur la période, "
+                                      f"pas une moyenne annuelle ; l'application la divise par {len(YEARS)} (option modifiable).")
+            else:
+                verdict, txt = "À CONTRÔLER", f"climatologie ÷ année 2000 = {r:.1f} : rapport inattendu, vérifier la signification des fichiers."
+            rows.append({"étape": "cohérence climatologie / année 2000", "résultat": verdict, "détail": txt})
     return rows
