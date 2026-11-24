@@ -276,6 +276,15 @@ class TestCompact(unittest.TestCase):
             with self.assertRaises(hl.HailError):
                 hl.estimate(POINTS, "lat", "long", "annual", rps=(3,), **kw)                  # RP absente du fichier
 
+    def test_raw_data_ignores_compact_file(self):
+        with tempfile.TemporaryDirectory() as t:
+            src, data, _ = self.build(t)
+            sess = FakeZenodo(src)
+            out, s = hl.estimate(POINTS, "lat", "long", "clim", session=sess, cache_dir=Path(t) / "c", data_dir=data, use_compact=False)
+            self.assertEqual(s["source"], "Zenodo")
+            self.assertTrue(sess.urls)                                   # le web a bien été interrogé
+            self.assertAlmostEqual(out["grele_moy_freq"].iloc[0], 0.1)    # cumul ÷ 74
+
     def test_file_found_in_parent_data_folder(self):
         with tempfile.TemporaryDirectory() as t:
             data = Path(t) / "data"
