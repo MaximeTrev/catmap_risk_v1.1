@@ -35,6 +35,14 @@ REFS = {
             "GEM Foundation (2023). Global Seismic Hazard Map, version 2023.1. Zenodo, doi:10.5281/zenodo.8409647."],
     "eshm20": ["Danciu, L., et al. (2021). *The 2020 update of the European Seismic Hazard Model: model overview*. EFEHR Technical Report 001, "
                "v1.0.0. doi:10.12686/a15."],
+    "grele": ["Battaglioli, F., Taszarek, M., Groenemeijer, P., Púčik, T., & Rädler, A. T. (2025). Contrasting trends in very large hail events and "
+              "related economic losses across the globe. *Nature Geoscience*. doi:10.1038/s41561-025-01868-0.",
+              "Jeu de données : ESSL, « Contrasting trends in very large hail events… » (grêle ≥ 5 cm, ERA5, 0,25°, 1950–2023), Zenodo, "
+              "doi:10.5281/zenodo.17379738 (licence CC BY-NC-ND 4.0). Données de reproduction de l'article : doi:10.5281/zenodo.17064885.",
+              "Modèle de l'article : régression logistique AR-CHaMo appliquée à ERA5 (probabilité d'éclair × probabilité conditionnelle de grêle ≥ 5 cm, "
+              "pas de 3 h)."],
+    "weibull": ["Makkonen, L. (2006). Plotting positions in extreme value analysis. *Journal of Applied Meteorology and Climatology*, 45(2), 334–340 "
+                "(positions de Weibull i/(n+1) utilisées pour le quantile empirique)."],
     "aal": ["Principe de la perte annuelle moyenne : intégration de la perte par rapport à la probabilité annuelle de dépassement "
             "(méthode des trapèzes entre les périodes de retour retenues, sans extrapolation) ; voir par exemple Grossi, P., & Kunreuther, H. (2005), "
             "*Catastrophe Modeling: A New Approach to Managing Risk*, Springer."],
