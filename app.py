@@ -4066,6 +4066,17 @@ def _grele_section():
         if not rps:
             st.caption("Choisissez au moins une période de retour.")
             return
+    clim_total = True
+    if not hl.compact_path():
+        clim_total = _checkbox_with_help("La climatologie du fichier est un cumul 1950–2023 (à diviser par 74)", "Le diagnostic montre un rapport d'environ 64 "
+                                         "entre la climatologie du fichier et la valeur de l'année 2000 (ex. Mendoza : 18,65 contre 0,29), alors que sa "
+                                         "description annonce une moyenne annuelle : c'est donc un cumul sur 74 ans. Décochez seulement si votre diagnostic "
+                                         "indique un rapport proche de 1. Sans effet si le fichier compact data/grele/hail_compact.npz est présent "
+                                         "(la moyenne annuelle y est calculée à partir des 74 fichiers annuels).", key="gr_climtotal", value=True, wide=True)
+        st.caption("Aucun fichier compact (data/grele/hail_compact.npz) : les fichiers sont téléchargés depuis Zenodo (lent en séries annuelles : "
+                   "74 fichiers de 6,5 Mo). Voir tools/build_hail_compact.py pour le générer une fois.")
+    else:
+        st.caption("Fichier compact data/grele/hail_compact.npz détecté : aucun téléchargement.")
     use_trend = _checkbox_with_help("Tenir compte de la tendance 1950–2023", "Option : la fréquence est **majorée** si la tendance locale est significative "
                                     "à la hausse, **minorée** si elle l'est à la baisse. Facteur = (fréquence + pente × années) ÷ fréquence, borné. "
                                     "Seules les mailles dont la p-value et la tendance relative dépassent vos seuils sont ajustées. Les seuils sont à "
@@ -4074,7 +4085,7 @@ def _grele_section():
     trend_opts = None
     if use_trend:
         t1, t2, t3 = st.columns(3)
-        unit = t1.selectbox("Unité de la tendance (à vérifier dans le diagnostic)", list(_GR_UNITS), key="gr_unit", format_func=lambda k: _GR_UNITS[k])
+        unit = t1.selectbox("Unité de la tendance", list(_GR_UNITS), key="gr_unit", format_func=lambda k: _GR_UNITS[k])
         p_max = _num_help(t2, "p-value maximale", "Seuil de significativité : seules les mailles dont la p-value de la tendance est inférieure ou égale "
                           "à ce seuil sont ajustées (0,05 = 5 %). Plus il est bas, moins de mailles sont ajustées.", min_value=0.001, max_value=0.5,
                           value=0.05, step=0.01, key="gr_pmax", format="%.3f")
@@ -4112,7 +4123,7 @@ def _grele_section():
     if go or (job and auto and mode == "annual"):
         try:
             with st.spinner("Lecture de l'aléa grêle (téléchargement Zenodo la première fois, reprise au clic suivant)…"):
-                res_, summ_ = hl.estimate(df, lat_c, lon_c, mode, rps, use_trend, trend_opts)
+                res_, summ_ = hl.estimate(df, lat_c, lon_c, mode, rps, use_trend, trend_opts, clim_total=clim_total)
             if summ_.get("en_attente"):
                 st.warning(f"{summ_['en_attente']} année(s) restant à lire sur {len(hl.YEARS)} : relancez le calcul (les années déjà lues sont conservées).")
             for k_, m_ in list((summ_.get("erreurs") or {}).items())[:3]:
@@ -4137,6 +4148,7 @@ def _grele_section():
         return
     out, summ = res["df"], res["summ"]
     m = st.columns(4)
+    st.caption(f"Source des données : {summ.get('source', 'n/d')}.")
     m[0].metric("Points", summ["points"])
     m[1].metric("Fréquence lue", summ["ok"])
     m[2].metric("Sans donnée", summ["sans_donnee"])
