@@ -554,7 +554,7 @@ def threshold_table(freq, trend, pvalue, per_decade: bool = True, years: float =
 # ───────────────────────────── estimation de l'aléa ─────────────────────────────
 def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", rps=RPS, use_trend: bool = False, trend_opts: Optional[dict] = None,
              session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, budget_s: float = 200.0,
-             clim_total: bool = True) -> tuple[pd.DataFrame, dict]:
+             clim_total: bool = True, use_compact: bool = True) -> tuple[pd.DataFrame, dict]:
     """Ajoute la fréquence de grêle ≥ 5 cm (événements par an et par maille). Mode ``clim`` : ``grele_moy_freq`` ; mode ``annual`` : ``grele_RP<rp>_freq``.
     Avec la tendance : la colonne utilisée pour les dommages est ajustée, la valeur d'origine est conservée dans ``…_freq_brut``."""
     if mode not in MODES:
@@ -568,7 +568,7 @@ def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", r
     status = ["coordonnées invalides"] * len(out)
     base: dict = {}
     clim_vals = None
-    cp = compact_path(data_dir)
+    cp = compact_path(data_dir) if use_compact else None
     cfields = compact_fields(cp) if cp else None
     summ["source"] = "fichier précalculé" if cp else "Zenodo"
     if mode == "clim" or use_trend:
