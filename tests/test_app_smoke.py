@@ -645,6 +645,80 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("seisme_RP2475_pga", res["df"].columns)
         self.assertAlmostEqual(res["df"]["seisme_RP475_pga"].iloc[0], 0.2, delta=0.02)
 
+    def _hail_env(self, t):
+        """Remplace les accès Zenodo / cache de catmap.hail par des fichiers NetCDF locaux (aucun accès réseau)."""
+        from catmap import hail as hlc
+        from tests.test_hail import FakeZenodo, build_source
+        src, cache, nodata = Path(t) / "src", Path(t) / "cache", Path(t) / "nodata"
+        build_source(src)
+        sess = FakeZenodo(src)
+        orig_est, orig_ser, orig_cells = hlc.estimate, hlc.load_series, hlc.series_cache_cells
+        return [mock.patch.object(hlc, "estimate", lambda *a, **k: orig_est(*a, session=sess, cache_dir=cache, data_dir=nodata, **k)),
+                mock.patch.object(hlc, "load_series", lambda cells, years=hlc.YEARS, cache_dir=cache: orig_ser(cells, years, cache_dir)),
+                mock.patch.object(hlc, "series_cache_cells", lambda cache_dir=cache, years=hlc.YEARS: orig_cells(cache_dir, years))]
+
+    def test_grele_climatology_end_to_end(self):
+        import contextlib
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long;valeur\nA;45,0;5,0;1000000\nB;45,0;0,25;2000000\n".encode()
+
+        with tempfile.TemporaryDirectory() as t:
+            app, st = self.load({"gr_csv_0": Up(), "gr_mode": "clim", "button:Estimer l'aléa grêle": True, "button:Estimer les dommages": True,
+                                 "button:Calculer les dommages": True, "gr_vmode": "col", "gr_valcol": "valeur"})
+            st.session_state["gr_dmg_open"] = True
+            with contextlib.ExitStack() as stack:
+                for m in self._hail_env(t):
+                    stack.enter_context(m)
+                app._grele_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+        res = st.session_state["gr_result"]
+        self.assertEqual(res["summ"]["ok"], 2)
+        self.assertAlmostEqual(res["df"]["grele_moy_freq"].iloc[0], 0.1)
+        o = st.session_state["gr_dmg"]["out"]
+        self.assertIn("dommage_grele_PAM_eur", o.columns)
+        self.assertGreater(o["dommage_grele_PAM_eur"].iloc[0], 0)
+        self.assertEqual(o["dommage_grele_PAM_eur"].iloc[1], 0)         # clim nulle à lon 0,25
+
+    def test_grele_annual_end_to_end_with_viewer_and_trend(self):
+        import contextlib
+        if importlib.util.find_spec("altair") is None:
+            sys.modules["altair"] = mock.MagicMock()
+            self.addCleanup(sys.modules.pop, "altair", None)
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long;valeur\nA;45,0;2,0;1000000\nB;45,0;1,0;2000000\n".encode()
+
+        with tempfile.TemporaryDirectory() as t:
+            app, st = self.load({"gr_csv_0": Up(), "gr_mode": "annual", "button:Estimer l'aléa grêle": True, "button:Estimer les dommages": True,
+                                 "button:Calculer les dommages": True, "button:Visualiser les séries annuelles": True,
+                                 "gr_vmode": "col", "gr_valcol": "valeur"})
+            st.session_state["gr_dmg_open"] = True
+            app.st.checkbox = lambda label, value=False, **k: True if k.get("key") == "gr_trend" else value
+            with contextlib.ExitStack() as stack:
+                for m in self._hail_env(t):
+                    stack.enter_context(m)
+                app._grele_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+        res = st.session_state["gr_result"]
+        self.assertEqual(res["summ"]["en_attente"], 0)
+        self.assertEqual(res["summ"]["ok"], 2)
+        self.assertIn("grele_RP50_freq_brut", res["df"].columns)
+        self.assertEqual(res["df"]["grele_facteur_tendance"].iloc[0], 2.0)    # lon 2 : hausse significative, plafonnée
+        self.assertEqual(res["df"]["grele_facteur_tendance"].iloc[1], 1.0)    # lon 1 : p = 0,5
+        o = st.session_state["gr_dmg"]["out"]
+        self.assertIn("dommage_grele_RP50_eur", o.columns)
+        self.assertIn("dommage_grele_PAM_eur", o.columns)
+        self.assertTrue([c for c in st.calls if c[0] == "altair_chart"])
+
+    def test_grele_tab_between_seisme_and_georisques(self):
+        app, st = self.load({})
+        app.page_risques_climatiques()
+        labels = [c[1] for c in st.calls if c[0] == "tabs"][0]
+        self.assertEqual(labels, ["Débordement et submersion", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
+
     def test_wind_fit_viewer(self):
         import pandas as pd
         import numpy as np
