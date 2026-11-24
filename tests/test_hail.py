@@ -65,7 +65,7 @@ class FakeZenodo:
 def build_source(folder, years=hl.YEARS, with_trend=True):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    write_nc(folder / hl.CLIM_FILE, "hail_ge5cm", clim_field(), {"units": "events/yr"})
+    write_nc(folder / hl.CLIM_FILE, "hail_ge5cm", clim_field() * 74, {"units": "events/yr"})   # cumul sur 74 ans, comme le vrai fichier
     if with_trend:
         tr = np.full_like(clim_field(), 0.05)             # +0,05 / décennie
         tr[:, 16:] = -0.04                                 # baisse à l'est (lon ≥ 4)
@@ -211,7 +211,7 @@ class TestEstimate(unittest.TestCase):
             r = hl.ensure_years([hl.cell_of(45, 5)], hl.YEARS[:5], session=Bad(), cache_dir=Path(t) / "c", data_dir=Path(t) / "d")
             self.assertEqual(r["pending"], 5)
             self.assertIn("ni NetCDF ni HDF5", next(iter(r["errors"].values())))
-            self.assertLessEqual(len(r["errors"]), 3)
+            self.assertLessEqual(len(r["errors"]), 5)          # 3 erreurs déclenchent l'arrêt ; les téléchargements déjà lancés peuvent finir
 
     def test_local_data_dir_has_priority_and_is_kept(self):
         with tempfile.TemporaryDirectory() as t:
@@ -224,6 +224,72 @@ class TestEstimate(unittest.TestCase):
     def test_invalid_mode(self):
         with self.assertRaises(hl.HailError):
             hl.estimate(POINTS, "lat", "long", "zzz")
+
+
+class TestCompact(unittest.TestCase):
+    def build(self, t):
+        src = Path(t) / "src"
+        build_source(src)
+        data = Path(t) / "data"
+        data.mkdir()
+        info = hl.build_compact(src, data / hl.COMPACT_NAME, min_clim=0.0, progress=lambda *_: None)
+        return src, data, info
+
+    def test_build_and_use_without_network(self):
+        with tempfile.TemporaryDirectory() as t:
+            src, data, info = self.build(t)
+            self.assertEqual(info["annees"], 74)
+            self.assertLess(info["taille_mo"], 5)
+
+            class NoNet:
+                def get(self, *a, **k):
+                    raise AssertionError("aucun accès réseau attendu")
+            kw = dict(session=NoNet(), cache_dir=Path(t) / "cache", data_dir=data)
+            out, s = hl.estimate(POINTS, "lat", "long", "annual", rps=(2, 10), use_trend=True, **kw)
+            self.assertEqual(s["source"], "compact")
+            self.assertEqual(s["en_attente"], 0)
+            self.assertAlmostEqual(out["grele_RP2_freq_brut"].iloc[0], 0.3, places=2)
+            self.assertAlmostEqual(out["grele_moy_freq"].iloc[0], 0.3, delta=0.02)          # moyenne des 74 années (1…5 × 0,1)
+            self.assertEqual(out["grele_RP2_freq_brut"].iloc[2], 0.0)
+            self.assertTrue(np.isnan(out["grele_RP2_freq"].iloc[3]))                         # hors grille
+            self.assertIn("hail_compact.npz", " ".join(r["détail"] for r in hl.diagnose(NoNet(), Path(t) / "c", data) if r["étape"] == "fichier compact"))
+            o2, s2 = hl.estimate(POINTS, "lat", "long", "clim", **kw)
+            self.assertAlmostEqual(o2["grele_moy_freq"].iloc[0], 0.3, delta=0.02)
+
+    def test_threshold_raised_then_error_if_still_too_big(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            build_source(src, years=hl.YEARS[:3])
+            with self.assertRaises(hl.HailError):
+                hl.build_compact(src, Path(t) / "c.npz", min_clim=0.01, max_mb=0.000001, progress=lambda *_: None)
+
+    def test_cell_below_threshold_is_zero_and_missing_is_nan(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            build_source(src, years=hl.YEARS[:4])
+            hl.build_compact(src, Path(t) / "c.npz", min_clim=0.05, progress=lambda *_: None)
+            ser = hl.compact_series(Path(t) / "c.npz", [hl.cell_of(45, 0.25), hl.cell_of(45, 5), hl.cell_of(10, 5)])
+            self.assertTrue(np.all(ser[hl._cell_key(hl.cell_of(45, 0.25))] == 0))             # moyenne 0 < seuil : zéros
+            self.assertGreater(ser[hl._cell_key(hl.cell_of(45, 5))].max(), 0.09)
+            self.assertTrue(np.isnan(ser[hl._cell_key(hl.cell_of(10, 5))]).all())
+
+    def test_missing_files(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaises(hl.HailError):
+                hl.build_compact(t, Path(t) / "x.npz", progress=lambda *_: None)
+
+
+class TestParallelDownload(unittest.TestCase):
+    def test_parallel_years_and_direct_url_first(self):
+        with tempfile.TemporaryDirectory() as t:
+            src, cache = Path(t) / "src", Path(t) / "cache"
+            build_source(src, with_trend=False)
+            sess = FakeZenodo(src)
+            r = hl.ensure_years([hl.cell_of(45, 5)], cache_dir=cache, data_dir=Path(t) / "nodata", session=sess, workers=4)
+            self.assertEqual(r["pending"], 0)
+            self.assertFalse([u for u in sess.urls if "api/records" in u])      # pas d'appel à l'API Zenodo si l'adresse directe répond
+            self.assertEqual(len([u for u in sess.urls if u.endswith("download=1")]), 74)
+            self.assertFalse(list(cache.glob("*.part")) or list(cache.glob("*.nc")))
 
 
 class TestDamages(unittest.TestCase):
