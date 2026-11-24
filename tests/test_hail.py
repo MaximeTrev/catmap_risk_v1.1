@@ -276,6 +276,15 @@ class TestCompact(unittest.TestCase):
             with self.assertRaises(hl.HailError):
                 hl.estimate(POINTS, "lat", "long", "annual", rps=(3,), **kw)                  # RP absente du fichier
 
+    def test_file_found_in_parent_data_folder(self):
+        with tempfile.TemporaryDirectory() as t:
+            data = Path(t) / "data"
+            (data / "grele").mkdir(parents=True)
+            self.assertIsNone(hl.compact_path(data / "grele"))
+            build_source(Path(t) / "src")
+            hl.build_compact(Path(t) / "src", data / hl.COMPACT_NAME, progress=lambda *_: None)      # déposé dans data/ et non data/grele/
+            self.assertEqual(hl.compact_path(data / "grele"), data / hl.COMPACT_NAME)
+
     def test_missing_files_and_too_big(self):
         with tempfile.TemporaryDirectory() as t:
             with self.assertRaises(hl.HailError):
