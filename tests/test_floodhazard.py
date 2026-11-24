@@ -284,5 +284,37 @@ class T(unittest.TestCase):
         self.assertEqual(rows[0]["résultat"], "ÉCHEC")
 
 
+class TestSlowServer(unittest.TestCase):
+    def test_timeout_stops_after_one_attempt_with_clear_message(self):
+        import requests
+
+        class Slow:
+            calls = 0
+            def get(self, url, **kw):
+                Slow.calls += 1
+                raise requests.exceptions.ReadTimeout("lent")
+        r = fh.Resolver(Slow())
+        with self.assertRaises(fh.TileError) as cm:
+            r.folder(100)
+        self.assertIn("trop lent", str(cm.exception))
+        self.assertEqual(Slow.calls, 1)                       # pas 3 graphies × 60 s d'attente
+        with self.assertRaises(fh.TileError):
+            r.folder(100)
+        self.assertEqual(Slow.calls, 1)
+
+    def test_catalog_retries_once_then_explains(self):
+        import requests
+
+        class Slow:
+            calls = 0
+            def get(self, url, **kw):
+                Slow.calls += 1
+                raise requests.exceptions.ReadTimeout("lent")
+        with self.assertRaises(fh.TileError) as cm:
+            fh.load_catalog(Slow())
+        self.assertEqual(Slow.calls, 2)
+        self.assertIn("réessayez plus tard", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
