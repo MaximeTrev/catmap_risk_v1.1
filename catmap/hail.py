@@ -139,6 +139,18 @@ def read_dataset(path) -> dict:
     except Exception as e:                                      # noqa: BLE001
         errors.append(f"h5netcdf : {type(e).__name__} {str(e)[:80]}")
     try:
+        import xarray as xr
+        ds = xr.open_dataset(path)
+        try:
+            vs = {n: {"dims": tuple(v.dims), "data": np.asarray(v.values), "attrs": dict(v.attrs)} for n, v in ds.variables.items()}
+            return {"attrs": dict(ds.attrs), "vars": vs}
+        finally:
+            ds.close()
+    except ImportError:
+        errors.append("xarray absent")
+    except Exception as e:                                      # noqa: BLE001
+        errors.append(f"xarray : {type(e).__name__} {str(e)[:80]}")
+    try:
         from scipy.io import netcdf_file
         with netcdf_file(path, "r", mmap=False) as ds:
             vs = {}
@@ -148,7 +160,7 @@ def read_dataset(path) -> dict:
             return {"attrs": {k: _txt(getattr(ds, k)) for k in getattr(ds, "_attributes", {})}, "vars": vs}
     except Exception as e:                                      # noqa: BLE001
         errors.append(f"scipy : {type(e).__name__} {str(e)[:80]}")
-    raise HailError("lecture NetCDF impossible (" + " ; ".join(errors) + "). Ajoutez « h5netcdf » et « h5py » (ou « netCDF4 ») à requirements.txt.")
+    raise HailError("lecture NetCDF impossible (" + " ; ".join(errors) + "). Installez une bibliothèque NetCDF : pip install h5netcdf h5py (ou netCDF4).")
 
 
 def _axis(ds: dict, names: tuple) -> Optional[tuple]:
@@ -282,8 +294,11 @@ LAYER_PREFIX = "rp"
 
 
 def compact_path(data_dir: Path = DATA_DIR) -> Optional[Path]:
-    p = Path(data_dir) / COMPACT_NAME
-    return p if p.is_file() and p.stat().st_size > 0 else None
+    for d in (Path(data_dir), Path(data_dir).parent):          # data/grele/ de préférence, sinon directement data/
+        p = d / COMPACT_NAME
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
 
 
 def _compact(path: Path) -> dict:
