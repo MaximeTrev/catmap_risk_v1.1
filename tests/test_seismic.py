@@ -28,6 +28,92 @@ class Sess:
         return Resp(self.status, self.body)
 
 
+class TestCompactGem(unittest.TestCase):
+    def build(self, t, strips=False):
+        p = Path(t) / "v2023_1_pga_475_rock_3min.tif"
+        if strips:
+            arr = np.full((60, 100), 0.07, dtype="float32")
+            extra = [(33550, "d", 3, (0.1, 0.1, 0.0), True), (33922, "d", 6, (0, 0, 0, 20.0, 60.0, 0), True)]
+            tifffile.imwrite(str(p), arr, compression="deflate", photometric="minisblack", rowsperstrip=1, extratags=extra)
+        else:
+            pga_tif(p)
+        out = Path(t) / "data" / sm.COMPACT_NAME
+        out.parent.mkdir(exist_ok=True)
+        info = sm.build_compact(p, out, progress=lambda *_: None)
+        return p, out, info
+
+    def test_build_and_sample_match_raster(self):
+        with tempfile.TemporaryDirectory() as t:
+            p, out, info = self.build(t)
+            self.assertLess(info["taille_mo"], 1)
+            pts = [(59.5, 20.5), (55.0, 25.0), (50.2, 29.8), (40.0, 25.0)]       # forte PGA ; courante ; sans donnée ; hors image
+            raw = sm.fhz.sample_geotiff(p, [x[1] for x in pts], [x[0] for x in pts])
+            cmp_ = sm.sample_compact(out, [x[1] for x in pts], [x[0] for x in pts])
+            for a, b in zip(raw, cmp_):
+                if a is None:
+                    self.assertIsNone(b)
+                else:
+                    self.assertAlmostEqual(a, b, delta=1.1e-4)               # précision du stockage : 1e-4 g
+            self.assertEqual(sm.compact_extent(out), (20.0, 50.0, 30.0, 60.0))
+
+    def test_strips_of_one_row(self):
+        with tempfile.TemporaryDirectory() as t:
+            _p, out, _ = self.build(t, strips=True)
+            self.assertAlmostEqual(sm.sample_compact(out, [25.0], [55.0])[0], 0.07, places=4)
+
+    def test_estimate_uses_compact_without_network_and_raw_option(self):
+        with tempfile.TemporaryDirectory() as t:
+            p, out, _ = self.build(t)
+
+            class NoNet:
+                def get(self, *a, **k):
+                    raise AssertionError("aucun accès réseau attendu")
+            df = pd.DataFrame({"name": list("ABCD"), "lat": ["59,5", 55.0, 50.2, 40.0], "long": ["20,5", 25.0, 29.8, 25.0]})
+            o, s = sm.estimate_pga(df, "lat", "long", "gem", [475], session=NoNet(), cache_dir=Path(t) / "c", data_dir=out.parent)
+            self.assertEqual(s["source"], "fichier précalculé")
+            self.assertAlmostEqual(o.loc[0, "seisme_RP475_pga"], 0.4, places=3)
+            self.assertIn("sans donnée", o.loc[2, "seisme_statut"])
+            self.assertIn("hors du raster", o.loc[3, "seisme_statut"])
+            self.assertEqual(s["ok"], 2)
+            # données brutes : le fichier précalculé est ignoré, le raster d'origine est lu
+            o2, s2 = sm.estimate_pga(df, "lat", "long", "gem", [475], cache_dir=Path(t) / "c", data_dir=Path(t), use_compact=False, tif=p)
+            self.assertEqual(s2["source"], "raster GEM brut")
+            self.assertTrue(np.allclose(o["seisme_RP475_pga"].dropna(), o2["seisme_RP475_pga"].dropna(), atol=2e-4))
+            rows = sm.diagnose(NoNet(), Path(t) / "c", out.parent)            # sans « brut » : aucun téléchargement
+            self.assertEqual(rows[0]["étape"], "fichier précalculé")
+            self.assertEqual(rows[0]["résultat"], "OK")
+            self.assertEqual(rows[-1]["étape"], "raster brut")
+
+    def test_compact_in_parent_data_folder_and_incomplete(self):
+        with tempfile.TemporaryDirectory() as t:
+            _p, out, _ = self.build(t)
+            (out.parent / "seisme").mkdir()
+            self.assertEqual(sm.compact_path(out.parent / "seisme"), out)
+            np.savez(Path(t) / "bad" / "x.npz" if False else Path(t) / sm.COMPACT_NAME, pga=np.zeros((2, 2), np.uint16))
+            with self.assertRaises(sm.SeismicError):
+                sm.sample_compact(Path(t) / sm.COMPACT_NAME, [0], [0])
+
+    def test_standalone_script_gives_same_file(self):
+        import importlib.util
+        with tempfile.TemporaryDirectory() as t:
+            p, out, _ = self.build(t)
+            folder = Path(t) / "gem"
+            folder.mkdir()
+            with zipfile.ZipFile(folder / "GEM-GSHM_PGA-475y-rock_v2023.zip", "w") as z:     # le script sait extraire d'un zip
+                z.write(p, p.name)
+            spec = importlib.util.spec_from_file_location("bgc", Path(__file__).resolve().parent.parent / "tools" / "build_gem_compact.py")
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            res = m.main([str(folder)])
+            self.assertIsNotNone(res)
+            a, b = np.load(folder / "gem_pga475_compact.npz"), np.load(out)
+            self.assertTrue(all(np.array_equal(a[k], b[k]) for k in b.files))
+            self.assertIsNone(m.main([str(Path(t) / "inexistant")]))                                # message clair, sans exception
+            empty = Path(t) / "vide"
+            empty.mkdir()
+            self.assertIsNone(m.main([str(empty)]))
+
+
 class TestSeismic(unittest.TestCase):
     def test_columns_and_classes(self):
         self.assertEqual(sm.column_name(475), "seisme_RP475_pga")
