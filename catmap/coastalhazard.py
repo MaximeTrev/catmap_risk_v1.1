@@ -29,7 +29,7 @@ BASE_URL = "https://wri-projects.s3.amazonaws.com/AqueductFloodTool/download/v2/
 RISK = "submersion"
 RPS = (2, 5, 10, 25, 50, 100, 250, 500, 1000)
 SCENARIOS = {"historical": "Historique", "rcp4p5": "RCP 4.5 (émissions modérées)", "rcp8p5": "RCP 8.5 (émissions élevées)"}
-YEARS = {"historical": ("hist",), "rcp4p5": ("2030", "2050", "2080"), "rcp8p5": ("2030", "2050", "2080")}
+YEARS = {"historical": ("hist", "2030", "2050", "2080"), "rcp4p5": ("2030", "2050", "2080"), "rcp8p5": ("2030", "2050", "2080")}
 SUBSIDENCE = {"nosub": "Sans subsidence", "wtsub": "Avec subsidence"}
 DEFAULT_CACHE = fhz.DEFAULT_CACHE
 TileError = fhz.TileError
@@ -305,7 +305,12 @@ def pick_image(rows: list[dict], scenario: str, sub: str, year: str, rp: int, pr
         if scenario != "historical":
             if _norm(r.get("year")) != _norm(year) or _norm(r.get("projection")) != _norm(projection):
                 continue
+        elif _norm(year) != "hist" and _norm(r.get("year")) != _norm(year):
+            continue                                            # historique avec subsidence projetée : horizon explicite (2030, 2050, 2080)
         hits.append(r)
+    if scenario == "historical" and _norm(year) == "hist":      # « historique » : l'horizon le plus ancien (1980 sans subsidence)
+        hits.sort(key=lambda r: (float(_norm(r.get("year"))) if _norm(r.get("year")).isdigit() else 9999, str(r.get("img_id"))))
+        return hits[0] if hits else None
     return sorted(hits, key=lambda r: str(r.get("img_id")))[0] if hits else None
 
 
@@ -323,15 +328,19 @@ def asset_path(img_id: str) -> str:
     return img_id if "/" in img_id else f"{EE_ASSET}/{img_id}"
 
 
-def sample_ee(image_ids: dict[int, str], lon, lat, on_chunk: Optional[Callable[[], None]] = None) -> dict[int, list]:
-    """Valeurs de ``inundation_depth`` aux points, par période de retour (``None`` = aucune valeur / masqué)."""
+def sample_ee(image_ids: dict[int, str], lon, lat, on_chunk: Optional[Callable[[], None]] = None, radius_km: float = 0.0) -> dict[int, list]:
+    """Valeurs de ``inundation_depth`` aux points, par période de retour (``None`` = aucune valeur / masqué). Avec ``radius_km`` > 0, valeur
+    maximale des pixels (≈ 1 km) touchés par un disque de ce rayon autour du point : lecture prudente, qui compense la grossièreté de la carte."""
     ee = _ee()
     names = [f"RP{rp}" for rp in image_ids]
     stack = ee.Image.cat([ee.Image(asset_path(i)).select(EE_BAND).rename(f"RP{rp}") for rp, i in image_ids.items()])
-    reducer = ee.Reducer.first().forEach(names)
+    reducer = (ee.Reducer.max() if radius_km > 0 else ee.Reducer.first()).forEach(names)
     out = {rp: [None] * len(lon) for rp in image_ids}
     for a in range(0, len(lon), EE_CHUNK):
-        feats = [ee.Feature(ee.Geometry.Point([float(lon[j]), float(lat[j])]), {"k": int(j)}) for j in range(a, min(len(lon), a + EE_CHUNK))]
+        pts = [(j, ee.Geometry.Point([float(lon[j]), float(lat[j])])) for j in range(a, min(len(lon), a + EE_CHUNK))]
+        if radius_km > 0:
+            pts = [(j, g.buffer(float(radius_km) * 1000.0)) for j, g in pts]
+        feats = [ee.Feature(g, {"k": int(j)}) for j, g in pts]
         try:
             res = stack.reduceRegions(collection=ee.FeatureCollection(feats), reducer=reducer, scale=1000).getInfo()
         except Exception as e:                                  # noqa: BLE001
@@ -349,7 +358,7 @@ def sample_ee(image_ids: dict[int, str], lon, lat, on_chunk: Optional[Callable[[
 
 def estimate_depths_ee(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[int], scenario: str = "historical", sub: str = "nosub",
                        year: str = "hist", projection: str = "50", ee_project: Optional[str] = None, ee_account=None,
-                       on_progress: Optional[Callable[[int, int], None]] = None) -> tuple[pd.DataFrame, dict]:
+                       radius_km: float = 0.0, on_progress: Optional[Callable[[int, int], None]] = None) -> tuple[pd.DataFrame, dict]:
     """Même sortie que ``estimate_depths`` (colonnes ``submersion_RP<rp>_raw`` en m et ``submersion_statut``), lecture via Earth Engine.
     Convention inchangée : aucune valeur = 0 (aucune submersion modélisée, point à l'intérieur des terres)."""
     rps = [r for r in rps if r in RPS]
@@ -381,7 +390,7 @@ def estimate_depths_ee(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[i
             if on_progress:
                 on_progress(state["n"], n_chunks)
         try:
-            vals = sample_ee(chosen, lon[idx], lat[idx], tick)
+            vals = sample_ee(chosen, lon[idx], lat[idx], tick, radius_km)
         except TileError as e:
             vals = {}
             for rp in chosen:
@@ -405,7 +414,7 @@ def estimate_depths_ee(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[i
             status.append("ok")
     out[f"{RISK}_statut"] = status
     summary = {"points": len(out), "invalides": int((~valid).sum()), "fichiers": len(rps), "fichiers_lus": files, "problemes": problems, "hors_raster": 0,
-               "points_positifs": positives, "scenario": scenario, "sous_scenario": sub, "annee": year, "source": "Earth Engine"}
+               "points_positifs": positives, "scenario": scenario, "sous_scenario": sub, "annee": year, "source": "Earth Engine", "rayon_km": radius_km}
     return out, summary
 
 
