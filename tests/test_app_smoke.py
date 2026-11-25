@@ -612,7 +612,8 @@ class TestAppSmoke(unittest.TestCase):
             app, st = self.load({"sm_csv_0": Up(), "button:Estimer l'aléa sismique": True, "button:Estimer les dommages": True,
                                  "button:Calculer les dommages": True, "sm_mode": "area", "sm_unit": 1000.0, "sm_area": "surface"})
             st.session_state["sm_dmg_open"] = True
-            with mock.patch.object(smc, "gem_path", return_value=Path(t) / "v2023_1_pga_475_rock_3min.tif"):
+            with mock.patch.object(smc, "gem_path", return_value=Path(t) / "v2023_1_pga_475_rock_3min.tif"), \
+                    mock.patch.object(smc, "compact_path", return_value=None):
                 app._seisme_section()
         self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
         res = st.session_state["sm_result"]
@@ -621,6 +622,29 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("dommage_seisme_RP475_eur", dm["out"].columns)
         r = dm["out"]["dommage_seisme_RP475_ratio"]
         self.assertGreater(r.iloc[0], r.iloc[1])                       # PGA 0,4 g > 0,05 g
+
+    def test_seisme_compact_and_raw_checkbox(self):
+        from catmap import seismic as smc
+        from tests.test_seismic import pga_tif
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long;surface\nA;59,5;20,5;1000\nB;55,0;25,0;2000\n".encode()
+
+        for raw, source in ((False, "fichier précalculé"), (True, "raster GEM brut")):
+            with tempfile.TemporaryDirectory() as t:
+                tif = Path(t) / "v2023_1_pga_475_rock_3min.tif"
+                pga_tif(tif)
+                comp = Path(t) / smc.COMPACT_NAME
+                smc.build_compact(tif, comp, progress=lambda *_: None)
+                app, st = self.load({"sm_csv_0": Up(), "button:Estimer l'aléa sismique": True})
+                app.st.checkbox = lambda label, value=False, **k: raw if k.get("key") == "sm_raw" else value
+                with mock.patch.object(smc, "gem_path", return_value=tif), mock.patch.object(smc, "compact_path", return_value=comp):
+                    app._seisme_section()
+            self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+            res = st.session_state["sm_result"]
+            self.assertEqual(res["summ"]["source"], source)
+            self.assertEqual(res["summ"]["ok"], 2)
 
     def test_seisme_eshm20_flow_with_fake_service(self):
         from catmap import seismic as smc
