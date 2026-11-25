@@ -304,11 +304,22 @@ def compact_path(data_dir: Path = DATA_DIR) -> Optional[Path]:
 def _compact(path: Path) -> dict:
     key = (str(path), path.stat().st_mtime)
     if key not in _COMPACT_CACHE:
+        size = Path(path).stat().st_size
         try:
-            with np.load(path) as z:
+            with open(path, "rb") as f:
+                head = f.read(4)
+            if head[:2] != b"PK":                                 # une archive npz est un zip : « PK » au début
+                with open(path, "rb") as f:
+                    start = f.read(80)
+                raise HailError(f"fichier précalculé invalide : {Path(path).name} ne commence pas comme une archive npz (taille lue : {size} octets, début : "
+                         f"{start[:60]!r}). Envoi incomplet, pointeur Git LFS ou page HTML ? Vérifiez que la taille sur GitHub est celle du fichier "
+                         f"produit par tools/build_hail_compact.py (quelques Mo) et redéposez-le.")
+            with np.load(path, allow_pickle=False) as z:
                 d = {k: z[k] for k in z.files}
+        except HailError:
+            raise
         except Exception as e:                                   # noqa: BLE001
-            raise HailError(f"fichier précalculé illisible ({type(e).__name__}: {str(e)[:100]}) : {path.name}") from e
+            raise HailError(f"fichier précalculé illisible ({type(e).__name__}: {str(e)[:100]}) : {Path(path).name} ({size} octets)") from e
         miss = [k for k in ("lat", "lon", "years", "clim", "trend", "pvalue", "rps") if k not in d]
         if miss:
             raise HailError(f"fichier précalculé incomplet (manque : {', '.join(miss)}) : relancez tools/build_hail_compact.py.")
