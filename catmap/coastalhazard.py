@@ -317,11 +317,17 @@ def _describe_values(rows: list[dict]) -> str:
     return " ; ".join(out)
 
 
+def asset_path(img_id: str) -> str:
+    """Chemin complet de l'image : ``im.id()`` ne renvoie parfois que le nom court dans la collection."""
+    img_id = str(img_id)
+    return img_id if "/" in img_id else f"{EE_ASSET}/{img_id}"
+
+
 def sample_ee(image_ids: dict[int, str], lon, lat, on_chunk: Optional[Callable[[], None]] = None) -> dict[int, list]:
     """Valeurs de ``inundation_depth`` aux points, par période de retour (``None`` = aucune valeur / masqué)."""
     ee = _ee()
     names = [f"RP{rp}" for rp in image_ids]
-    stack = ee.Image.cat([ee.Image(i).select(EE_BAND).rename(f"RP{rp}") for rp, i in image_ids.items()])
+    stack = ee.Image.cat([ee.Image(asset_path(i)).select(EE_BAND).rename(f"RP{rp}") for rp, i in image_ids.items()])
     reducer = ee.Reducer.first().forEach(names)
     out = {rp: [None] * len(lon) for rp in image_ids}
     for a in range(0, len(lon), EE_CHUNK):
