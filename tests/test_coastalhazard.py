@@ -106,7 +106,11 @@ class FakeEE:
 
         self.Image = Img
         self.Reducer = Reducer
-        self.Geometry = Obj(Point=lambda c: c)
+        class Pt(list):
+            def buffer(s, m):
+                s.buffered = m
+                return s
+        self.Geometry = Obj(Point=lambda c: Pt(c))
         self.Feature = lambda g, p=None: Obj(g=g, p=p)
         self.FeatureCollection = lambda x: x if isinstance(x, list) else Obj(getInfo=lambda: {"features": [{"properties": r} for r in fe.IMAGES]})
         self.ImageCollection = lambda a: Obj(map=lambda f: None)
@@ -114,7 +118,7 @@ class FakeEE:
         self.ServiceAccountCredentials = lambda email, key_data: ("creds", email)
         self.Initialize = self._init
         self.Geometry.Rectangle = lambda c: c
-        Reducer.max = staticmethod(lambda: Obj(combine=lambda other, sharedInputs=True: None))
+        Reducer.max = staticmethod(lambda: Obj(combine=lambda other, sharedInputs=True: None, forEach=lambda names: names))
         Reducer.count = staticmethod(lambda: None)
         Img.bandNames = lambda s: Obj(getInfo=lambda: ["inundation_depth"])
         Img.projection = lambda s: Obj(nominalScale=lambda: Obj(getInfo=lambda: 927.0))
@@ -186,6 +190,24 @@ class TestEarthEngine(unittest.TestCase):
         self.assertTrue(out["submersion_statut"].iloc[0].startswith("partiel"))
         self.assertEqual(s["points_positifs"]["RP100"], 1)
         self.assertEqual(s["source"], "Earth Engine")
+
+    def test_historical_year_choice(self):
+        rows = FakeEE.IMAGES + [
+            {"floodtype": "inuncoast", "climatescenario": "historical", "subsidence": "wtsub", "year": 2030, "returnperiod": 100, "projection": None, "img_id": "HW2030"},
+            {"floodtype": "inuncoast", "climatescenario": "historical", "subsidence": "wtsub", "year": 2010, "returnperiod": 100, "projection": None, "img_id": "HW2010"}]
+        self.assertEqual(ch.pick_image(rows, "historical", "wtsub", "hist", 100)["img_id"], "HW2010")   # le plus ancien
+        self.assertEqual(ch.pick_image(rows, "historical", "wtsub", "2030", 100)["img_id"], "HW2030")
+        self.assertEqual(ch.pick_image(rows, "historical", "nosub", "hist", 100)["img_id"], "H100")
+
+    def test_radius_uses_buffer(self):
+        seen = []
+        orig = self.fe.Geometry.Point
+        self.fe.Geometry.Point = lambda c: seen.append(orig(c)) or seen[-1]
+        df = pd.DataFrame({"lat": [45.0], "lon": [12.0]})
+        out, s = ch.estimate_depths_ee(df, "lat", "lon", [100], ee_project="proj", ee_account=ACC, radius_km=2)
+        self.assertEqual(seen[0].buffered, 2000.0)
+        self.assertEqual(s["rayon_km"], 2)
+        self.assertEqual(out["submersion_RP100_raw"].iloc[0], 2.5)
 
     def test_future_with_projection(self):
         df = pd.DataFrame({"lat": [45.0, 46.0], "lon": [12.0, 13.0]})
