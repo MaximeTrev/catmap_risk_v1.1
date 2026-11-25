@@ -79,6 +79,17 @@ def _secrets() -> dict:
         return {}
 
 
+def _ee_credentials():
+    """(projet, compte de service) lus dans les secrets Streamlit ; ``(None, None)`` s'ils sont absents. Jamais affichés."""
+    try:
+        sec = st.secrets
+        acc = sec["EE_SERVICE_ACCOUNT"] if "EE_SERVICE_ACCOUNT" in sec else None
+        proj = sec["EE_PROJECT"] if "EE_PROJECT" in sec else None
+        return (str(proj) if proj else None), (dict(acc) if hasattr(acc, "items") else acc)
+    except Exception:  # noqa: BLE001 - pas de fichier secrets.toml
+        return None, None
+
+
 def get_settings():
     """Réglages relus à chaque exécution (peu coûteux) : un changement de code ou de secrets est pris en compte
     sans redémarrer le processus. Un cache ici figeait les anciennes valeurs après une mise à jour."""
@@ -3141,9 +3152,14 @@ def _exposition_section():
             _meth = {"debordement": ("**Méthode** : aucune loi n'est ajustée par CatMap. Hauteur d'eau lue au point dans les cartes de débordement fluvial "
                                      "JRC / GloFAS (simulation hydrodynamique, 90 m) précalculées par période de retour. Les petits cours d'eau "
                                      "(bassins < 500 km²) ne sont pas modélisés.\n\n" + refs_md("jrc_flood")),
-                     "submersion": ("**Méthode** : aucune loi n'est ajustée par CatMap. Hauteur d'eau lue au point dans les cartes WRI Aqueduct de "
-                                    "submersion côtière (niveaux marins extrêmes issus d'une réanalyse de surcotes, ≈ 1 km) précalculées par période "
-                                    "de retour et scénario climatique.\n\n" + refs_md("aqueduct"))}[k]
+                     "submersion": ("**Méthode** : aucune loi n'est ajustée par CatMap. Hauteur d'eau lue au point (bande `inundation_depth`, ≈ 1 km) dans "
+                                    "la collection WRI Aqueduct Floods v2 de submersion côtière (niveaux marins extrêmes issus d'une réanalyse de "
+                                    "surcotes), précalculée par période de retour et scénario climatique, via Google Earth Engine (collection "
+                                    "`WRI/Aqueduct_Flood_Hazard_Maps/V2`). Niveau d'eau extrême sans vagues ni protections locales ; un point à "
+                                    "l'intérieur des terres vaut 0.\n\n**Source** : World Resources Institute, Aqueduct Floods (à citer en cas de "
+                                    "réutilisation).\n\n**Conditions d'utilisation** : accès à Earth Engine en utilisation non commerciale au regard de "
+                                    "l'abonnement du projet ; Google demande de revérifier périodiquement l'éligibilité non commerciale. Toute "
+                                    "utilisation commerciale nécessite un enregistrement commercial.\n\n" + refs_md("aqueduct"))}[k]
             _help_line("Méthode et références", _meth, wide=True, label_style="font-size:.875rem")
             if common:
                 rps_k = [r for r in rps_common if r in H["rps"]]
@@ -3161,6 +3177,10 @@ def _exposition_section():
                 p["scen"] = c1.selectbox("Scénario climatique", list(coast.SCENARIOS), key="cs_scen", format_func=lambda x: coast.SCENARIOS[x])
                 p["year"] = c2.selectbox("Horizon", list(coast.YEARS[p["scen"]]), key="cs_year", format_func=lambda y: "Historique" if y == "hist" else y)
                 p["sub"] = c3.selectbox("Subsidence", list(coast.SUBSIDENCE), key="cs_sub", format_func=lambda x: coast.SUBSIDENCE[x])
+                p["proj"] = "50"
+                if p["scen"] != "historical":
+                    p["proj"] = st.selectbox("Percentile de projection du niveau de la mer", ["5", "50", "95"], index=1, key="cs_proj",
+                                             format_func=lambda x: {"5": "5 % (bas)", "50": "50 % (médian)", "95": "95 % (haut)"}[x])
             params[k] = p
     with st.expander("Diagnostic des sources (à lancer en cas de problème)"):
         if "debordement" in sel:
@@ -3172,15 +3192,16 @@ def _exposition_section():
             if st.session_state.get("fh_diag"):
                 _stretch(st.dataframe, pd.DataFrame(st.session_state["fh_diag"]), hide_index=True)
         if "submersion" in sel:
-            st.markdown("**WRI Aqueduct (submersion marine)**")
+            st.markdown("**WRI Aqueduct via Earth Engine (submersion marine)**")
             rp_c = st.selectbox("Période de retour testée", list(coast.RPS), index=5, key="cs_diag_rp", format_func=_rp_fmt)
-            if st.button("Tester l'accès au fichier Aqueduct", key="cs_diag_go"):
+            if st.button("Tester l'accès à Earth Engine", key="cs_diag_go"):
                 pc = params["submersion"]
-                with st.spinner("Recherche du fichier, téléchargement et lecture…"):
-                    st.session_state["cs_diag"] = coast.diagnose(pc["scen"], pc["sub"], pc["year"], int(rp_c))
+                ee_p, ee_a = _ee_credentials()
+                with st.spinner("Secrets, authentification, collection et lecture de points de contrôle…"):
+                    st.session_state["cs_diag"] = coast.diagnose_ee(ee_p, ee_a, pc["scen"], pc["sub"], pc["year"], int(rp_c), pc["proj"])
             if st.session_state.get("cs_diag"):
                 _stretch(st.dataframe, pd.DataFrame(st.session_state["cs_diag"]), hide_index=True)
-        st.caption("En cas d'ÉCHEC, copiez le tableau : il suffit à corriger le nom de fichier ou le format de lecture.")
+        st.caption("En cas d'ÉCHEC, copiez le tableau (il ne contient jamais la clé) : il suffit à corriger le réglage ou le format de lecture.")
     active = [k for k in sel if params[k]["rps"]]
     if not active:
         st.caption("Choisissez au moins une période de retour.")
@@ -3203,7 +3224,7 @@ def _exposition_section():
         mb = n_t * len(pf["rps"]) * ((30 if "raw" in pf["kinds"] else 0) + (3 if "reclass" in pf["kinds"] else 0))
         notes.append(f"Débordement : {n_t} tuile(s), {n_t * len(pf['rps']) * len(pf['kinds'])} fichier(s), au plus ≈ {mb} Mo la première fois.")
     if "submersion" in active:
-        notes.append(f"Submersion : {len(params['submersion']['rps'])} fichier(s) mondial(aux) à lire (taille à confirmer par le diagnostic).")
+        notes.append(f"Submersion : {len(params['submersion']['rps'])} période(s) de retour lue(s) dans Earth Engine (aucun téléchargement).")
     st.caption(" ".join(notes))
     b1, b2, _sp = st.columns([1, 1, 2])
     go = b1.button("Estimer la hauteur d'eau", type="primary", key="ex_go")
@@ -3220,7 +3241,14 @@ def _exposition_section():
                 res_, summ_ = fhz.estimate_depths(df, lat_c, lon_c, p["rps"], kinds_run, catalog, on_progress=prog)
             else:
                 kinds_run = ["raw"]
-                res_, summ_ = coast.estimate_depths(df, lat_c, lon_c, p["rps"], p["scen"], p["sub"], p["year"], on_progress=prog)
+                ee_p, ee_a = _ee_credentials()
+                try:
+                    res_, summ_ = coast.estimate_depths_ee(df, lat_c, lon_c, p["rps"], p["scen"], p["sub"], p["year"], projection=p["proj"],
+                                                           ee_project=ee_p, ee_account=ee_a, on_progress=prog)
+                except coast.TileError as e:
+                    bar.empty()
+                    st.error(f"Submersion marine : {e}  (utilisez « Diagnostic des sources » ci-dessus pour localiser le problème).")
+                    return
         bar.empty()
         res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
         res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
@@ -3356,7 +3384,8 @@ def _exposition_section():
             st.caption(st.session_state.pop("ex_cache_msg"))
     st.caption("0 = aucun aléa modélisé à ce point (pas une garantie d'absence de risque). Débordement : JRC / Copernicus EMS GloFAS, « Global "
                "river flood hazard maps » v2.1.2, licence ODbL v1.0, cours d'eau de bassin inférieur à 500 km² non modélisés. Submersion : WRI "
-               "Aqueduct Floods v2, environ 1 km, niveau extrême d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
+               "Aqueduct Floods v2 via Google Earth Engine (utilisation non commerciale au regard de l'abonnement), environ 1 km, niveau extrême "
+               "d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
                )
 
 def _wind_catalogue_reader():
