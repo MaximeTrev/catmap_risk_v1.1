@@ -3177,6 +3177,13 @@ def _exposition_section():
                 p["scen"] = c1.selectbox("Scénario climatique", list(coast.SCENARIOS), key="cs_scen", format_func=lambda x: coast.SCENARIOS[x])
                 p["year"] = c2.selectbox("Horizon", list(coast.YEARS[p["scen"]]), key="cs_year", format_func=lambda y: "Historique" if y == "hist" else y)
                 p["sub"] = c3.selectbox("Subsidence", list(coast.SUBSIDENCE), key="cs_sub", format_func=lambda x: coast.SUBSIDENCE[x])
+                p["radius"] = float(st.selectbox("Rayon de lecture autour du point (km)", [0, 1, 2, 5], index=0, key="cs_radius",
+                                                 format_func=lambda x: "0 (pixel du point)" if x == 0 else f"{x} km (maximum alentour)"))
+                if p["radius"] > 0:
+                    st.caption("Lecture prudente : hauteur maximale des pixels (≈ 1 km) dans le rayon choisi. À utiliser car la carte est grossière : "
+                               "un site proche de la côte peut tomber sur un pixel non inondé voisin d'un pixel inondé.")
+                if p["scen"] == "historical" and p["year"] != "hist":
+                    st.caption("Climat historique avec subsidence projetée : n'existe que pour l'option « Avec subsidence ».")
                 p["proj"] = "50"
                 if p["scen"] != "historical":
                     p["proj"] = st.selectbox("Percentile de projection du niveau de la mer", ["5", "50", "95"], index=1, key="cs_proj",
@@ -3243,7 +3250,7 @@ def _exposition_section():
                 kinds_run = ["raw"]
                 ee_p, ee_a = _ee_credentials()
                 try:
-                    res_, summ_ = coast.estimate_depths_ee(df, lat_c, lon_c, p["rps"], p["scen"], p["sub"], p["year"], projection=p["proj"],
+                    res_, summ_ = coast.estimate_depths_ee(df, lat_c, lon_c, p["rps"], p["scen"], p["sub"], p["year"], projection=p["proj"], radius_km=p["radius"],
                                                            ee_project=ee_p, ee_account=ee_a, on_progress=prog)
                 except coast.TileError as e:
                     bar.empty()
