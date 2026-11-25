@@ -532,7 +532,7 @@ class TestAppSmoke(unittest.TestCase):
             return out, {"points": 2, "hors_tuile": 1, "tuiles": 1, "fichiers": 1, "problemes": {}, "tuiles_detail": [], "fichiers_lus": {}}
         app, st = self.load({"ex_hazards": ["debordement", "submersion"], "ex_csv_0": Up(), "button:Estimer la hauteur d'eau": True,
                              "ex_rps": [50, 100]})
-        with mock.patch.object(ch, "estimate_depths", side_effect=fake_coast), mock.patch.object(fh, "estimate_depths", side_effect=fake_flood), \
+        with mock.patch.object(ch, "estimate_depths_ee", side_effect=fake_coast), mock.patch.object(fh, "estimate_depths", side_effect=fake_flood), \
                 mock.patch.object(app, "_fh_catalog", return_value=object()), mock.patch.object(fh, "plan", return_value={"tile_ids": [1]}):
             app._exposition_section()
         self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
@@ -559,7 +559,7 @@ class TestAppSmoke(unittest.TestCase):
             out["submersion_statut"] = "ok"
             return out, {"points": 1, "invalides": 0, "fichiers": len(rps), "fichiers_lus": {}, "problemes": {}}
         app, st = self.load({"ex_hazards": ["submersion"], "ex_csv_0": Up(), "button:Estimer la hauteur d'eau": True, "ex_rps": [75, 100, 1000]})
-        with mock.patch.object(ch, "estimate_depths", side_effect=fake_coast):
+        with mock.patch.object(ch, "estimate_depths_ee", side_effect=fake_coast):
             app._exposition_section()
         self.assertEqual(got["rps"], [100, 1000])                                              # RP75 n'existe pas pour la submersion
 
