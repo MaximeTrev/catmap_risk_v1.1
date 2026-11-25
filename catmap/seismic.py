@@ -171,8 +171,119 @@ def _extent(path: Path) -> Optional[tuple]:
         return None
 
 
+# ───────────────────────────── fichier précalculé GEM ─────────────────────────────
+# Le raster GEM pèse 35 Mo (zip) / 173 Mo (tif) : le télécharger à chaque session est long. ``build_compact`` (outil ``tools/build_gem_compact.py``, à lancer
+# une fois) le convertit en un petit fichier ``gem_pga475_compact.npz`` (PGA en entiers 16 bits, précision 1e-4 g) à déposer dans data/seisme/.
+COMPACT_NAME = "gem_pga475_compact.npz"
+_NODATA_CODE = 65535
+_COMPACT_CACHE: dict = {}
+
+
+def compact_path(data_dir: Path = DATA_DIR) -> Optional[Path]:
+    for d in (Path(data_dir), Path(data_dir).parent):          # data/seisme/ de préférence, sinon directement data/
+        p = d / COMPACT_NAME
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def _compact(path: Path) -> dict:
+    key = (str(path), path.stat().st_mtime)
+    if key not in _COMPACT_CACHE:
+        try:
+            with np.load(path) as z:
+                d = {k: z[k] for k in z.files}
+        except Exception as e:                                   # noqa: BLE001
+            raise SeismicError(f"fichier précalculé illisible ({type(e).__name__}: {str(e)[:100]}) : {Path(path).name}") from e
+        miss = [k for k in ("pga", "origin", "pixel", "scale") if k not in d]
+        if miss:
+            raise SeismicError(f"fichier précalculé incomplet (manque : {', '.join(miss)}) : relancez tools/build_gem_compact.py.")
+        _COMPACT_CACHE.clear()
+        _COMPACT_CACHE[key] = d
+    return _COMPACT_CACHE[key]
+
+
+def compact_extent(path: Path) -> tuple:
+    d = _compact(path)
+    x0, y0 = (float(v) for v in d["origin"])
+    sx, sy = (float(v) for v in d["pixel"])
+    H, W = d["pga"].shape
+    return (x0, y0 - sy * H, x0 + sx * W, y0)
+
+
+def sample_compact(path: Path, lons, lats) -> list:
+    """PGA (g) du pixel de chaque point ; ``None`` hors image ou sans donnée."""
+    d = _compact(path)
+    x0, y0 = (float(v) for v in d["origin"])
+    sx, sy = (float(v) for v in d["pixel"])
+    a, scale = d["pga"], float(d["scale"])
+    H, W = a.shape
+    lons, lats = np.asarray(lons, float), np.asarray(lats, float)
+    cols = np.floor((lons - x0) / sx).astype(np.int64)
+    rows = np.floor((y0 - lats) / sy).astype(np.int64)
+    out = []
+    for r, c in zip(rows, cols):
+        if 0 <= r < H and 0 <= c < W and a[r, c] != _NODATA_CODE:
+            out.append(float(a[r, c]) / scale)
+        else:
+            out.append(None)
+    return out
+
+
+def read_full(tif: Path) -> tuple:
+    """Lit tout le raster : ``(tableau float32 (lignes, colonnes) avec NaN pour sans-donnée, (x0, y0), (sx, sy))``."""
+    import tifffile
+    with tifffile.TiffFile(str(tif)) as tf:
+        page = tf.pages[0]
+        H, W = int(page.imagelength), int(page.imagewidth)
+        x0, y0, sx, sy = fhz._georef(page)
+        nd = fhz._nodata(page)
+        try:
+            arr = np.squeeze(page.asarray())
+            if arr.ndim == 1 and arr.size == H * W:
+                arr = arr.reshape(H, W)
+        except Exception:                                       # noqa: BLE001 - repli : lecture bande par bande
+            arr = None
+        if arr is None or arr.shape != (H, W):
+            if page.is_tiled:
+                raise SeismicError("lecture du raster impossible (organisation en tuiles non lisible par tifffile).")
+            rps_ = int(page.rowsperstrip)
+            arr = np.full((H, W), np.nan, np.float32)
+            fh = tf.filehandle
+            for seg in range(len(page.dataoffsets)):
+                if not page.databytecounts[seg]:
+                    continue
+                fh.seek(page.dataoffsets[seg])
+                data, _idx, _ = page.decode(fh.read(page.databytecounts[seg]), seg)
+                blk = np.squeeze(data)
+                blk = blk.reshape(-1, W) if blk.ndim == 1 else blk
+                arr[seg * rps_: seg * rps_ + blk.shape[0]] = blk[: H - seg * rps_]
+        arr = arr.astype(np.float32)
+        if nd is not None:
+            arr[arr == nd] = np.nan
+        arr[~np.isfinite(arr) | (arr < 0)] = np.nan
+    return arr, (x0, y0), (sx, sy)
+
+
+def build_compact(tif: Path, out_path: Path, max_mb: float = 90.0, progress=print) -> dict:
+    """Convertit le raster GEM en fichier précalculé (PGA × ``scale`` en entiers 16 bits, 65535 = sans donnée)."""
+    arr, origin, pixel = read_full(Path(tif))
+    top = float(np.nanmax(arr)) if np.isfinite(arr).any() else 0.0
+    if top <= 0:
+        raise SeismicError("raster vide : aucune valeur de PGA positive.")
+    scale = float(10 ** math.floor(math.log10(65000.0 / top)))
+    q = np.where(np.isfinite(arr), np.clip(np.rint(arr * scale), 0, 65534), _NODATA_CODE).astype(np.uint16)
+    np.savez_compressed(out_path, pga=q, origin=np.array(origin, np.float64), pixel=np.array(pixel, np.float64), scale=np.float32(scale))
+    mb = Path(out_path).stat().st_size / 1e6
+    progress(f"écrit : {out_path} ({mb:.1f} Mo) ; {q.shape[1]}×{q.shape[0]} pixels, PGA max {top:.3f} g, précision {1 / scale:g} g")
+    if mb > max_mb:
+        raise SeismicError(f"fichier précalculé trop gros ({mb:.0f} Mo > {max_mb:g} Mo).")
+    return {"pixels": [int(q.shape[1]), int(q.shape[0])], "taille_mo": round(mb, 2), "pga_max": round(top, 4), "precision_g": 1.0 / scale}
+
+
 def estimate_pga(df: pd.DataFrame, lat_col: str, lon_col: str, dataset: str = "gem", rps=GEM_RPS, session=None,
-                 cache_dir: Path = CACHE_DIR, tif: Optional[Path] = None, budget_s: float = 200.0) -> tuple[pd.DataFrame, dict]:
+                 cache_dir: Path = CACHE_DIR, tif: Optional[Path] = None, budget_s: float = 200.0, use_compact: bool = True,
+                 data_dir: Path = DATA_DIR) -> tuple[pd.DataFrame, dict]:
     """Ajoute ``seisme_RP<rp>_pga`` (g) et ``seisme_statut``. Les périodes de retour non disponibles pour le jeu sont ignorées."""
     if dataset == "eshm20":
         return _estimate_eshm(df, lat_col, lon_col, rps, session, cache_dir, budget_s)
@@ -184,12 +295,16 @@ def estimate_pga(df: pd.DataFrame, lat_col: str, lon_col: str, dataset: str = "g
     lat, lon = num(lat_col), num(lon_col)
     valid = np.isfinite(lat) & np.isfinite(lon) & (abs(lat) <= 90) & (abs(lon) <= 180)
     idx = np.nonzero(valid)[0]
-    path = Path(tif) if tif else gem_path(cache_dir, session)
-    try:
-        vals = fhz.sample_geotiff(path, lon[idx], lat[idx])
-    except fhz.TileError as e:
-        raise SeismicError(str(e)) from e
-    ext = _extent(path)
+    cp = compact_path(data_dir) if (use_compact and not tif) else None
+    if cp:                                                      # fichier précalculé : aucun téléchargement
+        path, vals, ext = cp, sample_compact(cp, lon[idx], lat[idx]), compact_extent(cp)
+    else:
+        path = Path(tif) if tif else gem_path(cache_dir, session, data_dir)
+        try:
+            vals = fhz.sample_geotiff(path, lon[idx], lat[idx])
+        except fhz.TileError as e:
+            raise SeismicError(str(e)) from e
+        ext = _extent(path)
     col = [np.nan] * len(out)
     status = ["coordonnées invalides"] * len(out)
     for i, v in zip(idx, vals):
@@ -204,7 +319,8 @@ def estimate_pga(df: pd.DataFrame, lat_col: str, lon_col: str, dataset: str = "g
     out[f"{RISK}_statut"] = status
     ok = np.array([s == "ok" for s in status])
     summary = {"points": len(out), "invalides": int((~valid).sum()), "ok": int(ok.sum()), "sans_donnee": int(len(out) - ok.sum() - (~valid).sum()),
-               "pga_max": float(np.nanmax(col)) if ok.any() else None, "fichier": str(path), "rps": rps, "en_attente": 0}
+               "pga_max": float(np.nanmax(col)) if ok.any() else None, "fichier": str(path), "rps": rps, "en_attente": 0,
+               "source": "fichier précalculé" if cp else "raster GEM brut"}
     return out, summary
 
 
@@ -456,12 +572,29 @@ def diagnose_eshm(lat: float = 46.2, lon: float = 6.15, session=None) -> list[di
     return rows
 
 
-def diagnose(session=None, cache_dir: Path = CACHE_DIR) -> list[dict]:
+def diagnose(session=None, cache_dir: Path = CACHE_DIR, data_dir: Path = DATA_DIR, raw: bool = False) -> list[dict]:
     rows = []
+    cp = compact_path(data_dir)
+    if cp:
+        try:
+            x0, y0, x1, y1 = compact_extent(cp)
+            d = _compact(cp)
+            v = sample_compact(cp, [6.15, 12.5, 139.7], [46.2, 41.9, 35.7])
+            rows.append({"étape": "fichier précalculé", "résultat": "OK", "détail": f"{cp.name} ({cp.stat().st_size / 1e6:.1f} Mo), {d['pga'].shape[1]}×{d['pga'].shape[0]} px, "
+                         f"emprise lon {x0:g} à {x1:g}, lat {y0:g} à {y1:g}, précision {1 / float(d['scale']):g} g. PGA à Genève / Rome / Tokyo : "
+                         + " ; ".join("aucune valeur" if x is None else f"{x:.3f} g" for x in v) + ". Plus aucun téléchargement n'est nécessaire."})
+        except SeismicError as e:
+            rows.append({"étape": "fichier précalculé", "résultat": "ÉCHEC", "détail": str(e)})
+    if rows and rows[0]["résultat"] == "OK" and not raw:       # fichier précalculé valide : pas de téléchargement du raster brut
+        rows.append({"étape": "raster brut", "résultat": "non testé", "détail": "cochez « Données brutes » pour tester aussi le raster d'origine (téléchargement de 35 Mo)."})
+        return rows
     try:
-        path = gem_path(cache_dir, session)
+        path = gem_path(cache_dir, session, data_dir)
         rows.append({"étape": "fichier GEM", "résultat": "OK", "détail": f"{path.name} ({path.stat().st_size / 1e6:.1f} Mo)"})
     except SeismicError as e:
+        if rows and rows[0]["résultat"] == "OK":                # fichier précalculé valide : le raster brut n'est pas nécessaire
+            rows.append({"étape": "fichier GEM brut", "résultat": "non lu", "détail": "inutile avec le fichier précalculé (cochez « Données brutes » pour le tester) : " + str(e)[:200]})
+            return rows
         return [{"étape": "fichier GEM", "résultat": "ÉCHEC", "détail": str(e)}]
     try:
         import tifffile
