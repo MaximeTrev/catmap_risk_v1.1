@@ -409,6 +409,30 @@ def estimate_depths_ee(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[i
     return out, summary
 
 
+def inspect_ee(img_id: str, points: dict[str, tuple], half_deg: float = 0.25) -> list[dict]:
+    """Informations de contrôle sur l'image : bandes, résolution, et pour chaque lieu le maximum et le nombre de pixels renseignés dans une boîte
+    autour du point (distingue « image vide » de « point mal placé »)."""
+    ee = _ee()
+    rows = []
+    try:
+        img = ee.Image(asset_path(img_id))
+        bands = img.bandNames().getInfo()
+        scale = img.select(EE_BAND).projection().nominalScale().getInfo()
+        rows.append({"étape": "image : bandes", "résultat": "OK" if EE_BAND in bands else "ÉCHEC",
+                     "détail": f"bandes {bands} ; résolution nominale {float(scale):.0f} m"})
+        band = img.select(EE_BAND)
+        red = ee.Reducer.max().combine(ee.Reducer.count(), sharedInputs=True)
+        parts = []
+        for k, (lon, lat) in points.items():
+            box = ee.Geometry.Rectangle([lon - half_deg, lat - half_deg, lon + half_deg, lat + half_deg])
+            st = band.reduceRegion(reducer=red, geometry=box, scale=1000, maxPixels=10_000_000).getInfo() or {}
+            parts.append(f"{k} : max {st.get(EE_BAND + '_max')} m sur {st.get(EE_BAND + '_count')} px")
+        rows.append({"étape": f"boîte ±{half_deg}° autour des points", "résultat": "OK", "détail": " ; ".join(parts)})
+    except Exception as e:                                      # noqa: BLE001
+        rows.append({"étape": "inspection de l'image", "résultat": "ÉCHEC", "détail": f"{type(e).__name__}: {str(e)[:200]}"})
+    return rows
+
+
 def diagnose_ee(ee_project: Optional[str], ee_account, scenario: str = "historical", sub: str = "nosub", year: str = "hist", rp: int = 100,
                 projection: str = "50") -> list[dict]:
     """Tableau de contrôle : secrets, authentification, collection, image choisie, lecture sur des côtes connues."""
@@ -431,10 +455,12 @@ def diagnose_ee(ee_project: Optional[str], ee_account, scenario: str = "historic
             return rows + [{"étape": "image", "résultat": "ÉCHEC", "détail": f"aucune image pour {scenario}/{sub}/{year}/RP{rp}"}]
         rows.append({"étape": "image", "résultat": "OK", "détail": str(im["img_id"])})
         checks = {"Venise (lagune)": (12.3155, 45.4408), "Rotterdam": (4.48, 51.92), "La Nouvelle-Orléans": (-90.07, 29.95),
-                  "Paris (intérieur des terres)": (2.35, 48.85)}
+                  "Paris (intérieur des terres)": (2.35, 48.85), "Delta du Gange (Bangladesh)": (90.4, 22.3),
+                  "Delta du Mékong (Vietnam)": (105.8, 9.8)}
         vals = sample_ee({rp: str(im["img_id"])}, [c[0] for c in checks.values()], [c[1] for c in checks.values()])[rp]
         rows.append({"étape": "points de contrôle", "résultat": "OK" if any(v for v in vals) else "À CONTRÔLER",
                      "détail": " ; ".join(f"{k} : {'aucune valeur' if v is None else v}" for k, v in zip(checks, vals))})
+        rows += inspect_ee(str(im["img_id"]), checks)
     except TileError as e:
         rows.append({"étape": "lecture", "résultat": "ÉCHEC", "détail": str(e)})
     return rows
