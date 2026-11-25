@@ -93,6 +93,16 @@ class TestCompactGem(unittest.TestCase):
             with self.assertRaises(sm.SeismicError):
                 sm.sample_compact(Path(t) / sm.COMPACT_NAME, [0], [0])
 
+    def test_invalid_file_gives_explicit_message(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / "seisme"
+            d.mkdir()
+            (d / sm.COMPACT_NAME).write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 6000000\n")
+            with self.assertRaises(sm.SeismicError) as cm:
+                sm.sample_compact(d / sm.COMPACT_NAME, [0], [0])
+            self.assertIn("ne commence pas comme une archive npz", str(cm.exception))
+            self.assertIn("git-lfs", str(cm.exception))
+
     def test_standalone_script_gives_same_file(self):
         import importlib.util
         with tempfile.TemporaryDirectory() as t:
