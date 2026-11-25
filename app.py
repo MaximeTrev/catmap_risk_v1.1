@@ -3832,6 +3832,14 @@ def _seisme_section():
                "aucune donnée. Une requête par maille de 0,05° (≈ 5 km), via le service web EFEHR : plus lent que GEM.\n\n" + refs_md("gem", "eshm20"), wide=True,
                label_style="font-size:.875rem")
     ds = st.selectbox("Jeu de données", list(sm.DATASETS), key="sm_ds", label_visibility="collapsed", format_func=lambda k: sm.DATASETS[k]["label"])
+    raw_sm = False
+    if ds == "gem":
+        raw_sm = _checkbox_with_help("Données brutes", "Décoché (par défaut) : lecture du fichier précalculé data/seisme/gem_pga475_compact.npz (quelques Mo, "
+                                     "instantané), s'il est présent. Coché : ignore ce fichier et lit le raster GEM d'origine (35 Mo à télécharger "
+                                     "depuis Zenodo, puis 173 Mo extraits) : plus lent ; utile pour contrôler le fichier précalculé. Sans effet pour "
+                                     "ESHM20, toujours interrogé en ligne.", key="sm_raw", value=False, wide=True)
+        st.caption("Source : " + ("raster GEM brut (Zenodo)." if raw_sm or not sm.compact_path() else
+                                  "fichier précalculé data/seisme/gem_pga475_compact.npz (aucun téléchargement)."))
     avail = list(sm.DATASETS[ds]["rps"])
     all_rps = _checkbox_with_help("Toutes les périodes de retour disponibles", "Coche l'ensemble des périodes de retour que le jeu de données propose "
                                   "(GEM : 475 ans uniquement ; ESHM20 : 50, 100, 200, 475, 975 et 2475 ans, dans la limite de la courbe d'aléa du point).",
@@ -3840,8 +3848,8 @@ def _seisme_section():
     with st.expander("Diagnostic de la source (à lancer en cas de problème)"):
         if ds == "gem":
             if st.button("Tester le fichier GEM", key="sm_diag_go"):
-                with st.spinner("Téléchargement (≈ 35 Mo), extraction et lecture…"):
-                    st.session_state["sm_diag"] = sm.diagnose()
+                with st.spinner("Lecture du fichier précalculé ou, à défaut, téléchargement (≈ 35 Mo), extraction et lecture…"):
+                    st.session_state["sm_diag"] = sm.diagnose(raw=raw_sm)
         else:
             if st.button("Tester le service ESHM20 (point de Genève)", key="sm_diag_eshm_go"):
                 with st.spinner("Interrogation du service EFEHR…"):
@@ -3877,7 +3885,7 @@ def _seisme_section():
     if go_sm or (job_sm and auto_sm and ds == "eshm20"):
         try:
             with st.spinner("Lecture de l'aléa sismique (GEM : téléchargement la première fois ; ESHM20 : une requête par maille, reprise au clic suivant)…"):
-                res_, summ_ = sm.estimate_pga(df, lat_c, lon_c, ds, rps)
+                res_, summ_ = sm.estimate_pga(df, lat_c, lon_c, ds, rps, use_compact=not raw_sm)
             if summ_.get("en_attente"):
                 st.warning(f"{summ_['en_attente']} point(s) en attente : relancez le calcul (les mailles déjà obtenues sont conservées).")
             for k_, m_ in list((summ_.get("erreurs") or {}).items())[:3]:
