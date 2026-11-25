@@ -3990,9 +3990,19 @@ def _seisme_damage(res):
     out_df = res["df"]
     base_cols = [c for c in out_df.columns if not c.startswith(("seisme_", "dommage_")) and c not in ("lat_f", "lon_f")]
     with st.container(border=True):
-        _help_line("Fonction de vulnérabilité : méthode", "**Lognormale** : taux de dommage = Φ(ln(PGA/θ)/β), forme usuelle des courbes de "
-                   "fragilité/vulnérabilité sismiques. θ (PGA de mi-dommage) et β (dispersion) sont **à calibrer** selon le type de construction : "
-                   "les valeurs par défaut sont illustratives et ne viennent d'aucune publication.", wide=True, label_style="font-size:.875rem")
+        _help_line("Fonction de vulnérabilité : méthode", "**Version simplifiée de la méthode Hazus (FEMA).** Hazus définit, pour chaque état de dommage (léger, "
+                   "modéré, étendu, complet), une fragilité lognormale (médiane, dispersion β), puis calcule le taux moyen de dommage comme la somme des "
+                   "probabilités de chaque état pondérées par un taux de réparation, par type de bâtiment et niveau de code parasismique. Ici, on "
+                   "**simplifie** : une seule courbe lognormale Φ(ln(PGA/θ)/β), **utilisée directement comme taux moyen de dommage**, sans type de "
+                   "bâtiment ni niveau de code, avec la PGA comme grandeur d'entrée.\n\n"
+                   "**Hypothèse forte** : une fragilité est la *probabilité d'atteindre ou de dépasser un état de dommage*, pas un taux de dommage moyen : "
+                   "les confondre est une approximation de notre part, sans publication qui l'utilise telle quelle. θ (PGA de mi-dommage) et β par défaut "
+                   "sont **illustratifs, sans source** : à calibrer selon le type de construction.\n\n"
+                   "**Pour comparaison** : Hazus exprime nativement ses courbes en *déplacement spectral* ; sa version en *PGA équivalente* "
+                   "(§ 5.4.3, tableaux 5-37 à 5-40, β = 0,64) est calculée pour un spectre de référence (séisme de magnitude 7,0 de l'ouest des États-Unis, "
+                   "sol de classe D, distance ≥ 15 km) auquel les médianes sont « très sensibles », et le manuel précise qu'elle n'est pas utilisée "
+                   "actuellement dans Hazus pour les bâtiments. Les cartes GEM et ESHM20 donnent la PGA sur **roche** (pas d'effet de site).\n\n"
+                   + refs_md("hazus_eq", "gem", "eshm20"), wide=True, label_style="font-size:.875rem")
         st.markdown("**Estimation des dommages sismiques** : perte = taux de dommage(PGA) × valeur exposée, avec une fonction lognormale "
                     "`Φ(ln(PGA/θ)/β)`. Les paramètres par défaut sont **illustratifs** (aucune source) : calibrez-les selon le type de construction.")
         c1, c2, c3 = st.columns(3)
