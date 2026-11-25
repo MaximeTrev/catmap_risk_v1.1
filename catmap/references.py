@@ -26,11 +26,16 @@ REFS = {
                   "Catalogue)."],
     "aqueduct": ["Ward, P. J., et al. (2020). *Aqueduct Floods Methodology*. Technical Note, World Resources Institute.",
                  "Muis, S., Verlaan, M., Winsemius, H. C., Aerts, J. C. J. H., & Ward, P. J. (2016). A global reanalysis of storm surges and extreme "
-                 "sea levels. *Nature Communications*, 7, 11969."],
+                 "sea levels. *Nature Communications*, 7, 11969.",
+                 "Gorelick, N., et al. (2017). Google Earth Engine: planetary-scale geospatial analysis for everyone. *Remote Sensing of "
+                 "Environment*, 202, 18-27."],
     "jrc_damage": ["Huizinga, J., de Moel, H., & Szewczyk, W. (2017). *Global flood depth-damage functions: methodology and the database with "
                    "guidelines*. EUR 28552 EN, Publications Office of the European Union, JRC105688. doi:10.2760/16510."],
     "hazus": ["FEMA. *Hazus Inland Flood Model Technical Manual*. Federal Emergency Management Agency, Washington, D.C. "
               "(fonctions profondeur-dommage utilisées : jeu publié sur Zenodo, enregistrement 10027236)."],
+    "hazus_eq": ["FEMA. *Hazus Earthquake Model Technical Manual* (Hazus 6.1). Federal Emergency Management Agency, Washington, D.C. : courbes de fragilité "
+                 "lognormales par état de dommage (chapitre 5) ; § 5.4.3 et tableaux 5-37 à 5-40 : fragilité structurelle en PGA équivalente "
+                 "(β = 0,64) ; pertes économiques : chapitre 11."],
     "gem": ["Pagani, M., et al. (2020). The 2018 version of the Global Earthquake Model: hazard component. *Earthquake Spectra*, 36(1_suppl), 226–251.",
             "GEM Foundation (2023). Global Seismic Hazard Map, version 2023.1. Zenodo, doi:10.5281/zenodo.8409647."],
     "eshm20": ["Danciu, L., et al. (2021). *The 2020 update of the European Seismic Hazard Model: model overview*. EFEHR Technical Report 001, "
