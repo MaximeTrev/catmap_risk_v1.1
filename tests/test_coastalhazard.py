@@ -113,6 +113,13 @@ class FakeEE:
         self.Dictionary = Obj(fromLists=lambda *a: None)
         self.ServiceAccountCredentials = lambda email, key_data: ("creds", email)
         self.Initialize = self._init
+        self.Geometry.Rectangle = lambda c: c
+        Reducer.max = staticmethod(lambda: Obj(combine=lambda other, sharedInputs=True: None))
+        Reducer.count = staticmethod(lambda: None)
+        Img.bandNames = lambda s: Obj(getInfo=lambda: ["inundation_depth"])
+        Img.projection = lambda s: Obj(nominalScale=lambda: Obj(getInfo=lambda: 927.0))
+        Img.reduceRegion = lambda s, reducer, geometry, scale, maxPixels: Obj(
+            getInfo=lambda: {"inundation_depth_max": 1.2, "inundation_depth_count": 40})
 
     def _init(self, creds, project=None):
         self.init_args = (creds, project)
@@ -196,7 +203,9 @@ class TestEarthEngine(unittest.TestCase):
 
     def test_diagnose(self):
         rows = ch.diagnose_ee("proj", ACC)
-        self.assertEqual([r["étape"] for r in rows], ["secrets", "authentification", "collection", "image", "points de contrôle"])
+        self.assertEqual([r["étape"] for r in rows][:5], ["secrets", "authentification", "collection", "image", "points de contrôle"])
+        self.assertIn("image : bandes", [r["étape"] for r in rows])
+        self.assertIn("max 1.2 m sur 40 px", rows[-1]["détail"])
         self.assertTrue(all(r["résultat"] == "OK" for r in rows))
         self.assertEqual(ch.diagnose_ee("proj", None)[0]["résultat"], "ÉCHEC")
         self.assertNotIn("PRIVATE KEY", str(rows))                             # la clé n'apparaît jamais dans le diagnostic
