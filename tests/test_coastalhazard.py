@@ -89,7 +89,8 @@ class FakeEE:
                 return Obj(bands=lst, reduceRegions=lambda collection, reducer, scale: Obj(getInfo=lambda: fe._reduce(lst, collection)))
 
             def __init__(s, i):
-                s.i, s.name = i, None
+                assert i.startswith(ch.EE_ASSET + "/"), i          # chemin complet exigé par Earth Engine
+                s.i, s.name = i.rsplit("/", 1)[-1], None
 
             def select(s, b):
                 return s
@@ -142,6 +143,10 @@ class TestEarthEngine(unittest.TestCase):
         ch._EE_STATE.clear()
         ch._EE_IMAGES.clear()
         ch._EE_IMAGES["list"] = FakeEE.IMAGES                  # liste de la collection : la requête serveur est simulée ailleurs
+
+    def test_asset_path(self):
+        self.assertEqual(ch.asset_path("inuncoast_x"), "WRI/Aqueduct_Flood_Hazard_Maps/V2/inuncoast_x")
+        self.assertEqual(ch.asset_path("A/B/c"), "A/B/c")
 
     def test_parse_account(self):
         self.assertIn("\n", ch.parse_account(ACC)["private_key"])
