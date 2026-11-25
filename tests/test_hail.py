@@ -303,6 +303,13 @@ class TestCompact(unittest.TestCase):
             with self.assertRaises(hl.HailError):
                 hl.build_compact(src, Path(t) / "y.npz", max_mb=0.000001, progress=lambda *_: None)
 
+    def test_invalid_file_gives_explicit_message(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / hl.COMPACT_NAME).write_text("<html>erreur</html>")
+            with self.assertRaises(hl.HailError) as cm:
+                hl.compact_fields(Path(t) / hl.COMPACT_NAME)
+            self.assertIn("ne commence pas comme une archive npz", str(cm.exception))
+
     def test_incomplete_file_is_reported(self):
         with tempfile.TemporaryDirectory() as t:
             np.savez(Path(t) / hl.COMPACT_NAME, lat=np.zeros(2))
