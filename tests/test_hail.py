@@ -348,6 +348,24 @@ class TestDamages(unittest.TestCase):
         self.assertAlmostEqual(sd["pam_totale"], 1000.0 * 2)
         self.assertEqual(sd["sans_hauteur"], 1)
 
+    def test_schmid_function_values(self):
+        # valeurs recalculées à la main avec la Table 2 (b) de Schmid et al. (2024)
+        self.assertAlmostEqual(hl.schmid_mdr(50, "buildings"), 1.47e-3 * (30 / 53.9) ** 3 / (1 + (30 / 53.9) ** 3), places=9)
+        self.assertAlmostEqual(hl.schmid_mdr(50, "buildings"), 2.16e-4, places=6)
+        self.assertAlmostEqual(hl.schmid_mdr(50, "cars"), 1.72e-3, places=5)
+        self.assertEqual(hl.schmid_mdr(10, "buildings"), 0.0)                      # sous le seuil V_thresh : aucun dommage
+        self.assertLess(hl.schmid_mdr(50), hl.schmid_mdr(80))                       # croissante
+        with self.assertRaises(ValueError):
+            hl.schmid_mdr(50, "avions")
+
+    def test_damage_method_2_is_proportional_to_frequency(self):
+        base, s = self._base("clim")
+        ratio = hl.schmid_mdr(50, "buildings")
+        o, sd = hl.estimate_damages(base, s, ratio, pd.Series("commercial", index=base.index), pd.Series([1_000_000.0] * 4), "Schmid et al. 2024, 50 mm")
+        f = base["grele_moy_freq"].iloc[0]
+        self.assertAlmostEqual(o["dommage_grele_PAM_eur"].iloc[0], f * ratio * 1e6, places=6)    # fréquence 0,5 -> 50 % du dommage à fréquence 1
+        self.assertIn("Schmid et al. 2024", o["dommage_methode"].iloc[0])
+
     def test_annual_damage_and_aal(self):
         base, s = self._base("annual")
         classes = pd.Series("commercial", index=base.index)
