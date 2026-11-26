@@ -543,6 +543,31 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("cs_result", st.session_state)
         self.assertTrue([c for c in st.calls if c[0] == "download" and c[1].startswith("Télécharger")])
 
+    def test_submersion_cells_option_draws_pixels(self):
+        from catmap import coastalhazard as ch
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return b"name;lat;long\nA;43,3;5,4\n"
+
+        def fake_coast(df, lat_c, lon_c, rps, *a, **k):
+            out = df.copy().reset_index(drop=True)
+            for r in rps:
+                out[ch.column_name(r)] = [1.0]
+            out["submersion_statut"] = "ok"
+            return out, {"points": 1, "invalides": 0, "fichiers": len(rps), "fichiers_lus": {ch.column_name(100): "IMG100"}, "problemes": {}}
+        app, st = self.load({"ex_hazards": ["submersion"], "ex_csv_0": Up(), "button:Estimer la hauteur d'eau": True, "ex_rps": [100],
+                             "ex_show_cells": True, "ex_color": "submersion_RP100_raw"})
+        got = {}
+        st.checkbox = lambda label, value=False, **k: True if k.get("key") == "ex_show_cells" else value   # la fausse case ignore le script
+        with mock.patch.object(ch, "estimate_depths_ee", side_effect=fake_coast), \
+                mock.patch.object(ch, "flood_cells", side_effect=lambda i, lo, la, r: got.update(i=i, r=r) or [(5.4, 43.3, 1.2)]), \
+                mock.patch.object(app, "_fh_map") as fm:
+            app._exposition_section()
+        self.assertEqual((got["i"], got["r"]), ("IMG100", 5.0))
+        self.assertEqual(fm.call_args[0][-1], [(5.4, 43.3, 1.2)])
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+
     def test_exposition_section_common_rp_skips_unavailable_for_a_hazard(self):
         from catmap import coastalhazard as ch
 
