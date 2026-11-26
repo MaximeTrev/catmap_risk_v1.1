@@ -2789,7 +2789,7 @@ def _fh_preview(path: str, kind: str, size: int):
     return img, bounds
 
 
-def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None, damage=None):
+def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None, damage=None, cells=None):
     import folium
     pts = res.dropna(subset=["lat_f", "lon_f"])
     center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
@@ -2806,6 +2806,14 @@ def _fh_map(res, cols_by_kind, color_col, tiles=None, overlays=None, damage=None
     for img, (south, west, north, east) in overlays or []:      # valeurs de la tuile, mêmes couleurs que la légende
         folium.raster_layers.ImageOverlay(image=img, bounds=[[south, west], [north, east]], opacity=0.75, interactive=False,
                                           zindex=2).add_to(m)
+    if cells:                                               # pixels de submersion autour des points (un seul objet GeoJSON : léger)
+        import json as _json
+        h = coast.CELL_HALF_DEG
+        feats = [{"type": "Feature", "properties": {"d": v, "c": fhz.CLASS_COLORS[fhz.flood_class(v, "raw")]},
+                  "geometry": {"type": "Polygon", "coordinates": [[[x - h, y - h], [x + h, y - h], [x + h, y + h], [x - h, y + h], [x - h, y - h]]]}}
+                 for x, y, v in cells[:6000]]
+        folium.GeoJson({"type": "FeatureCollection", "features": feats}, style_function=lambda f: {"fillColor": f["properties"]["c"], "color": "none",
+                       "weight": 0, "fillOpacity": 0.6}, tooltip=folium.GeoJsonTooltip(fields=["d"], aliases=["Hauteur (m)"]), zindex=2).add_to(m)
     for t in tiles or []:                                   # emprise des tuiles réellement lues (vert : lue, rouge : en erreur)
         ok = t["statut"] == "ok"
         tip = f"Tuile ID{t['id']} : {t['points']} point(s) ; " + ("lue" if ok else "ERREUR : " + " | ".join(t["erreurs"])[:200])
@@ -3368,8 +3376,30 @@ def _exposition_section():
                     st.warning(f"Tuile ID{t['id']} : {e}")
             if len(ok_tiles) > 6:
                 st.caption(f"Valeurs affichées pour 6 tuiles sur {len(ok_tiles)} (limite d'affichage de la carte).")
+    cells = None
+    if "submersion" in have and color_col.startswith("submersion_RP"):
+        if st.checkbox("Afficher les zones de submersion à 5 km autour des points", value=False, key="ex_show_cells"):
+            img_id = have["submersion"][3].get("fichiers_lus", {}).get(color_col)
+            res_c = have["submersion"][2]
+            cache_c = st.session_state.setdefault("cs_cells", {})
+            ckey = (color_col, name, len(df), str(img_id))
+            if not img_id:
+                st.caption("Image de submersion non lue pour cette période de retour : rien à afficher.")
+            else:
+                if ckey not in cache_c:
+                    try:
+                        ok_c = res_c.dropna(subset=["lat_f", "lon_f"])
+                        with st.spinner("Lecture des pixels de submersion dans un rayon de 5 km (Earth Engine)…"):
+                            cache_c[ckey] = coast.flood_cells(img_id, ok_c["lon_f"].to_numpy(float), ok_c["lat_f"].to_numpy(float), 5.0)
+                    except coast.TileError as e:
+                        st.error(f"Pixels de submersion indisponibles : {e}")
+                cells = cache_c.get(ckey)
+                if cells is not None:
+                    st.caption(f"{len(cells)} pixel(s) de ≈ 1 km avec hauteur > 0 dans un rayon de 5 km autour des points, pour {color_col}."
+                               + (" Affichage limité aux 6000 premiers." if len(cells) > 6000 else "")
+                               + (" Aucune submersion modélisée dans ce rayon." if not cells else ""))
     tiles = have["debordement"][3].get("tuiles_detail") if (show_tiles and "debordement" in have) else None
-    _fh_map(merged, cols_by_kind, color_col, tiles, overlays, damage)
+    _fh_map(merged, cols_by_kind, color_col, tiles, overlays, damage, cells)
     out = merged.drop(columns=["lat_f", "lon_f"])
     exposed = (out[depth_cols_all].apply(pd.to_numeric, errors="coerce").fillna(0) > 0).any(axis=1)
     dmg_cols_out = [c for c in out.columns if c.startswith("dommage_")]
@@ -3382,7 +3412,7 @@ def _exposition_section():
         if st.button(f"Vider le cache et le CSV ({n_c} fichier(s) en cache, {mb_c} Mo)", key="ex_clear_cache", type="primary"):
             n_del, mb_del = fhz.clear_cache()
             st.session_state["ex_up_n"] = st.session_state.get("ex_up_n", 0) + 1
-            for kk in ("fh_result", "cs_result", "fh_diag", "cs_diag", "ex_color", "ex_show_tiles", "ex_show_vals", "ex_dmg_result", "ex_dmg_open"):
+            for kk in ("fh_result", "cs_result", "fh_diag", "cs_diag", "ex_color", "ex_show_tiles", "ex_show_vals", "ex_dmg_result", "ex_dmg_open", "cs_cells"):
                 st.session_state.pop(kk, None)
             st.session_state["ex_cache_msg"] = (f"Cache vidé : {n_del} fichier(s), {mb_del} Mo libérés. Le fichier CSV chargé et les résultats "
                                                 "ont aussi été retirés ; les fichiers seront retéléchargés au prochain calcul.")
