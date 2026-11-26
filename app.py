@@ -4346,17 +4346,36 @@ def _grele_damage(res):
     out_df = res["df"]
     base_cols = [c for c in out_df.columns if not c.startswith(("grele_", "dommage_")) and c not in ("lat_f", "lon_f")]
     with st.container(border=True):
-        _help_line("Fonction de vulnérabilité : méthode", "**Linéaire plafonnée** : taux de dommage = min(1, taux par événement × fréquence annuelle). "
-                   "Le taux par événement est **à calibrer** : la valeur par défaut est illustrative, elle ne vient d'aucune publication. Une maille "
+        _help_line("Fonction de vulnérabilité : méthode", "**Linéaire plafonnée** : taux de dommage = min(1, taux par événement × fréquence annuelle) : une "
+                   "fréquence de 1 événement par an applique 100 % du taux par événement, 0,5 en applique 50 %, 2 en applique 200 % (plafonné à 100 % de la "
+                   "valeur).\n\n**Méthode 1 (saisie)** : le taux par événement est **à calibrer** ; la valeur par défaut est illustrative, elle ne vient "
+                   "d'aucune publication.\n\n**Méthode 2 (simplifiée d'après Schmid et al., 2024)** : le taux par événement est celui de la fonction "
+                   "d'impact publiée (taux de dommage moyen en fonction de la taille de grêle MESHS, forme sigmoïdale d'Emanuel 2011, paramètres de la "
+                   "Table 2), évalué à 50 mm, soit la taille minimale des événements ≥ 5 cm. **Simplifications** : une seule taille (50 mm) alors que les "
+                   "événements ≥ 5 cm peuvent être plus gros (le taux est donc minoré) ; calibration sur des sinistres assurés suisses (parc de bâtiments, "
+                   "franchises) et sur une grêle estimée par radar, alors que la fréquence vient d'une modélisation ERA5 (grandeurs différentes) ; "
+                   "fréquence de la maille de 0,25° appliquée au site, alors qu'un orage ne touche qu'une partie de la maille (surestimation). À lire "
+                   "comme un ordre de grandeur.\n\n" + refs_md("schmid_hail") + "\n\nUne maille "
                    "de 0,25° (≈ 28 km) est bien plus grande que l'emprise d'un orage de grêle : le taux moyen par événement et par site est donc "
                    "faible. En mode climatologie, la perte obtenue est une perte annuelle moyenne ; en séries annuelles, la perte à chaque période de "
                    "retour est celle d'une année où la fréquence atteint ce niveau.", wide=True, label_style="font-size:.875rem")
         st.markdown("**Estimation des dommages de grêle** : perte = taux de dommage × valeur exposée, avec un taux par événement ≥ 5 cm saisi par vous "
-                    "(valeur par défaut **illustrative**, sans source).")
+                    "(méthode 1 : saisie, valeur par défaut **illustrative** sans source ; méthode 2 : fonction d'impact simplifiée d'après Schmid et al., 2024).")
+        rmode = st.radio("Taux de dommage par événement", ["manual", "schmid"], horizontal=True, key="gr_ratio_mode",
+                         format_func=lambda m: {"manual": "Méthode 1 : saisie (illustratif)",
+                                                "schmid": "Méthode 2 : simplifiée d'après Schmid et al. (2024), à 50 mm"}[m])
         c1, c2 = st.columns(2)
-        ratio = _num_help(c1, "Taux de dommage par événement (%)", "Part de la valeur exposée détruite lors d'un événement de grêle ≥ 5 cm sur la maille. "
-                          "Dépend du bâti (toitures, vitrages, panneaux solaires, véhicules, cultures) : à calibrer sur vos sinistres.",
-                          min_value=0.01, max_value=100.0, value=1.0, step=0.1, key="gr_ratio", format="%.2f") / 100.0
+        ratio_src = "illustratif"
+        if rmode == "schmid":
+            asset_k = c1.selectbox("Actif de la fonction d'impact", list(hl.SCHMID_PARAMS), key="gr_schmid_asset",
+                                   format_func=lambda k: hl.SCHMID_PARAMS[k]["label"])
+            ratio = hl.schmid_mdr(hl.HAIL_SIZE_MM, asset_k)
+            ratio_src = f"Schmid et al. 2024, {hl.SCHMID_PARAMS[asset_k]['label'].lower()}, 50 mm"
+            c1.caption(f"Taux par événement : {ratio:.4%} de la valeur (fonction d'impact à 50 mm). Calibration suisse, valeur indicative hors Suisse.")
+        else:
+            ratio = _num_help(c1, "Taux de dommage par événement (%)", "Part de la valeur exposée détruite lors d'un événement de grêle ≥ 5 cm sur la maille. "
+                              "Dépend du bâti (toitures, vitrages, panneaux solaires, véhicules, cultures) : à calibrer sur vos sinistres.",
+                              min_value=0.01, max_value=100.0, value=1.0, step=0.1, key="gr_ratio", format="%.2f") / 100.0
         default_cls = c2.selectbox("Type d'actif par défaut", list(dmg.CLASSES), key="gr_cls", index=list(dmg.CLASSES).index("commercial"),
                                    format_func=lambda k: dmg.CLASS_LABELS[k])
         d1, d2 = st.columns(2)
@@ -4388,7 +4407,7 @@ def _grele_damage(res):
                 base = out_df.reset_index(drop=True)
                 classes = dmg.asset_class_series(base, type_col, default_cls)
                 values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, "total")
-                o, summ = hl.estimate_damages(base, res["summ"], ratio, classes, values)
+                o, summ = hl.estimate_damages(base, res["summ"], ratio, classes, values, ratio_src)
                 summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
                 st.session_state["gr_dmg"] = {"out": o, "summ": summ, "name": res["name"], "n": res["n"], "valeur_nulle": summ["valeur_nulle"]}
             except (dmg.DamageError, ValueError) as e:
