@@ -418,6 +418,40 @@ def estimate_depths_ee(df: pd.DataFrame, lat_col: str, lon_col: str, rps: list[i
     return out, summary
 
 
+CELL_HALF_DEG = 1.0 / 240.0                                     # demi-côté d'un pixel de 30 secondes d'arc (≈ 928 m)
+
+
+def flood_cells(img_id: str, lon, lat, radius_km: float = 5.0, chunk: int = 25,
+                on_chunk: Optional[Callable[[int, int], None]] = None) -> list[tuple]:
+    """Pixels inondés (hauteur > 0) dans un disque de ``radius_km`` autour de chaque point : liste de (longitude, latitude, hauteur en m) des centres
+    de pixel, sans doublon entre points voisins. Sert uniquement à l'affichage."""
+    ee = _ee()
+    uniq = {}
+    for lo, la in zip(lon, lat):
+        if np.isfinite(lo) and np.isfinite(la):
+            uniq[(round(float(lo), 4), round(float(la), 4))] = None
+    pts = list(uniq)
+    band = ee.Image(asset_path(img_id)).select(EE_BAND)
+    img = band.addBands(ee.Image.pixelLonLat())
+    cells: dict[tuple, float] = {}
+    n_chunks = -(-len(pts) // chunk) if pts else 0
+    for c, a in enumerate(range(0, len(pts), chunk), start=1):
+        feats = [ee.Feature(ee.Geometry.Point([x, y]).buffer(float(radius_km) * 1000.0), {"k": a + i}) for i, (x, y) in enumerate(pts[a:a + chunk])]
+        try:
+            res = img.sampleRegions(collection=ee.FeatureCollection(feats), scale=band.projection().nominalScale(), geometries=False)
+            res = res.filter(ee.Filter.gt(EE_BAND, 0)).getInfo()
+        except Exception as e:                                  # noqa: BLE001
+            raise TileError(f"lecture des pixels autour des points impossible ({type(e).__name__}: {str(e)[:220]})") from e
+        for f in res.get("features", []):
+            pr = f.get("properties", {})
+            v, x, y = pr.get(EE_BAND), pr.get("longitude"), pr.get("latitude")
+            if v is not None and x is not None and y is not None and float(v) > 0:
+                cells[(round(float(x), 5), round(float(y), 5))] = round(float(v), 3)
+        if on_chunk:
+            on_chunk(c, n_chunks)
+    return [(x, y, v) for (x, y), v in cells.items()]
+
+
 def inspect_ee(img_id: str, points: dict[str, tuple], half_deg: float = 0.25) -> list[dict]:
     """Informations de contrôle sur l'image : bandes, résolution, et pour chaque lieu le maximum et le nombre de pixels renseignés dans une boîte
     autour du point (distingue « image vide » de « point mal placé »)."""
