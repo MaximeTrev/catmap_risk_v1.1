@@ -730,6 +730,27 @@ class TestAppSmoke(unittest.TestCase):
         self.assertGreater(o["dommage_grele_PAM_eur"].iloc[0], 0)
         self.assertEqual(o["dommage_grele_PAM_eur"].iloc[1], 0)         # clim nulle à lon 0,25
 
+    def test_grele_damage_method_2_schmid(self):
+        import contextlib
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return "nom;lat;long;valeur\nA;45,0;5,0;1000000\nB;45,0;0,25;2000000\n".encode()
+
+        with tempfile.TemporaryDirectory() as t:
+            app, st = self.load({"gr_csv_0": Up(), "gr_mode": "clim", "button:Estimer l'aléa grêle": True, "button:Estimer les dommages": True,
+                                 "button:Calculer les dommages": True, "gr_vmode": "col", "gr_valcol": "valeur", "gr_ratio_mode": "schmid"})
+            st.session_state["gr_dmg_open"] = True
+            with contextlib.ExitStack() as stack:
+                for m in self._hail_env(t):
+                    stack.enter_context(m)
+                app._grele_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], [c for c in st.calls if c[0] == "error"])
+        o = st.session_state["gr_dmg"]["out"]
+        from catmap import hail as hl
+        self.assertAlmostEqual(o["dommage_grele_PAM_eur"].iloc[0], 0.1 * hl.schmid_mdr(50, "buildings") * 1_000_000, places=4)
+        self.assertIn("Schmid et al. 2024", o["dommage_methode"].iloc[0])
+
     def test_grele_annual_end_to_end_with_viewer_and_trend(self):
         import contextlib
         if importlib.util.find_spec("altair") is None:
