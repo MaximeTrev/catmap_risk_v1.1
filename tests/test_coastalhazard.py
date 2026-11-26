@@ -118,6 +118,19 @@ class FakeEE:
         self.ServiceAccountCredentials = lambda email, key_data: ("creds", email)
         self.Initialize = self._init
         self.Geometry.Rectangle = lambda c: c
+        self.Image.pixelLonLat = staticmethod(lambda: "ll")
+        self.Filter = Obj(gt=lambda b, v: None)
+        Img.addBands = lambda s, o: s
+
+        def sample_regions(s, collection, scale, geometries):
+            feats = []
+            for f in collection:
+                x, y = f.g[0], f.g[1]
+                for dx in (0.0, 0.01):                                   # un pixel propre + un pixel partagé avec le voisin
+                    feats.append({"properties": {"inundation_depth": 1.5 + dx, "longitude": x + dx, "latitude": y}})
+            return Obj(filter=lambda flt: Obj(getInfo=lambda: {"features": feats}))
+        Img.sampleRegions = sample_regions
+        Img.select_orig = Img.select
         Reducer.max = staticmethod(lambda: Obj(combine=lambda other, sharedInputs=True: None, forEach=lambda names: names))
         Reducer.count = staticmethod(lambda: None)
         Img.bandNames = lambda s: Obj(getInfo=lambda: ["inundation_depth"])
@@ -208,6 +221,16 @@ class TestEarthEngine(unittest.TestCase):
         self.assertEqual(seen[0].buffered, 2000.0)
         self.assertEqual(s["rayon_km"], 2)
         self.assertEqual(out["submersion_RP100_raw"].iloc[0], 2.5)
+
+    def test_flood_cells_dedup_and_radius(self):
+        seen = []
+        orig = self.fe.Geometry.Point
+        self.fe.Geometry.Point = lambda c: seen.append(orig(c)) or seen[-1]
+        cells = ch.flood_cells("H100", [12.0, 12.01, 12.0, float("nan")], [45.0, 45.0, 45.0, 1.0], radius_km=5)
+        self.assertEqual(seen[0].buffered, 5000.0)
+        self.assertEqual(len(seen), 2)                                   # point en double et coordonnée invalide écartés
+        self.assertEqual(len(cells), 3)                                  # (12.00 et 12.01 partagent un pixel) : pas de doublon
+        self.assertTrue(all(v > 0 for _, _, v in cells))
 
     def test_future_with_projection(self):
         df = pd.DataFrame({"lat": [45.0, 46.0], "lon": [12.0, 13.0]})
