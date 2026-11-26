@@ -366,6 +366,16 @@ class TestDamages(unittest.TestCase):
         self.assertAlmostEqual(o["dommage_grele_PAM_eur"].iloc[0], f * ratio * 1e6, places=6)    # fréquence 0,5 -> 50 % du dommage à fréquence 1
         self.assertIn("Schmid et al. 2024", o["dommage_methode"].iloc[0])
 
+    def test_annual_damage_with_chosen_return_periods(self):
+        base, s = self._base("annual")
+        cl, v = pd.Series("commercial", index=base.index), pd.Series([1_000_000.0] * 4)
+        o, _ = hl.estimate_damages(base, s, 0.01, cl, v, "x", [10])
+        self.assertIn("dommage_grele_RP10_eur", o.columns)
+        self.assertNotIn("dommage_grele_RP2_eur", o.columns)
+        self.assertNotIn("dommage_grele_PAM_eur", o.columns)                       # une seule RP : pas d'intégration possible
+        with self.assertRaises(hl.dmg.DamageError):
+            hl.estimate_damages(base, s, 0.01, cl, v, "x", [])
+
     def test_annual_damage_and_aal(self):
         base, s = self._base("annual")
         classes = pd.Series("commercial", index=base.index)
