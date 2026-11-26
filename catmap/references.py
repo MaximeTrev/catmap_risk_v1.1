@@ -24,6 +24,11 @@ REFS = {
     "emanuel": ["Emanuel, K. (2011). Global warming effects on U.S. hurricane damage. *Weather, Climate, and Society*, 3(4), 261–268."],
     "jrc_flood": ["Baugh, C., et al. (2024). Global river flood hazard maps (GloFAS, v2.1.2). European Commission, Joint Research Centre (JRC Data "
                   "Catalogue)."],
+    "schmid_hail": ["Schmid, T., Portmann, R., Villiger, L., Schröer, K., & Bresch, D. N. (2024). An open-source radar-based hail damage model for "
+                    "buildings and cars. *Natural Hazards and Earth System Sciences*, 24, 847-872. doi:10.5194/nhess-24-847-2024 (Table 2 ; forme "
+                    "sigmoïdale d'après Emanuel, K. (2011), *Weather, Climate, and Society*, 3, 261-268).",
+                    "Approche simplifiée par CatMap : taux de dommage moyen évalué à 50 mm × fréquence annuelle des événements ≥ 5 cm (Battaglioli "
+                    "et al., 2025)."],
     "aqueduct": ["Ward, P. J., et al. (2020). *Aqueduct Floods Methodology*. Technical Note, World Resources Institute.",
                  "Muis, S., Verlaan, M., Winsemius, H. C., Aerts, J. C. J. H., & Ward, P. J. (2016). A global reanalysis of storm surges and extreme "
                  "sea levels. *Nature Communications*, 7, 11969.",
