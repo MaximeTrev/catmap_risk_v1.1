@@ -681,7 +681,7 @@ def event_curve(ratio_per_event: float, freq_max: float = 20.0) -> Curve:
 
 
 def estimate_damages(base: pd.DataFrame, summ: dict, ratio_per_event: float, classes: pd.Series, values: pd.Series,
-                     source: str = "illustratif") -> tuple[pd.DataFrame, dict]:
+                     source: str = "illustratif", rps: Optional[list] = None) -> tuple[pd.DataFrame, dict]:
     """Mode annuel : ``dommage_grele_RP<rp>_eur`` et PAM (trapèzes entre les périodes de retour). Mode climatologie : une seule perte, qui est la perte
     annuelle moyenne ``dommage_grele_PAM_eur`` (= min(1, taux × fréquence moyenne) × valeur)."""
     if ratio_per_event is None or not 0 < ratio_per_event <= 1:
@@ -690,7 +690,10 @@ def estimate_damages(base: pd.DataFrame, summ: dict, ratio_per_event: float, cla
         f"Grêle ≥ 5 cm : {ratio_per_event:.2%} par événement ({source})"
     if summ["mode"] == "annual":
         curve = event_curve(ratio_per_event)
-        cols = {r: column_name(r) for r in summ["rps"] if column_name(r) in base.columns}
+        wanted = list(summ["rps"]) if rps is None else [r for r in summ["rps"] if r in set(rps)]
+        if rps is not None and not wanted:
+            raise dmg.DamageError("choisissez au moins une période de retour parmi celles estimées.")
+        cols = {r: column_name(r) for r in wanted if column_name(r) in base.columns}
         if not cols:
             raise dmg.DamageError("aucune colonne de fréquence disponible : estimez d'abord l'aléa.")
         return dmg.estimate_damages(base, cols, {c: curve for c in classes.dropna().unique()}, classes, values, label, None, RISK)
