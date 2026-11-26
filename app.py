@@ -4364,6 +4364,14 @@ def _grele_damage(res):
         rmode = st.radio("Taux de dommage par événement", ["manual", "schmid"], horizontal=True, key="gr_ratio_mode",
                          format_func=lambda m: {"manual": "Méthode 1 : saisie (illustratif)",
                                                 "schmid": "Méthode 2 : simplifiée d'après Schmid et al. (2024), à 50 mm"}[m])
+        dmg_rps = None
+        if res["summ"].get("mode") == "annual":
+            avail = list(res["summ"]["rps"])
+            dmg_rps = st.multiselect("Périodes de retour utilisées pour les dommages", avail, default=avail, key="gr_dmg_rps",
+                                     format_func=lambda r: f"RP{r}")
+            st.caption("La fréquence annuelle, donc le dommage, dépend de la période de retour : chaque RP choisie donne une colonne de dommage. "
+                       "La perte annuelle moyenne est intégrée sur les RP retenues seulement (méthode des trapèzes, sans extrapolation) : "
+                       "avec une seule RP, elle n'est pas calculable.")
         c1, c2 = st.columns(2)
         ratio_src = "illustratif"
         if rmode == "schmid":
@@ -4407,7 +4415,7 @@ def _grele_damage(res):
                 base = out_df.reset_index(drop=True)
                 classes = dmg.asset_class_series(base, type_col, default_cls)
                 values = dmg.exposed_value(base, mode, value_col, area_col, unit_value, const, country_col, classes, jrc, "total")
-                o, summ = hl.estimate_damages(base, res["summ"], ratio, classes, values, ratio_src)
+                o, summ = hl.estimate_damages(base, res["summ"], ratio, classes, values, ratio_src, dmg_rps)
                 summ["valeur_nulle"] = bool((values.fillna(0) <= 0).all())
                 st.session_state["gr_dmg"] = {"out": o, "summ": summ, "name": res["name"], "n": res["n"], "valeur_nulle": summ["valeur_nulle"]}
             except (dmg.DamageError, ValueError) as e:
