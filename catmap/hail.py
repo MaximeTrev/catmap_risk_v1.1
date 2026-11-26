@@ -656,6 +656,22 @@ def estimate(df: pd.DataFrame, lat_col: str, lon_col: str, mode: str = "clim", r
 
 
 # ───────────────────────────── dommages ─────────────────────────────
+# Fonction d'impact simplifiée d'après Schmid et al. (2024, NHESS 24, 847-872, doi:10.5194/nhess-24-847-2024), Table 2 (b) « Damages (MDR) » calibrée
+# sur la taille de grêle MESHS (radar, Suisse) : f = S·vn³/(1+vn³), vn = max(V−V_thresh, 0)/(V_half−V_thresh) (forme d'Emanuel 2011).
+SCHMID_PARAMS = {"buildings": {"label": "Bâtiments", "v_thresh": 20.0, "v_half": 73.9, "scale": 1.47e-3},
+                 "cars": {"label": "Voitures", "v_thresh": 13.7, "v_half": 53.3, "scale": 3.96e-3}}
+HAIL_SIZE_MM = 50.0                                             # seuil des données de fréquence : événements ≥ 5 cm
+
+
+def schmid_mdr(size_mm: float = HAIL_SIZE_MM, asset: str = "buildings") -> float:
+    """Taux de dommage moyen (part de la valeur exposée) pour une grêle de ``size_mm`` mm d'après Schmid et al. (2024)."""
+    if asset not in SCHMID_PARAMS:
+        raise ValueError(f"type d'actif inconnu : {asset}")
+    q = SCHMID_PARAMS[asset]
+    vn = max(float(size_mm) - q["v_thresh"], 0.0) / (q["v_half"] - q["v_thresh"])
+    return q["scale"] * vn ** 3 / (1.0 + vn ** 3)
+
+
 def event_curve(ratio_per_event: float, freq_max: float = 20.0) -> Curve:
     """Taux de dommage = ``min(1, taux par événement × fréquence)`` (courbe linéaire plafonnée à 1) ; abscisse : événements ≥ 5 cm par an."""
     if not 0 < ratio_per_event <= 1:
@@ -664,12 +680,14 @@ def event_curve(ratio_per_event: float, freq_max: float = 20.0) -> Curve:
     return Curve([0.0, top], [0.0, 1.0], f"Linéaire : {ratio_per_event:.2%} de la valeur par événement ≥ 5 cm (taux illustratif), plafonné à 100 %")
 
 
-def estimate_damages(base: pd.DataFrame, summ: dict, ratio_per_event: float, classes: pd.Series, values: pd.Series) -> tuple[pd.DataFrame, dict]:
+def estimate_damages(base: pd.DataFrame, summ: dict, ratio_per_event: float, classes: pd.Series, values: pd.Series,
+                     source: str = "illustratif") -> tuple[pd.DataFrame, dict]:
     """Mode annuel : ``dommage_grele_RP<rp>_eur`` et PAM (trapèzes entre les périodes de retour). Mode climatologie : une seule perte, qui est la perte
     annuelle moyenne ``dommage_grele_PAM_eur`` (= min(1, taux × fréquence moyenne) × valeur)."""
     if ratio_per_event is None or not 0 < ratio_per_event <= 1:
         raise dmg.DamageError("le taux de dommage par événement doit être compris entre 0 et 1.")
-    label = f"Grêle ≥ 5 cm : {ratio_per_event:.2%} par événement (illustratif)"
+    label = f"Grêle ≥ 5 cm : {ratio_per_event:.4%} par événement ({source})" if ratio_per_event < 0.001 else \
+        f"Grêle ≥ 5 cm : {ratio_per_event:.2%} par événement ({source})"
     if summ["mode"] == "annual":
         curve = event_curve(ratio_per_event)
         cols = {r: column_name(r) for r in summ["rps"] if column_name(r) in base.columns}
