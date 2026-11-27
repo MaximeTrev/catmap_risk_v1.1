@@ -3435,8 +3435,14 @@ def _runoff_map(res, col):
     shown = pts.head(3000)
     for _, r in shown.iterrows():
         v = float(r[col])
-        cls = int(v) if col == rs.COLUMNS["classe"] else 1 + min(4, int(v * 5))
-        tip = f"{r.get('name') or ''} : {rs.LEVELS[cls]} ({v:.2f})" if col != rs.COLUMNS["classe"] else f"{r.get('name') or ''} : {rs.LEVELS[cls]}"
+        if col == rs.COLUMNS["classe"]:
+            cls, tip = int(v), f"{r.get('name') or ''} : {rs.LEVELS[int(v)]}"
+        elif col == rs.COLUMNS["irip"]:
+            cls = 1 + min(4, int(v))
+            tip = f"{r.get('name') or ''} : score {v:.1f} / 5" + (" (≥ 3)" if v >= 3 else "")
+        else:
+            cls = 1 + min(4, int(v * 5))
+            tip = f"{r.get('name') or ''} : {rs.LEVELS[cls]} ({v:.2f})"
         folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=rs.COLORS[cls], fill_opacity=0.9,
                             tooltip=html_escape(tip)).add_to(m)
     if len(shown) > 1:
@@ -3449,41 +3455,105 @@ def _runoff_map(res, col):
         st.caption(f"Carte limitée aux 3000 premiers points sur {len(pts)} ; le tableau et le CSV contiennent tous les points.")
 
 
+def _select_help(label: str, help_text: str, options, **kw):
+    """``selectbox`` précédée d'une ligne de titre avec infobulle « ? » au survol."""
+    _help_line(html.escape(label), help_text, wide=True, label_style="font-size:.875rem")
+    return st.selectbox(label, options, label_visibility="collapsed", **kw)
+
+
 def _ruissellement_section():
-    st.subheader("Ruissellement pluvial : susceptibilité par point")
+    st.subheader("Ruissellement : susceptibilité par point")
     st.markdown("Indice de **susceptibilité** au ruissellement pluvial de chaque point, croisant trois cartes de même poids : **production**, "
                 "**transfert** et **accumulation**, calculées sur la topographie mondiale (≈ 90 m), l'occupation du sol et le sol. C'est un indice "
                 "qualitatif, sans pluie ni hauteur d'eau (étapes suivantes).")
     _help_line("Méthode, hypothèses et références",
                "**Simplification de la méthode IRIP** (Indicateur de Ruissellement Intense Pluvial, Irstea / INRAE) : trois cartes (production, transfert, "
-               "accumulation) de facteurs notés 0 (défavorable) ou 1 (favorable au ruissellement). L'IRIP original utilise 5 facteurs par carte, dont "
-               "la profondeur et l'érodabilité du sol, la compacité et les axes linéaires, notés par une analyse statistique dont les seuils sont dans "
-               "sa note technique ; CatMap ne les reprend pas.\n\n"
-               "**Données mondiales libres lues dans Earth Engine** : altitude et aire drainée amont (MERIT Hydro, 90 m) ; occupation du sol (ESA "
-               "WorldCover, 10 m) ; numéro de courbe SCS (GCN250, 250 m) qui combine occupation du sol et groupe hydrologique de sol.\n\n"
-               "**Facteurs** (1 si la valeur du pixel dépasse le quartile supérieur de la fenêtre locale, ou est sous le quartile inférieur pour la "
-               "pente en accumulation) : *production* = pente forte, sol cultivé / bâti / nu, numéro de courbe fort ; *transfert* = production, pente "
-               "forte, aire drainée forte (axe d'écoulement) ; *accumulation* = production, aire drainée forte, pente faible, concavité (rupture de "
-               "pente), indice topographique ln(a/tan β) fort. Chaque carte est ramenée à [0, 1] (facteurs favorables / facteurs disponibles), puis "
-               "la susceptibilité globale est la **moyenne des trois cartes à poids égaux**, répartie en 5 classes égales.\n\n"
-               "**Limites** : les seuils relatifs à la fenêtre locale sont une convention CatMap, pas ceux de l'IRIP ; l'indice est relatif au "
-               "contexte local (un terrain plat partout n'a pas de pixel plus favorable que les autres) ; le MNT de 90 m ne voit ni le bâti, ni le "
-               "réseau pluvial ; un point en mer ou hors couverture (60°S à 90°N) n'a pas de valeur. L'IRIP est qualitatif : il ne donne ni débit, "
-               "ni hauteur d'eau.\n\n**Conditions** : accès à Earth Engine en utilisation non commerciale au regard de l'abonnement du projet "
-               "(revérification périodique demandée par Google).\n\n" + refs_md("irip", "twi", "merit", "worldcover", "gcn250", "gee"),
+               "accumulation) de facteurs notés 0 (défavorable) ou 1 (favorable). L'IRIP original compte 5 facteurs par carte (dont épaisseur et "
+               "érodabilité du sol, compacité, axes linéaires) que CatMap ne reprend pas ; il ne fixe pas de seuils numériques universels : les seuils de "
+               "pente et d'indice topographique sont calculés pour chaque zone d'étude par une classification en 2 classes (Braud et al., 2020).\n\n"
+               "**Données mondiales libres lues dans Earth Engine** : altitude et aire drainée amont (MERIT Hydro, 90 m) ; occupation du sol (ESA WorldCover, "
+               "10 m) ; sol au choix (GCN250, HiHydroSoil) ; géomorphons (Geomorpho90m) en option ; bassins HydroBASINS.\n\n"
+               "**Seuils par zone** : pour chaque zone (bassin ou fenêtre), CatMap sépare les pixels en 2 classes en minimisant la variance intra-classe "
+               "(en 1 dimension, même optimum qu'un k-means à 2 classes) ; le seuil est la frontière des deux classes. Cela s'applique à la pente, à "
+               "l'indice topographique ln(a/tan β), au logarithme de l'aire drainée, à l'amplitude de courbure du profil (rupture de pente) et, "
+               "selon l'option, au numéro de courbe. Une zone trop petite ou quasi uniforme n'a pas de seuil : aucun facteur « fort » n'y est retenu.\n\n"
+               "**Facteurs** : *production* = topographie (pente > T1 ou indice topographique > T2), sol cultivé ou bâti, sol peu perméable ; *transfert* = "
+               "production amont, pente forte, rupture de pente convexe, aire drainée forte ; *accumulation* = production amont, aire drainée forte, pente "
+               "faible, rupture de pente concave, indice topographique fort (ou, en option, score de géomorphons). Production amont ≈ production du pixel "
+               "du point (≥ 0,6) : l'amont n'est pas agrégé. Chaque carte est ramenée à [0, 1] (facteurs favorables / disponibles) ; la susceptibilité "
+               "globale est la **moyenne des trois cartes à poids égaux**, en 5 classes égales de 0,2, et en **score équivalent IRIP de 0 à 5** "
+               "(= globale × 5, repère « ≥ 3 »). Ce score n'est pas le score officiel de l'IRIP : il en est une approximation.\n\n"
+               "**Limites** : seuils relatifs à la zone (un terrain plat partout n'a pas de pixel « fort » ; deux zones peuvent donner des seuils très "
+               "différents) ; MNT de 90 m qui ne voit ni le bâti ni le réseau pluvial ; points en mer ou hors 60°S–90°N sans valeur ; sources des jeux "
+               "à vérifier par le diagnostic. L'IRIP est qualitatif : ni débit, ni hauteur d'eau.\n\n"
+               "**Conditions** : accès à Earth Engine en utilisation non commerciale au regard de l'abonnement du projet (revérification périodique "
+               "demandée par Google).\n\n" + refs_md("irip", "irip_braud", "rubin", "twi", "merit", "worldcover", "zt1987", "gee"),
                wide=True, label_style="font-size:.875rem")
     df, lat_c, lon_c, name = _points_input("rs_")
     if df is None:
         return
-    radius = float(st.selectbox("Fenêtre locale pour les seuils (rayon, km)", list(rs.RADII_KM), index=1, key="rs_radius",
-                                format_func=lambda x: f"{x:g} km"))
-    st.caption(f"{len(df)} point(s) lus. Les points voisins du même pixel sont calculés une fois ; les lots de {rs.CHUNK} points sont traités en parallèle. "
-               "Pour des centaines de milliers de points, comptez de longues minutes.")
+    kind = st.radio("Zone d'analyse de chaque point (où sont calculés les seuils)", ["basin", "window"], horizontal=True, key="rs_zone",
+                    format_func=lambda k: {"basin": "Bassin versant (unité HydroBASINS)", "window": "Fenêtre locale autour du point"}[k])
+    if kind == "basin":
+        level = int(_select_help(
+            "Niveau de bassin HydroBASINS",
+            "**HydroBASINS** découpe les continents en unités de drainage emboîtées, du niveau 1 (très grandes) au niveau 12 (les plus petites). Plus le niveau est élevé, plus la zone est locale : les seuils reflètent le relief et les sols "
+            "voisins ; plus il est bas, plus la zone est grande et hétérogène (plaine et montagne dans la même zone), donc des seuils moins "
+            "discriminants. Défaut : 11. CatMap propose 9 à 12.\n\n"
+            "**Approximation** : le bassin versant d'un point est l'ensemble de la surface qui draine vers ce point. CatMap le remplace par "
+            "l'**unité de drainage HydroBASINS qui contient le point**. Elle peut différer : un point au milieu d'une unité n'en draine qu'une partie ; "
+            "un point en bordure peut recevoir de l'eau d'unités amont non comprises ; une unité peut inclure du terrain qui ne draine pas vers le "
+            "point. Les seuils décrivent donc le contexte de l'unité, pas l'amont exact. Les unités sont délimitées pour de grands cours d'eau : "
+            "en zone très plate ou urbaine, la limite peut être imprécise.\n\n" + refs_md("hydrobasins"),
+            list(rs.BASIN_LEVELS), index=list(rs.BASIN_LEVELS).index(rs.DEFAULT_LEVEL), key="rs_level"))
+        zone = {"kind": "basin", "level": level}
+    else:
+        radius = float(_select_help(
+            "Rayon de la fenêtre locale (km)",
+            "Disque centré sur le point : les seuils sont calculés sur les pixels de ce disque. 1 ou 2 km : très local (seuils sensibles à un "
+            "petit relief) ; 5 ou 10 km : contexte plus large. Le disque ne suit pas la topographie : contrairement au bassin, il mélange des "
+            "pixels de versants voisins. Calcul plus long que par bassin quand les points sont nombreux et dispersés, car chaque point a sa fenêtre.\n\n"
+            + refs_md("irip_braud"),
+            list(rs.WINDOW_KM), index=1, key="rs_radius", format_func=lambda x: f"{x:g} km"))
+        zone = {"kind": "window", "radius_km": radius}
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        area = _select_help(
+            "Seuil d'aire drainée",
+            "L'aire drainée amont (MERIT Hydro) repère les pixels où l'écoulement se concentre. **Local** (défaut) : seuil de log10(aire) calculé par "
+            "classification en 2 classes dans la zone. **Fixe** : 2,5 ha (0,025 km²) partout, valeur d'application de l'IRIP citée par Braud et al. "
+            "(2020) ; ce seuil est rattaché à Gally (2018) d'après l'indication du porteur du projet : ce mémoire n'a pas été relu par CatMap. Sur une "
+            "grille de 90 m, un pixel fait 0,81 ha : le seuil de 2,5 ha représente environ 3 pixels, ce qui le rend peu discriminant.\n\n"
+            + refs_md("irip_braud", "gally"),
+            list(rs.AREA_METHODS), key="rs_area", format_func=lambda k: rs.AREA_METHODS[k])
+    with c2:
+        soil = _select_help(
+            "Facteur sol",
+            "**Numéro de courbe** (défaut) : GCN250 (SCS-CN, 250 m, combine occupation du sol et groupe hydrologique) ; favorable si supérieur au seuil "
+            "de la zone (classification en 2 classes), comme la méthode statistique par bassin de l'IRIP. **Groupe hydrologique** : HiHydroSoil v2.0 "
+            "(250 m) ; favorable si groupe D ou double groupe (A/D, B/D, C/D : sol peu perméable à l'état naturel), sans seuil à calculer. "
+            "**Ks** : conductivité hydraulique à saturation de HiHydroSoil v2.0 ; favorable si inférieure à 1e-6 m/s (8,64 cm/j), seuil d'application "
+            "de Braud et al. (2020). Les jeux sont à 250 m : un pixel de sol couvre une trentaine de pixels de relief.\n\n"
+            + refs_md("gcn250", "hihydrosoil", "irip_braud"),
+            list(rs.SOIL_METHODS), key="rs_soil", format_func=lambda k: rs.SOIL_METHODS[k])
+    with c3:
+        accum = _select_help(
+            "Carte d'accumulation",
+            "**Classique** : production amont, aire drainée, pente faible, rupture de pente concave, indice topographique de Beven et Kirkby. "
+            "**Géomorphons** : Barjot, Breil et Braud (2023) remplacent pente, rupture de pente et indice topographique par un indicateur unique "
+            "de forme du relief (10 classes, Geomorpho90m, 90 m), noté 0 à 3 : crête, pic, pente = 0 ; plat, éperon, épaulement = 1 ; creux, "
+            "bas de versant = 2 ; vallée, fosse = 3. CatMap pondère ce score ×3 contre production amont et aire drainée (poids 1 chacune). "
+            "La distance de recherche des géomorphons est celle du jeu Geomorpho90m, non réglable ici.\n\n"
+            + refs_md("barjot", "geomorphons", "amatulli"),
+            list(rs.ACCUM_METHODS), key="rs_accum", format_func=lambda k: rs.ACCUM_METHODS[k])
+    st.caption(f"{len(df)} point(s) lus. Les points voisins du même pixel sont calculés une fois ; par bassin, les seuils d'une unité sont calculés une "
+               "seule fois pour tous ses points. Pour des centaines de milliers de points, comptez de longues minutes ; le niveau 11 est le plus "
+               "économe en calcul avec des points regroupés.")
     with st.expander("Diagnostic des sources (à lancer en cas de problème)"):
         if st.button("Tester Earth Engine et les jeux de données", key="rs_diag_go"):
             ee_p, ee_a = _ee_credentials()
             with st.spinner("Authentification, jeux de données et lieux de contrôle…"):
-                st.session_state["rs_diag"] = rs.diagnose(ee_p, ee_a, radius)
+                st.session_state["rs_diag"] = rs.diagnose(ee_p, ee_a, zone, soil, accum, area)
         if st.session_state.get("rs_diag"):
             _stretch(st.dataframe, pd.DataFrame(st.session_state["rs_diag"]), hide_index=True)
         st.caption("Le tableau n'affiche jamais la clé du compte de service.")
@@ -3492,7 +3562,8 @@ def _ruissellement_section():
         bar = st.progress(0.0)
         try:
             with st.spinner("Lecture des cartes dans Earth Engine…"):
-                res_, summ_ = rs.estimate(df, lat_c, lon_c, radius, ee_p, ee_a, on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+                res_, summ_ = rs.estimate(df, lat_c, lon_c, zone, ee_p, ee_a, on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))),
+                                          soil=soil, accum=accum, area=area)
             st.session_state["rs_result"] = (name, len(df), res_, summ_)
         except (rs.TileError, ValueError) as e:
             st.error(f"Ruissellement : {e}  (utilisez « Diagnostic des sources » pour localiser le problème).")
@@ -3501,11 +3572,12 @@ def _ruissellement_section():
     if not got or got[0] != name or got[1] != len(df):
         return
     _, _, res_, summ_ = got
-    m = st.columns(4)
+    m = st.columns(5)
     m[0].metric("Points", summ_["points"])
     m[1].metric("Pixels calculés", summ_["pixels_uniques"])
-    m[2].metric("Hors terre / couverture", summ_["hors_terre"])
-    m[3].metric("Lots en échec", summ_["echecs"])
+    m[2].metric("Zones distinctes", summ_.get("zones", 0))
+    m[3].metric("Hors terre / couverture", summ_["hors_terre"])
+    m[4].metric("Lots en échec", summ_["echecs"])
     if summ_.get("jeux_absents"):
         st.warning("Jeu(x) de données illisible(s), facteur(s) écarté(s) du score : " + ", ".join(summ_["jeux_absents"]))
     if summ_["repartition"]:
@@ -3513,18 +3585,18 @@ def _ruissellement_section():
     res_ = res_.copy()
     res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
     res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
-    labels = {"globale": "Susceptibilité globale", "classe": "Classe de susceptibilité (1 à 5)", "prod": "Production", "transfert": "Transfert",
-              "accum": "Accumulation"}
+    labels = {"globale": "Susceptibilité globale (0 à 1)", "classe": "Classe de susceptibilité (1 à 5)", "irip": "Score équivalent IRIP (0 à 5)",
+              "prod": "Production", "transfert": "Transfert", "accum": "Accumulation"}
     pick = st.selectbox("Colorer la carte selon", list(labels), key="rs_color", format_func=lambda k: labels[k])
     _runoff_map(res_, rs.COLUMNS[pick])
     out = res_.drop(columns=["lat_f", "lon_f"])
-    new_cols = list(rs.COLUMNS.values()) + list(rs.RAW.values()) + [rs.STATUS]
+    new_cols = list(rs.COLUMNS.values()) + list(rs.ZONE.values()) + list(rs.RAW.values()) + [rs.STATUS]
     exposed = pd.to_numeric(out[rs.COLUMNS["classe"]], errors="coerce") >= 4
     _cross_table(out, new_cols, exposed, "rs_tbl", "Seulement les classes forte et très forte")
     st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_ruissellement.csv", "text/csv", key="rs_dl")
-    st.caption("Indice qualitatif de susceptibilité, relatif au contexte local, pas une probabilité ni une hauteur d'eau. Sources : MERIT Hydro, ESA "
-               "WorldCover, GCN250 via Google Earth Engine (utilisation non commerciale au regard de l'abonnement). Vérifiez leurs conditions de "
-               "réutilisation.")
+    st.caption("Indice qualitatif de susceptibilité, relatif à la zone d'analyse (bassin approché par l'unité de drainage HydroBASINS, ou fenêtre), pas une "
+               "probabilité ni une hauteur d'eau. Sources : MERIT Hydro, ESA WorldCover, GCN250, HiHydroSoil, Geomorpho90m, HydroBASINS via Google Earth "
+               "Engine (utilisation non commerciale au regard de l'abonnement). Vérifiez leurs conditions de réutilisation.")
 
 
 def _wind_catalogue_reader():
@@ -4526,11 +4598,11 @@ def _grele_damage(res):
 
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Débordement et submersion", "Ruissellement pluvial", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
+    tabs = st.tabs(["Débordement et submersion", "Ruissellement", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
     with tabs[0]:
         _safe_tab(_exposition_section, "Débordement et submersion")
     with tabs[1]:
-        _safe_tab(_ruissellement_section, "Ruissellement pluvial")
+        _safe_tab(_ruissellement_section, "Ruissellement")
     with tabs[2]:
         _safe_tab(_wind_section, "Vent & tempête")
     with tabs[3]:
