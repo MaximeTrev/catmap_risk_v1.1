@@ -783,11 +783,37 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("dommage_grele_PAM_eur", o.columns)
         self.assertTrue([c for c in st.calls if c[0] == "altair_chart"])
 
+    def test_runoff_section_end_to_end(self):
+        from catmap import runoff as rs
+
+        class Up:
+            name = "pts.csv"
+            def getvalue(self): return b"name;lat;long\nA;43,62;7,10\nB;40,0;-30,0\n"
+
+        def fake_estimate(df, lat_c, lon_c, radius, ee_p, ee_a, on_progress=None, **k):
+            out = df.copy().reset_index(drop=True)
+            for c in list(rs.COLUMNS.values()) + list(rs.RAW.values()):
+                out[c] = [0.5, None]
+            out[rs.COLUMNS["classe"]] = [4, None]
+            out[rs.STATUS] = ["ok", "hors terre ou hors couverture"]
+            if on_progress:
+                on_progress(1, 1)
+            return out, {"points": 2, "invalides": 0, "pixels_uniques": 2, "lots": 1, "echecs": 0, "hors_terre": 1, "facteurs": ["slope"],
+                         "jeux_absents": ["gcn"], "rayon_km": radius, "repartition": {"forte": 1}}
+        app, st = self.load({"rs_csv_0": Up(), "button:Estimer la susceptibilité": True})
+        with mock.patch.object(rs, "estimate", side_effect=fake_estimate), mock.patch.object(app, "_ev_show_map") as fm:
+            app._ruissellement_section()
+        self.assertFalse([c for c in st.calls if c[0] == "error"], st.calls)
+        self.assertIn("rs_result", st.session_state)
+        self.assertTrue(fm.called)
+        self.assertTrue([c for c in st.calls if c[0] == "warning"])          # jeu absent signalé
+        self.assertTrue([c for c in st.calls if c[0] == "download"])
+
     def test_grele_tab_between_seisme_and_georisques(self):
         app, st = self.load({})
         app.page_risques_climatiques()
         labels = [c[1] for c in st.calls if c[0] == "tabs"][0]
-        self.assertEqual(labels, ["Débordement et submersion", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
+        self.assertEqual(labels, ["Débordement et submersion", "Ruissellement pluvial", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
 
     def test_wind_fit_viewer(self):
         import pandas as pd
