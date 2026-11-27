@@ -56,8 +56,27 @@ REFS = {
     "irip": ["Breil, P., Lagadec, L.-R., & González-Sosa, E. (2016). *Inondation pluviale et développement périurbain*. NOVATECH 2016 "
              "(méthode IRIP : trois cartes production, transfert, accumulation ; facteurs notés 0 ou 1).",
              "Dehotin, J., & Breil, P. (2011). Note technique de la méthode IRIP (Indicateur de Ruissellement Intense Pluvial), Irstea / INRAE "
-             "(note citée par les publications de la méthode ; non consultée pour CatMap, seuils non repris).",
+             "(note citée par les publications de la méthode ; non consultée par CatMap).",
              "DRIEAT Île-de-France. *Guide méthodologique ruissellement* (2023) : description de l'IRIP (cartes qualitatives, sans débit ni hauteur d'eau)."],
+    "irip_braud": ["Braud, I., et al. (2020). A method to use proxy data of runoff-related impacts for the evaluation of a model mapping intense storm "
+                   "runoff hazard: application to the railway context. *Natural Hazards and Earth System Sciences*, 20, 947–962 (application de l'IRIP : "
+                   "seuils de pente et d'indice topographique calculés par zone d'étude par classification en 2 classes ; aire drainée 2,5 ha ; Ks < 1e-6 m/s)."],
+    "gally": ["Gally, T. (2018). *Validation du modèle de ruissellement intense (IRIP)*. Mémoire de M2 Hydroressources, Université Grenoble Alpes. "
+              "hal-03787493 (cité par le porteur du projet comme source du seuil d'aire drainée ; non consulté par CatMap)."],
+    "barjot": ["Barjot, G., Breil, P., & Braud, I. (2023). Substitution des indicateurs topographiques par une approche à l'aide de géomorphons dans la "
+               "méthodologie IRIP. *NOVATECH 2023*, Lyon. hal-04176937 (score de géomorphons de 0 à 3)."],
+    "geomorphons": ["Jasiewicz, J., & Stepinski, T. F. (2013). Geomorphons, a pattern recognition approach to classification and mapping of landforms. "
+                    "*Geomorphology*, 182, 147–156 (référence citée dans Barjot et al., 2023 ; Stepinski & Jasiewicz, 2011, également citée par ces auteurs)."],
+    "amatulli": ["Amatulli, G., et al. (2020). Geomorpho90m, empirical evaluation and accuracy assessment of global high-resolution geomorphometric "
+                 "layers. *Scientific Data*, 7, 162."],
+    "hihydrosoil": ["Simons, G. W. H., Koster, R., & Droogers, P. (2020). *HiHydroSoil v2.0: high resolution soil maps of global hydraulic properties*. "
+                    "FutureWater Report 213 (groupe hydrologique de sol, conductivité hydraulique à saturation ; 250 m)."],
+    "hydrobasins": ["Lehner, B., & Grill, G. (2013). Global river hydrography and network routing: baseline data and new approaches to study the world's "
+                    "large river systems. *Hydrological Processes*, 27(15), 2171–2186 (HydroSHEDS / HydroBASINS, niveaux 1 à 12)."],
+    "zt1987": ["Zevenbergen, L. W., & Thorne, C. R. (1987). Quantitative analysis of land surface topography. *Earth Surface Processes and Landforms*, "
+               "12, 47–56 (courbure du profil ; rupture de pente)."],
+    "rubin": ["Rubin, J. M. (1967). Optimal classification into groups: an approach for solving the taxonomy problem. *Journal of Theoretical Biology*, "
+              "15, 103–144 (classification optimale en 2 classes)."],
     "twi": ["Beven, K. J., & Kirkby, M. J. (1979). A physically based, variable contributing area model of basin hydrology. *Hydrological Sciences "
             "Bulletin*, 24(1), 43–69 (indice topographique ln(a / tan β))."],
     "merit": ["Yamazaki, D., et al. (2019). MERIT Hydro: a high-resolution global hydrography map based on latest topography datasets. *Water Resources "
