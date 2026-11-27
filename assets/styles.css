@@ -155,3 +155,10 @@ div[data-baseweb="tab-highlight"] { background-color: var(--cm-gold) !important;
 .st-key-gr_stop button, .st-key-gr_stop button p, .st-key-gr_stop button span {
     color: #ffffff !important;
 }
+
+
+/* Ruissellement : boutons en texte blanc */
+.st-key-rs_go button, .st-key-rs_go button p, .st-key-rs_go button span,
+.st-key-rs_diag_go button, .st-key-rs_diag_go button p, .st-key-rs_diag_go button span {
+    color: #ffffff !important;
+}
