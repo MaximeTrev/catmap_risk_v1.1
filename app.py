@@ -48,6 +48,7 @@ from catmap import damage as dmg, wind, seismic as sm, hail as hl
 from catmap.references import refs_md
 from catmap import coastalhazard as coast
 from catmap import copernicus as cop
+from catmap import runoff as rs
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -3425,6 +3426,107 @@ def _exposition_section():
                "d'eau sans vagues ni protections locales. Vérifiez les conditions de réutilisation."
                )
 
+def _runoff_map(res, col):
+    import folium
+    pts = res.dropna(subset=["lat_f", "lon_f"])
+    pts = pts[pd.to_numeric(pts[col], errors="coerce").notna()]
+    center = (float(pts["lat_f"].mean()), float(pts["lon_f"].mean())) if len(pts) else (46.6, 2.5)
+    m = _ev_base_map(center, 11 if len(pts) == 1 else 6)
+    shown = pts.head(3000)
+    for _, r in shown.iterrows():
+        v = float(r[col])
+        cls = int(v) if col == rs.COLUMNS["classe"] else 1 + min(4, int(v * 5))
+        tip = f"{r.get('name') or ''} : {rs.LEVELS[cls]} ({v:.2f})" if col != rs.COLUMNS["classe"] else f"{r.get('name') or ''} : {rs.LEVELS[cls]}"
+        folium.CircleMarker([r["lat_f"], r["lon_f"]], radius=7, color="#222", weight=1, fill=True, fill_color=rs.COLORS[cls], fill_opacity=0.9,
+                            tooltip=html_escape(tip)).add_to(m)
+    if len(shown) > 1:
+        m.fit_bounds([[shown["lat_f"].min(), shown["lon_f"].min()], [shown["lat_f"].max(), shown["lon_f"].max()]])
+    _ev_show_map(m, "rs_map")
+    legend = "".join(f'<span style="display:inline-block;width:.8rem;height:.8rem;background:{rs.COLORS[k]};border:1px solid #222;margin:0 .3rem 0 .8rem">'
+                     f'</span>{rs.LEVELS[k]}' for k in sorted(rs.COLORS))
+    st.markdown(f"<div style='font-size:.8rem'>Classe de susceptibilité :{legend}</div>", unsafe_allow_html=True)
+    if len(pts) > 3000:
+        st.caption(f"Carte limitée aux 3000 premiers points sur {len(pts)} ; le tableau et le CSV contiennent tous les points.")
+
+
+def _ruissellement_section():
+    st.subheader("Ruissellement pluvial : susceptibilité par point")
+    st.markdown("Indice de **susceptibilité** au ruissellement pluvial de chaque point, croisant trois cartes de même poids : **production**, "
+                "**transfert** et **accumulation**, calculées sur la topographie mondiale (≈ 90 m), l'occupation du sol et le sol. C'est un indice "
+                "qualitatif, sans pluie ni hauteur d'eau (étapes suivantes).")
+    _help_line("Méthode, hypothèses et références",
+               "**Simplification de la méthode IRIP** (Indicateur de Ruissellement Intense Pluvial, Irstea / INRAE) : trois cartes (production, transfert, "
+               "accumulation) de facteurs notés 0 (défavorable) ou 1 (favorable au ruissellement). L'IRIP original utilise 5 facteurs par carte, dont "
+               "la profondeur et l'érodabilité du sol, la compacité et les axes linéaires, notés par une analyse statistique dont les seuils sont dans "
+               "sa note technique ; CatMap ne les reprend pas.\n\n"
+               "**Données mondiales libres lues dans Earth Engine** : altitude et aire drainée amont (MERIT Hydro, 90 m) ; occupation du sol (ESA "
+               "WorldCover, 10 m) ; numéro de courbe SCS (GCN250, 250 m) qui combine occupation du sol et groupe hydrologique de sol.\n\n"
+               "**Facteurs** (1 si la valeur du pixel dépasse le quartile supérieur de la fenêtre locale, ou est sous le quartile inférieur pour la "
+               "pente en accumulation) : *production* = pente forte, sol cultivé / bâti / nu, numéro de courbe fort ; *transfert* = production, pente "
+               "forte, aire drainée forte (axe d'écoulement) ; *accumulation* = production, aire drainée forte, pente faible, concavité (rupture de "
+               "pente), indice topographique ln(a/tan β) fort. Chaque carte est ramenée à [0, 1] (facteurs favorables / facteurs disponibles), puis "
+               "la susceptibilité globale est la **moyenne des trois cartes à poids égaux**, répartie en 5 classes égales.\n\n"
+               "**Limites** : les seuils relatifs à la fenêtre locale sont une convention CatMap, pas ceux de l'IRIP ; l'indice est relatif au "
+               "contexte local (un terrain plat partout n'a pas de pixel plus favorable que les autres) ; le MNT de 90 m ne voit ni le bâti, ni le "
+               "réseau pluvial ; un point en mer ou hors couverture (60°S à 90°N) n'a pas de valeur. L'IRIP est qualitatif : il ne donne ni débit, "
+               "ni hauteur d'eau.\n\n**Conditions** : accès à Earth Engine en utilisation non commerciale au regard de l'abonnement du projet "
+               "(revérification périodique demandée par Google).\n\n" + refs_md("irip", "twi", "merit", "worldcover", "gcn250", "gee"),
+               wide=True, label_style="font-size:.875rem")
+    df, lat_c, lon_c, name = _points_input("rs_")
+    if df is None:
+        return
+    radius = float(st.selectbox("Fenêtre locale pour les seuils (rayon, km)", list(rs.RADII_KM), index=1, key="rs_radius",
+                                format_func=lambda x: f"{x:g} km"))
+    st.caption(f"{len(df)} point(s) lus. Les points voisins du même pixel sont calculés une fois ; les lots de {rs.CHUNK} points sont traités en parallèle. "
+               "Pour des centaines de milliers de points, comptez de longues minutes.")
+    with st.expander("Diagnostic des sources (à lancer en cas de problème)"):
+        if st.button("Tester Earth Engine et les jeux de données", key="rs_diag_go"):
+            ee_p, ee_a = _ee_credentials()
+            with st.spinner("Authentification, jeux de données et lieux de contrôle…"):
+                st.session_state["rs_diag"] = rs.diagnose(ee_p, ee_a, radius)
+        if st.session_state.get("rs_diag"):
+            _stretch(st.dataframe, pd.DataFrame(st.session_state["rs_diag"]), hide_index=True)
+        st.caption("Le tableau n'affiche jamais la clé du compte de service.")
+    if st.button("Estimer la susceptibilité", type="primary", key="rs_go"):
+        ee_p, ee_a = _ee_credentials()
+        bar = st.progress(0.0)
+        try:
+            with st.spinner("Lecture des cartes dans Earth Engine…"):
+                res_, summ_ = rs.estimate(df, lat_c, lon_c, radius, ee_p, ee_a, on_progress=lambda i, n: bar.progress(min(1.0, i / max(1, n))))
+            st.session_state["rs_result"] = (name, len(df), res_, summ_)
+        except (rs.TileError, ValueError) as e:
+            st.error(f"Ruissellement : {e}  (utilisez « Diagnostic des sources » pour localiser le problème).")
+        bar.empty()
+    got = st.session_state.get("rs_result")
+    if not got or got[0] != name or got[1] != len(df):
+        return
+    _, _, res_, summ_ = got
+    m = st.columns(4)
+    m[0].metric("Points", summ_["points"])
+    m[1].metric("Pixels calculés", summ_["pixels_uniques"])
+    m[2].metric("Hors terre / couverture", summ_["hors_terre"])
+    m[3].metric("Lots en échec", summ_["echecs"])
+    if summ_.get("jeux_absents"):
+        st.warning("Jeu(x) de données illisible(s), facteur(s) écarté(s) du score : " + ", ".join(summ_["jeux_absents"]))
+    if summ_["repartition"]:
+        st.caption("Répartition des classes : " + " ; ".join(f"{k} : {v}" for k, v in summ_["repartition"].items()))
+    res_ = res_.copy()
+    res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
+    res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
+    labels = {"globale": "Susceptibilité globale", "classe": "Classe de susceptibilité (1 à 5)", "prod": "Production", "transfert": "Transfert",
+              "accum": "Accumulation"}
+    pick = st.selectbox("Colorer la carte selon", list(labels), key="rs_color", format_func=lambda k: labels[k])
+    _runoff_map(res_, rs.COLUMNS[pick])
+    out = res_.drop(columns=["lat_f", "lon_f"])
+    new_cols = list(rs.COLUMNS.values()) + list(rs.RAW.values()) + [rs.STATUS]
+    exposed = pd.to_numeric(out[rs.COLUMNS["classe"]], errors="coerce") >= 4
+    _cross_table(out, new_cols, exposed, "rs_tbl", "Seulement les classes forte et très forte")
+    st.download_button("Télécharger le résultat (CSV)", _csv_bytes(out), "catmap_ruissellement.csv", "text/csv", key="rs_dl")
+    st.caption("Indice qualitatif de susceptibilité, relatif au contexte local, pas une probabilité ni une hauteur d'eau. Sources : MERIT Hydro, ESA "
+               "WorldCover, GCN250 via Google Earth Engine (utilisation non commerciale au regard de l'abonnement). Vérifiez leurs conditions de "
+               "réutilisation.")
+
+
 def _wind_catalogue_reader():
     """Lecture facultative des descriptions du catalogue Copernicus (aucune clé requise)."""
     if st.button("Lire le catalogue Copernicus", key="cop_form_go", type="primary"):
@@ -4424,16 +4526,18 @@ def _grele_damage(res):
 
 def page_risques_climatiques():
     st.title("Risque climatiques")
-    tabs = st.tabs(["Débordement et submersion", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
+    tabs = st.tabs(["Débordement et submersion", "Ruissellement pluvial", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
     with tabs[0]:
         _safe_tab(_exposition_section, "Débordement et submersion")
     with tabs[1]:
-        _safe_tab(_wind_section, "Vent & tempête")
+        _safe_tab(_ruissellement_section, "Ruissellement pluvial")
     with tabs[2]:
-        _safe_tab(_seisme_section, "Séisme")
+        _safe_tab(_wind_section, "Vent & tempête")
     with tabs[3]:
-        _safe_tab(_grele_section, "Grêle")
+        _safe_tab(_seisme_section, "Séisme")
     with tabs[4]:
+        _safe_tab(_grele_section, "Grêle")
+    with tabs[5]:
         _safe_tab(_georisques_section, "Géorisques")
 
 
