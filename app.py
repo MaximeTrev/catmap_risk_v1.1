@@ -3455,9 +3455,9 @@ def _runoff_map(res, col):
         st.caption(f"Carte limitée aux 3000 premiers points sur {len(pts)} ; le tableau et le CSV contiennent tous les points.")
 
 
-def _select_help(label: str, help_text: str, options, **kw):
+def _select_help(label: str, help_text: str, options, left: bool = False, **kw):
     """``selectbox`` précédée d'une ligne de titre avec infobulle « ? » au survol."""
-    _help_line(html.escape(label), help_text, wide=True, label_style="font-size:.875rem")
+    _help_line(html.escape(label), help_text, wide=True, left=left, label_style="font-size:.875rem")
     return st.selectbox(label, options, label_visibility="collapsed", **kw)
 
 
@@ -3522,7 +3522,7 @@ def _ruissellement_section():
             "Seuil d'aire drainée",
             "L'aire drainée amont (MERIT Hydro) repère les pixels où l'écoulement se concentre. **Local** (défaut) : seuil de log10(aire) calculé par "
             "classification en 2 classes dans la zone. **Fixe** : 2,5 ha (0,025 km²) partout, valeur d'application de l'IRIP citée par Braud et al. "
-            "(2020) ; ce seuil est rattaché à Gally (2018) d'après l'indication du porteur du projet : ce mémoire n'a pas été relu par CatMap. Sur une "
+            "(2020) et rattaché à Gally (2018). Sur une "
             "grille de 90 m, un pixel fait 0,81 ha : le seuil de 2,5 ha représente environ 3 pixels, ce qui le rend peu discriminant.\n\n"
             + refs_md("irip_braud", "gally"),
             list(rs.AREA_METHODS), key="rs_area", format_func=lambda k: rs.AREA_METHODS[k])
@@ -3545,7 +3545,7 @@ def _ruissellement_section():
             "bas de versant = 2 ; vallée, fosse = 3. CatMap pondère ce score ×3 contre production amont et aire drainée (poids 1 chacune). "
             "La distance de recherche des géomorphons est celle du jeu Geomorpho90m, non réglable ici.\n\n"
             + refs_md("barjot", "geomorphons", "amatulli"),
-            list(rs.ACCUM_METHODS), key="rs_accum", format_func=lambda k: rs.ACCUM_METHODS[k])
+            list(rs.ACCUM_METHODS), left=True, key="rs_accum", format_func=lambda k: rs.ACCUM_METHODS[k])
     st.caption(f"{len(df)} point(s) lus. Les points voisins du même pixel sont calculés une fois ; par bassin, les seuils d'une unité sont calculés une "
                "seule fois pour tous ses points. Pour des centaines de milliers de points, comptez de longues minutes ; le niveau 11 est le plus "
                "économe en calcul avec des points regroupés.")
@@ -3585,7 +3585,7 @@ def _ruissellement_section():
     res_ = res_.copy()
     res_["lat_f"] = pd.to_numeric(res_[lat_c], errors="coerce")
     res_["lon_f"] = pd.to_numeric(res_[lon_c], errors="coerce")
-    labels = {"globale": "Susceptibilité globale (0 à 1)", "classe": "Classe de susceptibilité (1 à 5)", "irip": "Score équivalent IRIP (0 à 5)",
+    labels = {"classe": "Classe de susceptibilité (1 à 5)", "globale": "Susceptibilité globale (0 à 1)", "irip": "Score équivalent IRIP (0 à 5)",
               "prod": "Production", "transfert": "Transfert", "accum": "Accumulation"}
     pick = st.selectbox("Colorer la carte selon", list(labels), key="rs_color", format_func=lambda k: labels[k])
     _runoff_map(res_, rs.COLUMNS[pick])
