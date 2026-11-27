@@ -790,16 +790,16 @@ class TestAppSmoke(unittest.TestCase):
             name = "pts.csv"
             def getvalue(self): return b"name;lat;long\nA;43,62;7,10\nB;40,0;-30,0\n"
 
-        def fake_estimate(df, lat_c, lon_c, radius, ee_p, ee_a, on_progress=None, **k):
+        def fake_estimate(df, lat_c, lon_c, zone, ee_p, ee_a, on_progress=None, **k):
             out = df.copy().reset_index(drop=True)
-            for c in list(rs.COLUMNS.values()) + list(rs.RAW.values()):
+            for c in list(rs.COLUMNS.values()) + list(rs.RAW.values()) + list(rs.ZONE.values()):
                 out[c] = [0.5, None]
             out[rs.COLUMNS["classe"]] = [4, None]
             out[rs.STATUS] = ["ok", "hors terre ou hors couverture"]
             if on_progress:
                 on_progress(1, 1)
             return out, {"points": 2, "invalides": 0, "pixels_uniques": 2, "lots": 1, "echecs": 0, "hors_terre": 1, "facteurs": ["slope"],
-                         "jeux_absents": ["gcn"], "rayon_km": radius, "repartition": {"forte": 1}}
+                         "jeux_absents": ["gcn"], "zones": 1, "zone": zone, "repartition": {"forte": 1}}
         app, st = self.load({"rs_csv_0": Up(), "button:Estimer la susceptibilité": True})
         with mock.patch.object(rs, "estimate", side_effect=fake_estimate), mock.patch.object(app, "_ev_show_map") as fm:
             app._ruissellement_section()
@@ -813,7 +813,7 @@ class TestAppSmoke(unittest.TestCase):
         app, st = self.load({})
         app.page_risques_climatiques()
         labels = [c[1] for c in st.calls if c[0] == "tabs"][0]
-        self.assertEqual(labels, ["Débordement et submersion", "Ruissellement pluvial", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
+        self.assertEqual(labels, ["Débordement et submersion", "Ruissellement", "Vent & tempête", "Séisme", "Grêle", "Géorisques"])
 
     def test_wind_fit_viewer(self):
         import pandas as pd
