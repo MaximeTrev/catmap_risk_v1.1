@@ -53,6 +53,20 @@ REFS = {
               "pas de 3 h)."],
     "weibull": ["Makkonen, L. (2006). Plotting positions in extreme value analysis. *Journal of Applied Meteorology and Climatology*, 45(2), 334–340 "
                 "(positions de Weibull i/(n+1) utilisées pour le quantile empirique)."],
+    "irip": ["Breil, P., Lagadec, L.-R., & González-Sosa, E. (2016). *Inondation pluviale et développement périurbain*. NOVATECH 2016 "
+             "(méthode IRIP : trois cartes production, transfert, accumulation ; facteurs notés 0 ou 1).",
+             "Dehotin, J., & Breil, P. (2011). Note technique de la méthode IRIP (Indicateur de Ruissellement Intense Pluvial), Irstea / INRAE "
+             "(note citée par les publications de la méthode ; non consultée pour CatMap, seuils non repris).",
+             "DRIEAT Île-de-France. *Guide méthodologique ruissellement* (2023) : description de l'IRIP (cartes qualitatives, sans débit ni hauteur d'eau)."],
+    "twi": ["Beven, K. J., & Kirkby, M. J. (1979). A physically based, variable contributing area model of basin hydrology. *Hydrological Sciences "
+            "Bulletin*, 24(1), 43–69 (indice topographique ln(a / tan β))."],
+    "merit": ["Yamazaki, D., et al. (2019). MERIT Hydro: a high-resolution global hydrography map based on latest topography datasets. *Water Resources "
+              "Research*, 55, 5053–5073 (altitude et aire drainée amont, 90 m)."],
+    "worldcover": ["Zanaga, D., et al. (2022). *ESA WorldCover 10 m 2021 v200*. doi:10.5281/zenodo.7254221 (CC BY 4.0)."],
+    "gcn250": ["Jaafar, H. H., Ahmad, F. A., & El Beyrouthy, N. (2019). GCN250, new global gridded curve numbers for hydrologic modeling and design. "
+               "*Scientific Data*, 6, 145 (numéros de courbe SCS à 250 m ; licence CC BY 4.0)."],
+    "gee": ["Gorelick, N., et al. (2017). Google Earth Engine: planetary-scale geospatial analysis for everyone. *Remote Sensing of Environment*, "
+            "202, 18-27."],
     "aal": ["Principe de la perte annuelle moyenne : intégration de la perte par rapport à la probabilité annuelle de dépassement "
             "(méthode des trapèzes entre les périodes de retour retenues, sans extrapolation) ; voir par exemple Grossi, P., & Kunreuther, H. (2005), "
             "*Catastrophe Modeling: A New Approach to Managing Risk*, Springer."],
