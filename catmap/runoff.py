@@ -264,7 +264,7 @@ def build_layers(ee, use: dict):
 
 def _point_values(ee, layers, pts: list, names: list) -> dict:
     feats = [ee.Feature(ee.Geometry.Point([lo, la]), {"k": int(k)}) for k, lo, la in pts]
-    res = layers.reduceRegions(collection=ee.FeatureCollection(feats), reducer=ee.Reducer.first().forEach(names), scale=SCALE_M).getInfo()
+    res = layers.select(names).reduceRegions(collection=ee.FeatureCollection(feats), reducer=ee.Reducer.first().forEach(names), scale=SCALE_M).getInfo()
     out = {int(k): {} for k, _, _ in pts}
     for f in res.get("features", []):
         pr = f.get("properties", {})
@@ -452,7 +452,7 @@ def diagnose(ee_project: Optional[str], ee_account, zone: Optional[dict] = None,
         df = pd.DataFrame({"lon": [c[0] for c in places.values()], "lat": [c[1] for c in places.values()]})
         res, s = estimate(df, "lat", "lon", zone, ee_project, ee_account, soil=soil, accum=accum, area=area, workers=1)
         for name, (_, r) in zip(places, res.iterrows()):
-            if r[STATUS] != "ok" and "mer" in name:
+            if r[STATUS].startswith("hors terre") and "mer" in name:
                 rows.append({"étape": name, "résultat": "OK", "détail": "attendu : aucune valeur en mer (" + r[STATUS] + ")"})
             elif r[STATUS] != "ok":
                 rows.append({"étape": name, "résultat": "À CONTRÔLER", "détail": r[STATUS]})
